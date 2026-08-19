@@ -2,7 +2,8 @@
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-dtb=/boot/dtb/rockchip/rk3399-rock-pi-4b-plus.dtb
+armbian_env=${ARMBIAN_ENV:-/boot/armbianEnv.txt}
+dtb_root=${DTB_ROOT:-/boot/dtb}
 overlay=$repo_root/overlays/rockpi-4b-plus-rpi-touchscreen.dts
 output=$repo_root/build/rockpi-4b-plus-rpi-touchscreen.dtbo
 workdir=$(mktemp -d)
@@ -71,6 +72,53 @@ require_equal()
 		exit 1
 	}
 }
+
+active_dtb()
+{
+	env_file=$1
+	dtb_directory=$2
+
+	[ -r "$env_file" ] || {
+		printf 'FAIL: cannot read Armbian environment: %s\n' "$env_file" >&2
+		return 1
+	}
+
+	fdtfile=$(sed -n 's/^[[:space:]]*fdtfile[[:space:]]*=[[:space:]]*\([^[:space:]#][^[:space:]#]*\).*$/\1/p' "$env_file" | tail -n 1)
+	[ -n "$fdtfile" ] || {
+		printf 'FAIL: fdtfile is absent or empty in Armbian environment: %s\n' "$env_file" >&2
+		return 1
+	}
+
+	case $fdtfile in
+	/*) printf '%s\n' "$fdtfile" ;;
+	*) printf '%s/%s\n' "$dtb_directory" "$fdtfile" ;;
+	esac
+}
+
+assert_active_dtb_resolution()
+{
+	resolution_env=$workdir/armbianEnv-resolution
+	missing_fdtfile_env=$workdir/armbianEnv-no-fdtfile
+
+	printf '%s\n' 'fdtfile=rockchip/rk3399-rock-pi-4b-plus.dtb' > "$resolution_env"
+	require_equal "$(active_dtb "$resolution_env" /boot/dtb)" \
+		'/boot/dtb/rockchip/rk3399-rock-pi-4b-plus.dtb' \
+		'configured fdtfile resolves below the DTB root'
+
+	printf '%s\n' '# fdtfile intentionally absent' > "$missing_fdtfile_env"
+	if active_dtb "$missing_fdtfile_env" /boot/dtb >/dev/null 2>&1; then
+		printf 'FAIL: missing fdtfile was accepted\n' >&2
+		exit 1
+	fi
+	if active_dtb "$workdir/no-such-armbianEnv" /boot/dtb >/dev/null 2>&1; then
+		printf 'FAIL: unreadable armbianEnv was accepted\n' >&2
+		exit 1
+	fi
+	printf 'PASS: active DTB configuration resolution\n'
+}
+
+dtb=$(active_dtb "$armbian_env" "$dtb_root")
+assert_active_dtb_resolution
 
 [ -f "$dtb" ] || {
 	printf 'FAIL: active Rock Pi 4B+ DTB not found: %s\n' "$dtb" >&2
