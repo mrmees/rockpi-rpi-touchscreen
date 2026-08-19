@@ -5,7 +5,7 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$script_dir/common.sh"
 
 require_root
-require_command awk chmod cp date dirname dkms grep mkdir mktemp mv rm sed sha256sum tail
+require_command awk chmod cp date dirname dkms grep mkdir mktemp mv rm rmdir sed sha256sum tail
 
 validator=${VALIDATE_SCRIPT:-$script_dir/validate.sh}
 [ -x "$validator" ] || [ -f "$validator" ] || die "validation script not found: $validator"
@@ -20,6 +20,9 @@ overlay_destination=$OVERLAY_DIRECTORY/$OVERLAY_NAME.dtbo
 [ -f "$ARMBIAN_ENV" ] || die "boot configuration not found: $ARMBIAN_ENV"
 
 source_created=0
+source_swapped=0
+stage_directory=
+previous_source_directory=
 overlay_created=0
 dkms_registration_created=0
 backup_created=0
@@ -43,23 +46,40 @@ rollback()
 		if [ "$source_created" -eq 1 ]; then
 			rm -rf "$PROJECT_SOURCE_DIR" || true
 		fi
+		if [ "$source_swapped" -eq 1 ] && [ -n "$previous_source_directory" ] && [ -d "$previous_source_directory" ]; then
+			rm -rf "$PROJECT_SOURCE_DIR" || true
+			mv "$previous_source_directory" "$PROJECT_SOURCE_DIR" || true
+		fi
+		if [ -n "$stage_directory" ] && [ -d "$stage_directory" ]; then
+			rm -rf "$stage_directory" || true
+		fi
 	fi
 	exit "$status"
 }
 trap rollback EXIT HUP INT TERM
 
-if [ ! -e "$PROJECT_SOURCE_DIR" ]; then
-	mkdir -p "${DKMS_TREE:-/usr/src}"
-	stage_directory=$(mktemp -d "${DKMS_TREE:-/usr/src}/.${PROJECT_NAME}.XXXXXX")
-	trap 'rm -rf "$stage_directory"; rollback' HUP INT TERM EXIT
-	cp -a "$repo_root/." "$stage_directory/"
-	mv "$stage_directory" "$PROJECT_SOURCE_DIR"
-	source_created=1
-	trap rollback EXIT HUP INT TERM
-else
+source_parent=$(dirname -- "$PROJECT_SOURCE_DIR")
+mkdir -p "$source_parent"
+if [ -e "$PROJECT_SOURCE_DIR" ]; then
 	[ -d "$PROJECT_SOURCE_DIR" ] || die "DKMS source path is not a directory: $PROJECT_SOURCE_DIR"
 	[ -f "$PROJECT_SOURCE_DIR/dkms.conf" ] || die "DKMS source path is not owned by this project: $PROJECT_SOURCE_DIR"
-	cp -a "$repo_root/." "$PROJECT_SOURCE_DIR/"
+fi
+stage_directory=$(mktemp -d "$source_parent/.${PROJECT_NAME}.stage.XXXXXX")
+cp -a "$repo_root/." "$stage_directory/"
+[ -f "$stage_directory/dkms.conf" ] || die "staged DKMS source is missing dkms.conf"
+[ -x "$stage_directory/scripts/dkms-make.sh" ] || die "staged DKMS source is missing compiler helper"
+
+if [ ! -e "$PROJECT_SOURCE_DIR" ]; then
+	mv "$stage_directory" "$PROJECT_SOURCE_DIR"
+	stage_directory=
+	source_created=1
+else
+	previous_source_directory=$(mktemp -d "$source_parent/.${PROJECT_NAME}.previous.XXXXXX")
+	rmdir "$previous_source_directory"
+	mv "$PROJECT_SOURCE_DIR" "$previous_source_directory"
+	source_swapped=1
+	mv "$stage_directory" "$PROJECT_SOURCE_DIR"
+	stage_directory=
 fi
 
 if dkms add -m "$PROJECT_NAME" -v "$PROJECT_VERSION"; then
@@ -83,6 +103,11 @@ if [ ! -e "$backup_file" ]; then
 fi
 add_overlay_token "$ARMBIAN_ENV" "$OVERLAY_TOKEN"
 completed=1
+if [ "$source_swapped" -eq 1 ]; then
+	rm -rf "$previous_source_directory"
+	previous_source_directory=
+	source_swapped=0
+fi
 trap - EXIT HUP INT TERM
 
 printf 'PASS: installed %s DKMS package and %s\n' "$PROJECT_NAME" "$OVERLAY_TOKEN"

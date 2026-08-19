@@ -44,6 +44,20 @@ cat > "$sandbox/bin/dkms" <<'EOF'
 set -eu
 printf '%s\n' "$*" >> "${DKMS_LOG:?}"
 [ -z "${DKMS_PATH_LOG:-}" ] || printf '%s\n' "$PATH" > "$DKMS_PATH_LOG"
+case $1 in
+add)
+	if [ -e "${DKMS_STATE:?}" ]; then
+		exit 1
+	fi
+	: > "${DKMS_STATE:?}"
+	;;
+status)
+	[ -e "${DKMS_STATE:?}" ] && printf '%s\n' 'rockpi-rpi-touchscreen/0.1.0, test-kernel, aarch64: installed'
+	;;
+remove)
+	rm -f "${DKMS_STATE:?}"
+	;;
+esac
 if [ "${DKMS_FAIL_ON:-}" = "$1" ]; then
 	exit 1
 fi
@@ -74,7 +88,7 @@ fi
 exec /usr/bin/install "$@"
 EOF
 	chmod +x "$sandbox/bin/install"
-	cat > "$sandbox/bin/mv" <<'EOF'
+cat > "$sandbox/bin/mv" <<'EOF'
 #!/bin/sh
 set -eu
 last=
@@ -82,6 +96,9 @@ for argument do
 	last=$argument
 done
 printf '%s\n' "$*" >> "${MV_LOG:?}"
+if [ -n "${MV_FAIL_SOURCE:-}" ] && [ "$1" = "$MV_FAIL_SOURCE" ]; then
+	exit 1
+fi
 if [ -n "${MV_FAIL_TARGET:-}" ] && [ "$last" = "$MV_FAIL_TARGET" ] &&
 	[ ! -e "${MV_FAIL_ONCE_MARKER:?}" ]; then
 	: > "$MV_FAIL_ONCE_MARKER"
@@ -89,7 +106,18 @@ if [ -n "${MV_FAIL_TARGET:-}" ] && [ "$last" = "$MV_FAIL_TARGET" ] &&
 fi
 exec /bin/mv "$@"
 EOF
-	chmod +x "$sandbox/bin/mv"
+chmod +x "$sandbox/bin/mv"
+	cat > "$sandbox/bin/cp" <<'EOF'
+#!/bin/sh
+set -eu
+for argument do
+	if [ "${CP_FAIL_ARCHIVE:-}" = 1 ] && [ "$argument" = '-a' ]; then
+		exit 1
+	fi
+done
+exec /bin/cp "$@"
+EOF
+	chmod +x "$sandbox/bin/cp"
 	cat > "$sandbox/validate-pass.sh" <<'EOF'
 #!/bin/sh
 set -eu
@@ -115,7 +143,7 @@ run_install()
 	MODULES_DIR="$sandbox/modules" KERNEL_RELEASE=test-kernel \
 	BUILD_DIR="$sandbox/build" BACKUP_PATH="$sandbox/boot/armbianEnv.txt.rockpi-rpi-touchscreen.bak" \
 	VALIDATE_SCRIPT="$validator" VALIDATE_LOG="$sandbox/validate.log" \
-	DKMS_LOG="$sandbox/dkms.log" DKMS_PATH_LOG="$sandbox/dkms.path" \
+	DKMS_LOG="$sandbox/dkms.log" DKMS_PATH_LOG="$sandbox/dkms.path" DKMS_STATE="$sandbox/dkms.state" \
 	MV_LOG="$sandbox/mv.log" PATH="$sandbox/bin:$PATH" \
 	sh "$repo_root/scripts/install.sh" "$@"
 }
@@ -126,7 +154,8 @@ run_uninstall()
 	shift
 	BOOT_DIR="$sandbox/boot" DKMS_TREE="$sandbox/usr-src" \
 	MODULES_DIR="$sandbox/modules" KERNEL_RELEASE=test-kernel \
-	DKMS_LOG="$sandbox/dkms.log" MV_LOG="$sandbox/mv.log" PATH="$sandbox/bin:$PATH" \
+	DKMS_LOG="$sandbox/dkms.log" DKMS_STATE="$sandbox/dkms.state" \
+	MV_LOG="$sandbox/mv.log" PATH="$sandbox/bin:$PATH" \
 	sh "$repo_root/scripts/uninstall.sh" "$@"
 }
 
@@ -221,6 +250,65 @@ test_reinstall_refreshes_the_owned_dkms_source_tree()
 	printf 'PASS: reinstall refreshes the owned DKMS source tree\n'
 }
 
+source_snapshot()
+{
+	(
+		cd "$1"
+		find . -type f -exec sha256sum {} \; | sort
+	)
+}
+
+assert_refresh_failure_preserves_source_and_boot()
+{
+	sandbox=$1
+	failure=$2
+	make_sandbox "$sandbox"
+	run_install "$sandbox" "$sandbox/validate-pass.sh"
+	source=$sandbox/usr-src/rockpi-rpi-touchscreen-0.1.0
+	printf '%s\n' 'old registered source' > "$source/old-source-sentinel"
+	source_before=$(source_snapshot "$source")
+	boot_before=$(sha256sum "$sandbox/boot/armbianEnv.txt" | awk '{print $1}')
+
+	if "$failure" "$sandbox"; then
+		fail 'refresh failure was accepted'
+	fi
+	assert_equal "$(source_snapshot "$source")" "$source_before" \
+		'failed refresh restores the registered source byte-for-byte'
+	assert_equal "$(sha256sum "$sandbox/boot/armbianEnv.txt" | awk '{print $1}')" "$boot_before" \
+		'failed refresh leaves boot configuration unchanged'
+}
+
+test_refresh_copy_failure_preserves_registered_source()
+{
+	refresh_with_copy_failure()
+	{
+		CP_FAIL_ARCHIVE=1 run_install "$1" "$1/validate-pass.sh"
+	}
+	assert_refresh_failure_preserves_source_and_boot "$workdir/refresh-copy-failure" refresh_with_copy_failure
+	printf 'PASS: refresh copy failure preserves registered source and boot configuration\n'
+}
+
+test_refresh_swap_failure_preserves_registered_source()
+{
+	refresh_with_swap_failure()
+	{
+		source=$1/usr-src/rockpi-rpi-touchscreen-0.1.0
+		MV_FAIL_SOURCE=$source run_install "$1" "$1/validate-pass.sh"
+	}
+	assert_refresh_failure_preserves_source_and_boot "$workdir/refresh-swap-failure" refresh_with_swap_failure
+	printf 'PASS: refresh swap failure preserves registered source and boot configuration\n'
+}
+
+test_refresh_post_swap_dkms_failure_restores_registered_source()
+{
+	refresh_with_dkms_failure()
+	{
+		DKMS_FAIL_ON=build run_install "$1" "$1/validate-pass.sh"
+	}
+	assert_refresh_failure_preserves_source_and_boot "$workdir/refresh-dkms-failure" refresh_with_dkms_failure
+	printf 'PASS: refresh post-swap DKMS failure restores registered source and boot configuration\n'
+}
+
 test_dkms_make_command_suppresses_automatic_kernelrelease()
 {
 	grep -Fqx "MAKE[0]=\"'sh' scripts/dkms-make.sh \${kernelver} make KDIR=/lib/modules/\${kernelver}/build modules\"" "$repo_root/dkms.conf" ||
@@ -288,6 +376,9 @@ test_post_backup_failure_rolls_back_owned_assets_and_boot_configuration()
 
 test_install_is_idempotent_and_preserves_unrelated_boot_text
 test_reinstall_refreshes_the_owned_dkms_source_tree
+test_refresh_copy_failure_preserves_registered_source
+test_refresh_swap_failure_preserves_registered_source
+test_refresh_post_swap_dkms_failure_restores_registered_source
 test_dkms_make_command_suppresses_automatic_kernelrelease
 test_uninstall_removes_only_project_token_and_dry_run_is_scoped
 test_failed_validation_does_not_mutate_boot_configuration
