@@ -70,13 +70,18 @@ case $input in
 	;;
 *merged.dtb)
 	if [ "${MERGED_VARIANT:-valid}" = 'dsi0-disabled' ]; then
-		dsi0_status=disabled
+		dsi0_status='status = "disabled";'
+	elif [ "${MERGED_VARIANT:-valid}" = 'dsi0-nested-status' ]; then
+		dsi0_status=
 	else
-		dsi0_status=okay
+		dsi0_status='status = "okay";'
 	fi
 	cat > "$output" <<EOF_DTS
 dsi@ff960000 {
-	status = "$dsi0_status";
+	$dsi0_status
+	child {
+		status = "okay";
+	};
 };
 dsi@ff968000 {
 	status = "okay";
@@ -204,6 +209,28 @@ test_validate_uses_kernel_build_for_clean_and_scoped_merged_tree_checks()
 	printf 'PASS: scoped merged-tree checks and KDIR clean\n'
 }
 
+test_nested_status_cannot_satisfy_direct_parent_check()
+{
+	sandbox=$workdir/direct-parent-status
+	make_validate_sandbox "$sandbox"
+	if MERGED_VARIANT=dsi0-nested-status run_validate "$sandbox"; then
+		fail 'nested child status was accepted as DSI0 parent status'
+	fi
+	printf 'PASS: status checks require the direct parent\n'
+}
+
+test_validator_atomically_replaces_read_only_dtbo()
+{
+	sandbox=$workdir/read-only-dtbo
+	make_validate_sandbox "$sandbox"
+	: > "$sandbox/build/rockpi-4b-plus-rpi-touchscreen.dtbo"
+	chmod 0444 "$sandbox/build/rockpi-4b-plus-rpi-touchscreen.dtbo"
+	run_validate "$sandbox"
+	[ -w "$sandbox/build/rockpi-4b-plus-rpi-touchscreen.dtbo" ] ||
+		fail 'validator did not replace the read-only DTBO with a writable artifact'
+	printf 'PASS: validator atomically replaces a read-only DTBO\n'
+}
+
 test_validate_uses_the_kernel_recorded_compiler()
 {
 	sandbox=$workdir/kernel-compiler
@@ -272,6 +299,8 @@ test_overlay_warning_fails_validation
 test_unexpected_base_dtb_warning_fails_validation
 test_documented_base_dtb_diagnostics_are_filtered
 test_validate_uses_kernel_build_for_clean_and_scoped_merged_tree_checks
+test_nested_status_cannot_satisfy_direct_parent_check
+test_validator_atomically_replaces_read_only_dtbo
 test_validate_uses_the_kernel_recorded_compiler
 test_versioned_compiler_is_shimmed_to_the_kernel_recorded_name
 test_unmatched_kernel_compiler_is_rejected_before_module_build

@@ -126,7 +126,7 @@ calls `cancel_delayed_work_sync()`. Use managed allocations and no duplicate
 input-device free.
 
 Create a module Makefile and DKMS package `rockpi-rpi-touchscreen` version
-`0.1.0`, module name `raspits_ft5426`, destination `/updates/dkms`.
+`0.1.1`, module name `raspits_ft5426`, destination `/updates/dkms`.
 
 - [ ] **Step 7: Verify module build and metadata**
 
@@ -258,7 +258,7 @@ DSI/panel/touch nodes, and unchanged HDMI. Print one PASS per boundary.
 
 - [ ] **Step 5: Implement transactional installation**
 
-Validate first. Install source at `/usr/src/rockpi-rpi-touchscreen-0.1.0`,
+Validate first. Install source at `/usr/src/rockpi-rpi-touchscreen-0.1.1`,
 run `dkms add/build/install`, install DTBO mode 0644, back up and checksum
 `armbianEnv.txt`, then atomically add the token. A trap restores boot config
 and removes newly added project assets after any post-backup failure.
@@ -359,6 +359,7 @@ passing, one overlay token, readable backup/DTBO, and clean repository.
 
 - [ ] **Step 8: Stop at the hardware checkpoint**
 
-Do not reboot automatically. Give the user the shutdown and wiring sequence.
-After connection and boot, run the spec's journal, DRM, I2C, and libinput
-checks before claiming hardware support or publishing to GitHub.
+Do not reboot automatically. The branch may be pushed first when clearly
+labeled draft and hardware-unverified. Give the user the shutdown and wiring
+sequence. After connection and boot, run the spec's journal, DRM, I2C, and
+libinput checks before claiming hardware support.

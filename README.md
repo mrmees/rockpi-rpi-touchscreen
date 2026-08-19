@@ -14,10 +14,14 @@ Touch Display 2 is not supported. Hardware validation remains pending until the 
 - A DKMS package named `rockpi-rpi-touchscreen` and a user overlay named
   `rockpi-4b-plus-rpi-touchscreen`.
 
-The touch driver is derived from Radxa's GPL-2.0 polling-driver approach and
-updated for current kernels. It reports five multitouch slots with 800x480
-coordinate bounds; no interrupt is available through this connector. Keep the
-source SPDX/license notices intact when redistributing it.
+The touch driver is derived from [Radxa's exact GPL-2.0-only source at commit
+`c681d6a31c2289dbaca2e1f822bab41530fc0f68`](https://github.com/radxa/kernel/blob/c681d6a31c2289dbaca2e1f822bab41530fc0f68/drivers/input/touchscreen/raspits_ft5426.c).
+It preserves the original ASUSTek Computer Inc. and Linux Foundation notices;
+see [the upstream attribution](LICENSES/UPSTREAM.md). The 2026 modifications
+support current kernels, bounded parsing, and safe polling lifecycle handling.
+It reports five multitouch slots with 800x480 coordinate bounds; no interrupt
+is available through this connector. After three consecutive read or parse failures
+(about 51 ms), it releases every active slot to prevent stuck touches.
 
 ## Requirements
 
@@ -42,6 +46,12 @@ sudo sh scripts/install.sh
 It validates the module and merged device tree before registering DKMS,
 installs the DTBO in `/boot/overlay-user/`, backs up `/boot/armbianEnv.txt`,
 and appends one overlay token without removing unrelated user overlays.
+Release `0.1.1` treats `/usr/src/rockpi-rpi-touchscreen-0.1.1` as immutable:
+a same-version content mismatch fails instead of silently replacing registered
+source. The installer checksum-compares the source, DKMS-built/installed module,
+and DTBO, and transactionally refreshes a changed installed DTBO. A successful
+0.1.0-to-0.1.1 migration removes the owned old release only after 0.1.1 is
+installed; a failed migration retains the old release and reports recovery.
 
 Preview removal with:
 
@@ -86,6 +96,7 @@ device-tree or driver setting.
 The overlay is specific to this board, connector route, and kernel/device-tree
 symbols. It does not support the Touch Display 2, other Rock Pi models, or
 other panels. A missing panel should leave HDMI usable, but kernel upgrades can
-require a compatible compiler or overlay review. Do not publish this project
-or treat it as hardware-complete until the checks above and a shutdown/start
-cycle have passed.
+require a compatible compiler or overlay review. The repository is ready for
+publication before physical validation only when clearly marked draft or hardware-unverified;
+do not describe hardware support as complete until the
+checks above and a shutdown/start cycle have passed.

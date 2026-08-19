@@ -50,6 +50,13 @@ fi
 
 remove_overlay_token "$ARMBIAN_ENV" "$OVERLAY_TOKEN"
 rm -f "$overlay_destination"
-dkms remove -m "$PROJECT_NAME" -v "$PROJECT_VERSION" --all || true
+dkms_status=$(dkms status -m "$PROJECT_NAME" -v "$PROJECT_VERSION") ||
+	die "cannot determine DKMS registration state for $PROJECT_NAME/$PROJECT_VERSION"
+if printf '%s\n' "$dkms_status" | grep -Fq "$PROJECT_NAME/$PROJECT_VERSION"; then
+	if ! dkms remove -m "$PROJECT_NAME" -v "$PROJECT_VERSION" --all; then
+		printf 'ERROR: DKMS removal failed; retained source: %s\n' "$PROJECT_SOURCE_DIR" >&2
+		exit 1
+	fi
+fi
 rm -rf "$PROJECT_SOURCE_DIR"
-printf 'PASS: removed %s assets\n' "$PROJECT_NAME"
+printf 'PASS: removed %s/%s assets\n' "$PROJECT_NAME" "$PROJECT_VERSION"

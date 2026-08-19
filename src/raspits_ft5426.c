@@ -1,4 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Raspberry Pi 7 inch Touchscreen FT5426 touch driver.
+ *
+ * Copyright (c) 2016 ASUSTek Computer Inc.
+ * Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+ *
+ * Modified 2026 by the Rock Pi RPi Touchscreen contributors for current
+ * kernels, bounded parsing, polling error recovery, and safe lifecycle use.
+ */
 #include <linux/bitops.h>
 #include <linux/i2c.h>
 #include <linux/input.h>
@@ -12,18 +21,47 @@
 
 #define FT5426_REG_TOUCH_STATUS	0x02
 #define FT5426_REG_FW_VERSION		0xa6
-#define FT5426_REG_VENDOR_ID		0xb2
-#define FT5426_REG_CHIP_ID		0xb3
+#define FT5426_REG_FW_MINOR		0xb2
+#define FT5426_REG_FW_SUBMINOR		0xb3
 #define FT5426_FRAME_SIZE		(1 + FT5426_MAX_POINTS * FT5426_BYTES_PER_POINT)
 #define FT5426_POLL_INTERVAL_MS	17
+#define FT5426_MAX_CONSECUTIVE_FAILURES	3
 
 struct raspits_ft5426 {
 	struct i2c_client *client;
 	struct input_dev *input;
 	struct delayed_work poll_work;
 	unsigned long active_ids;
+	u8 consecutive_failures;
 	bool stopping;
 };
+
+static void raspits_release_active_touches(struct raspits_ft5426 *ts)
+{
+	unsigned long active_ids = ts->active_ids;
+	unsigned int id;
+
+	for_each_set_bit(id, &active_ids, 15) {
+		int slot = input_mt_get_slot_by_key(ts->input, id);
+
+		if (slot < 0)
+			continue;
+		input_mt_slot(ts->input, slot);
+		input_mt_report_slot_state(ts->input, MT_TOOL_FINGER, false);
+	}
+	ts->active_ids = 0;
+	input_mt_sync_frame(ts->input);
+	input_sync(ts->input);
+}
+
+static void raspits_poll_failed(struct raspits_ft5426 *ts)
+{
+	if (ts->consecutive_failures < FT5426_MAX_CONSECUTIVE_FAILURES)
+		ts->consecutive_failures++;
+	if (ts->consecutive_failures == FT5426_MAX_CONSECUTIVE_FAILURES &&
+	    ts->active_ids)
+		raspits_release_active_touches(ts);
+}
 
 static void raspits_poll(struct work_struct *work)
 {
@@ -43,11 +81,16 @@ static void raspits_poll(struct work_struct *work)
 	ret = i2c_smbus_read_i2c_block_data(ts->client,
 					    FT5426_REG_TOUCH_STATUS,
 					    sizeof(raw), raw);
-	if (ret != sizeof(raw))
+	if (ret != sizeof(raw)) {
+		raspits_poll_failed(ts);
 		goto reschedule;
+	}
 
-	if (ft5426_parse_frame(raw, sizeof(raw), &frame))
+	if (ft5426_parse_frame(raw, sizeof(raw), &frame)) {
+		raspits_poll_failed(ts);
 		goto reschedule;
+	}
+	ts->consecutive_failures = 0;
 
 	for (i = 0; i < frame.count; i++) {
 		const struct ft5426_point *point = &frame.points[i];
@@ -94,13 +137,26 @@ static int raspits_probe(struct i2c_client *client)
 	struct raspits_ft5426 *ts;
 	struct input_dev *input;
 	int fw_version;
-	int vendor_id;
-	int chip_id;
+	int fw_minor;
+	int fw_subminor;
 	int ret;
 
 	ts = devm_kzalloc(dev, sizeof(*ts), GFP_KERNEL);
 	if (!ts)
 		return -ENOMEM;
+
+	fw_version = i2c_smbus_read_byte_data(client, FT5426_REG_FW_VERSION);
+	if (fw_version < 0)
+		return dev_err_probe(dev, fw_version,
+				     "unable to read FT5426 firmware version\n");
+	fw_minor = i2c_smbus_read_byte_data(client, FT5426_REG_FW_MINOR);
+	if (fw_minor < 0)
+		return dev_err_probe(dev, fw_minor,
+				     "unable to read FT5426 firmware minor\n");
+	fw_subminor = i2c_smbus_read_byte_data(client, FT5426_REG_FW_SUBMINOR);
+	if (fw_subminor < 0)
+		return dev_err_probe(dev, fw_subminor,
+				     "unable to read FT5426 firmware subminor\n");
 
 	input = devm_input_allocate_device(dev);
 	if (!input)
@@ -128,26 +184,32 @@ static int raspits_probe(struct i2c_client *client)
 	i2c_set_clientdata(client, ts);
 	INIT_DELAYED_WORK(&ts->poll_work, raspits_poll);
 
-	fw_version = i2c_smbus_read_byte_data(client, FT5426_REG_FW_VERSION);
-	vendor_id = i2c_smbus_read_byte_data(client, FT5426_REG_VENDOR_ID);
-	chip_id = i2c_smbus_read_byte_data(client, FT5426_REG_CHIP_ID);
-	if (fw_version < 0 || vendor_id < 0 || chip_id < 0)
-		dev_warn(dev, "unable to read FT5426 firmware identification\n");
-	else
-		dev_info(dev, "FT5426 firmware 0x%02x, vendor 0x%02x, chip 0x%02x\n",
-			 fw_version, vendor_id, chip_id);
+	dev_info(dev, "FT5426 firmware 0x%02x.%02x.%02x\n",
+		 fw_version, fw_minor, fw_subminor);
 
 	schedule_delayed_work(&ts->poll_work,
 			      msecs_to_jiffies(FT5426_POLL_INTERVAL_MS));
 	return 0;
 }
 
+static void raspits_stop(struct raspits_ft5426 *ts)
+{
+	WRITE_ONCE(ts->stopping, true);
+	cancel_delayed_work_sync(&ts->poll_work);
+}
+
 static void raspits_remove(struct i2c_client *client)
 {
 	struct raspits_ft5426 *ts = i2c_get_clientdata(client);
 
-	WRITE_ONCE(ts->stopping, true);
-	cancel_delayed_work_sync(&ts->poll_work);
+	raspits_stop(ts);
+}
+
+static void raspits_shutdown(struct i2c_client *client)
+{
+	struct raspits_ft5426 *ts = i2c_get_clientdata(client);
+
+	raspits_stop(ts);
 }
 
 static const struct of_device_id raspits_of_match[] = {
@@ -163,6 +225,7 @@ static struct i2c_driver raspits_driver = {
 	},
 	.probe = raspits_probe,
 	.remove = raspits_remove,
+	.shutdown = raspits_shutdown,
 };
 module_i2c_driver(raspits_driver);
 

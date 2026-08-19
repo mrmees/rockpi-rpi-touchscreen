@@ -5,7 +5,7 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$script_dir/common.sh"
 
 [ "${1:-}" = '--offline' ] || die "usage: $0 --offline"
-require_command awk dtc fdtoverlay grep ln make mkdir modinfo mktemp rm sed tail tr
+require_command awk cat dtc fdtoverlay grep head ln make mkdir modinfo mktemp rm sed tail tr
 
 compatible_file=${COMPATIBLE_FILE:-/proc/device-tree/compatible}
 [ -r "$compatible_file" ] || die "cannot read board compatible string: $compatible_file"
@@ -98,6 +98,35 @@ require_text()
 	printf '%s\n' "$text" | grep -Fq "$needle" || die "$message"
 }
 
+direct_property_value()
+{
+	property=$1
+	awk -v property="$property" '
+		{
+			line = $0
+			if (depth == 1 && line ~ "^[[:space:]]*" property "[[:space:]]*=") {
+				sub("^[[:space:]]*" property "[[:space:]]*=[[:space:]]*", "", line)
+				sub(";[[:space:]]*$", "", line)
+				print line
+				exit
+			}
+			opens = gsub(/\{/, "{", line)
+			closes = gsub(/\}/, "}", line)
+			depth += opens - closes
+		}
+	'
+}
+
+require_direct_property()
+{
+	text=$1
+	property=$2
+	expected=$3
+	message=$4
+	actual=$(printf '%s\n' "$text" | direct_property_value "$property")
+	[ "$actual" = "$expected" ] || die "$message (got ${actual:-missing}, expected $expected)"
+}
+
 property_phandle()
 {
 	property=$1
@@ -133,7 +162,9 @@ build_dir=${BUILD_DIR:-$repo_root/build}
 mkdir -p "$build_dir"
 overlay=$repo_root/overlays/$OVERLAY_NAME.dts
 dtbo=$build_dir/$OVERLAY_NAME.dtbo
-run_warning_free overlay-compile dtc -@ -I dts -O dtb -o "$dtbo" "$overlay"
+temporary_dtbo=$workdir/$OVERLAY_NAME.dtbo
+run_warning_free overlay-compile dtc -@ -I dts -O dtb -o "$temporary_dtbo" "$overlay"
+atomic_install_file "$temporary_dtbo" "$dtbo"
 printf 'PASS: overlay compile\n'
 run_warning_free overlay-apply fdtoverlay -i "$dtb" -o "$workdir/merged.dtb" "$dtbo"
 run_dtb_decompile merged-dtb "$workdir/merged.dtb" "$workdir/merged.dts"
@@ -147,8 +178,8 @@ hdmi=$(node_from_file "$workdir/merged.dts" 'hdmi@ff940000')
 panel=$(printf '%s\n' "$i2c1" | extract_named_node 'panel@45')
 touch=$(printf '%s\n' "$i2c1" | extract_named_node 'touchscreen@38')
 
-require_text "$dsi0" 'status = "okay";' 'merged DSI0 is not enabled'
-require_text "$dsi1" 'status = "okay";' 'merged DSI1 is not enabled'
+require_direct_property "$dsi0" status '"okay"' 'merged DSI0 is not enabled'
+require_direct_property "$dsi1" status '"okay"' 'merged DSI1 is not enabled'
 printf 'PASS: DSI0 and DSI1 enabled\n'
 require_text "$panel" 'compatible = "raspberrypi,7inch-touchscreen-panel";' 'merged panel compatible is missing'
 require_text "$panel" 'reg = <0x45>;' 'merged panel address is missing'
@@ -161,8 +192,8 @@ printf 'PASS: I2C1 panel and touch nodes\n'
 vopl_endpoint=$(printf '%s\n' "$vopl" | extract_named_node 'endpoint@3')
 dsi1_vopb_input=$(printf '%s\n' "$dsi1" | extract_named_node 'endpoint@0')
 dsi1_input=$(printf '%s\n' "$dsi1" | extract_named_node 'endpoint@1')
-require_text "$dsi1_vopb_input" 'status = "disabled";' 'DSI1 big-VOP input is not disabled'
-require_text "$dsi1_input" 'status = "okay";' 'DSI1 little-VOP input is not enabled'
+require_direct_property "$dsi1_vopb_input" status '"disabled"' 'DSI1 big-VOP input is not disabled'
+require_direct_property "$dsi1_input" status '"okay"' 'DSI1 little-VOP input is not enabled'
 require_equal "$(printf '%s\n' "$vopl_endpoint" | property_phandle remote-endpoint)" "$(printf '%s\n' "$dsi1_input" | property_phandle phandle)" 'little-VOP output does not connect to DSI1 input'
 require_equal "$(printf '%s\n' "$dsi1_input" | property_phandle remote-endpoint)" "$(printf '%s\n' "$vopl_endpoint" | property_phandle phandle)" 'DSI1 input does not connect back to little-VOP output'
 dsi1_output_port=$(printf '%s\n' "$dsi1" | extract_named_node 'port@1')
@@ -173,6 +204,6 @@ require_equal "$(printf '%s\n' "$dsi1_output" | property_phandle remote-endpoint
 require_equal "$(printf '%s\n' "$panel_input" | property_phandle remote-endpoint)" "$(printf '%s\n' "$dsi1_output" | property_phandle phandle)" 'panel input does not connect back to DSI1 output'
 printf 'PASS: little-VOP to DSI1 to panel graph\n'
 
-require_text "$hdmi" 'status = "okay";' 'merged tree does not preserve HDMI'
+require_direct_property "$hdmi" status '"okay"' 'merged tree does not preserve HDMI'
 printf 'PASS: HDMI unchanged\n'
 printf 'PASS: offline validation\n'

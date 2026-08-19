@@ -44,18 +44,46 @@ cat > "$sandbox/bin/dkms" <<'EOF'
 set -eu
 printf '%s\n' "$*" >> "${DKMS_LOG:?}"
 [ -z "${DKMS_PATH_LOG:-}" ] || printf '%s\n' "$PATH" > "$DKMS_PATH_LOG"
+version=
+kernel=
+previous=
+for argument do
+	case $previous in
+	-v) version=$argument ;;
+	-k) kernel=$argument ;;
+	esac
+	previous=$argument
+done
 case $1 in
 add)
-	if [ -e "${DKMS_STATE:?}" ]; then
+	if [ -f "${DKMS_STATE:?}" ] && grep -Fxq "$version" "$DKMS_STATE"; then
 		exit 1
 	fi
-	: > "${DKMS_STATE:?}"
+	printf '%s\n' "$version" >> "${DKMS_STATE:?}"
+	;;
+build)
+	mkdir -p "${DKMS_STATE_DIR:?}/rockpi-rpi-touchscreen/$version/$kernel/aarch64/module"
+	printf '%s\n' "module-$version-$kernel" > "${DKMS_STATE_DIR:?}/rockpi-rpi-touchscreen/$version/$kernel/aarch64/module/raspits_ft5426.ko"
+	;;
+install)
+	mkdir -p "${MODULES_DIR:?}/$kernel/updates/dkms"
+	cp "${DKMS_STATE_DIR:?}/rockpi-rpi-touchscreen/$version/$kernel/aarch64/module/raspits_ft5426.ko" \
+		"${MODULES_DIR:?}/$kernel/updates/dkms/raspits_ft5426.ko"
 	;;
 status)
-	[ -e "${DKMS_STATE:?}" ] && printf '%s\n' 'rockpi-rpi-touchscreen/0.1.0, test-kernel, aarch64: installed'
+	if [ -f "${DKMS_STATE:?}" ]; then
+		while IFS= read -r registered; do
+			[ -z "$version" ] || [ "$registered" = "$version" ] || continue
+			printf '%s\n' "rockpi-rpi-touchscreen/$registered, test-kernel, aarch64: installed"
+		done < "$DKMS_STATE"
+	fi
 	;;
 remove)
-	rm -f "${DKMS_STATE:?}"
+	[ "${DKMS_REMOVE_GENUINE_FAIL:-0}" -ne 1 ] || exit 23
+	if [ -f "${DKMS_STATE:?}" ]; then
+		grep -Fxv "$version" "$DKMS_STATE" > "$DKMS_STATE.tmp" || true
+		mv "$DKMS_STATE.tmp" "$DKMS_STATE"
+	fi
 	;;
 esac
 if [ "${DKMS_FAIL_ON:-}" = "$1" ]; then
@@ -63,6 +91,20 @@ if [ "${DKMS_FAIL_ON:-}" = "$1" ]; then
 fi
 EOF
 	chmod +x "$sandbox/bin/dkms"
+	cat > "$sandbox/bin/modinfo" <<'EOF'
+#!/bin/sh
+set -eu
+kernel=
+while [ "$#" -gt 0 ]; do
+	case $1 in
+	-k) kernel=$2; shift 2 ;;
+	-n) shift; break ;;
+	*) shift ;;
+	esac
+done
+printf '%s\n' "${MODULES_DIR:?}/$kernel/updates/dkms/raspits_ft5426.ko"
+EOF
+	chmod +x "$sandbox/bin/modinfo"
 	cat > "$sandbox/bin/id" <<'EOF'
 #!/bin/sh
 if [ "$#" -eq 1 ] && [ "$1" = '-u' ]; then
@@ -96,6 +138,9 @@ for argument do
 	last=$argument
 done
 printf '%s\n' "$*" >> "${MV_LOG:?}"
+if [ -n "${MV_FAIL_ALWAYS_TARGET:-}" ] && [ "$last" = "$MV_FAIL_ALWAYS_TARGET" ]; then
+	exit 1
+fi
 if [ -n "${MV_FAIL_SOURCE:-}" ] && [ "$1" = "$MV_FAIL_SOURCE" ]; then
 	exit 1
 fi
@@ -150,6 +195,7 @@ run_install()
 	BUILD_DIR="$sandbox/build" BACKUP_PATH="$sandbox/boot/armbianEnv.txt.rockpi-rpi-touchscreen.bak" \
 	VALIDATE_SCRIPT="$validator" VALIDATE_LOG="$sandbox/validate.log" \
 	DKMS_LOG="$sandbox/dkms.log" DKMS_PATH_LOG="$sandbox/dkms.path" DKMS_STATE="$sandbox/dkms.state" \
+	DKMS_STATE_DIR="$sandbox/var-lib-dkms" \
 	MV_LOG="$sandbox/mv.log" PATH="$sandbox/bin:$PATH" \
 	sh "$repo_root/scripts/install.sh" "$@"
 }
@@ -161,6 +207,7 @@ run_uninstall()
 	BOOT_DIR="$sandbox/boot" DKMS_TREE="$sandbox/usr-src" \
 	MODULES_DIR="$sandbox/modules" KERNEL_RELEASE=test-kernel \
 	DKMS_LOG="$sandbox/dkms.log" DKMS_STATE="$sandbox/dkms.state" \
+	DKMS_STATE_DIR="$sandbox/var-lib-dkms" \
 	MV_LOG="$sandbox/mv.log" PATH="$sandbox/bin:$PATH" \
 	sh "$repo_root/scripts/uninstall.sh" "$@"
 }
@@ -197,15 +244,15 @@ test_offline_boot_rollback_changes_only_explicit_target_root()
 	sandbox=$workdir/offline-boot-rollback
 	make_sandbox "$sandbox"
 	target_root=$sandbox/target-root
-	mkdir -p "$target_root/boot" "$sandbox/host-usr-src/rockpi-rpi-touchscreen-0.1.0"
+	mkdir -p "$target_root/boot" "$sandbox/host-usr-src/rockpi-rpi-touchscreen-0.1.1"
 	printf '%s\n' 'user_overlays=spi-test rockpi-4b-plus-rpi-touchscreen' > "$target_root/boot/armbianEnv.txt"
-	: > "$sandbox/host-usr-src/rockpi-rpi-touchscreen-0.1.0/sentinel"
+	: > "$sandbox/host-usr-src/rockpi-rpi-touchscreen-0.1.1/sentinel"
 	: > "$sandbox/dkms.log"
 
 	run_offline_boot_rollback "$sandbox" "$target_root"
 	assert_equal "$(cat "$target_root/boot/armbianEnv.txt")" 'user_overlays=spi-test' \
 		'offline rollback removes only the project token from the explicit target root'
-	[ -f "$sandbox/host-usr-src/rockpi-rpi-touchscreen-0.1.0/sentinel" ] ||
+	[ -f "$sandbox/host-usr-src/rockpi-rpi-touchscreen-0.1.1/sentinel" ] ||
 		fail 'offline rollback changed the running-host source tree'
 	[ ! -s "$sandbox/dkms.log" ] || fail 'offline rollback invoked DKMS'
 	printf 'PASS: target-root boot-config-only offline rollback\n'
@@ -224,12 +271,12 @@ test_install_is_idempotent_and_preserves_unrelated_boot_text()
 user_overlays=spi-test rockpi-4b-plus-rpi-touchscreen
 extraargs=console=ttyS2'
 	assert_equal "$after_first" "$expected" 'install adds exactly one project overlay token'
-	grep -Fqx "$original_checksum  $sandbox/boot/armbianEnv.txt" \
+	grep -Fqx "$original_checksum  $sandbox/boot/armbianEnv.txt.rockpi-rpi-touchscreen.bak" \
 		"$sandbox/boot/armbianEnv.txt.rockpi-rpi-touchscreen.bak.sha256" || \
 		fail 'backup checksum must describe original boot configuration'
 	[ "$(cat "$sandbox/boot/armbianEnv.txt.rockpi-rpi-touchscreen.bak")" = "$original" ] || \
 		fail 'backup must equal original boot configuration'
-	[ -f "$sandbox/usr-src/rockpi-rpi-touchscreen-0.1.0/dkms.conf" ] || \
+	[ -f "$sandbox/usr-src/rockpi-rpi-touchscreen-0.1.1/dkms.conf" ] || \
 		fail 'installer must copy owned DKMS source tree'
 	[ -f "$sandbox/boot/overlay-user/rockpi-4b-plus-rpi-touchscreen.dtbo" ] || \
 		fail 'installer must install user overlay'
@@ -381,7 +428,7 @@ test_uninstall_removes_only_project_token_and_dry_run_is_scoped()
 	dry_run=$(run_uninstall "$sandbox" --dry-run)
 	printf '%s\n' "$dry_run" | grep -Fqx "REMOVE: $sandbox/boot/overlay-user/rockpi-4b-plus-rpi-touchscreen.dtbo" ||
 		fail 'dry run must print owned overlay path'
-	printf '%s\n' "$dry_run" | grep -Fqx "REMOVE: $sandbox/usr-src/rockpi-rpi-touchscreen-0.1.0" ||
+	printf '%s\n' "$dry_run" | grep -Fqx "REMOVE: $sandbox/usr-src/rockpi-rpi-touchscreen-0.1.1" ||
 		fail 'dry run must print owned source path'
 	printf '%s\n' "$dry_run" | grep -Fqx 'user_overlays=spi-test' ||
 		fail 'dry run must print resulting overlay line'
@@ -395,7 +442,7 @@ user_overlays=spi-test
 extraargs=console=ttyS2' \
 		'uninstall removes only the project overlay token'
 	assert_file_absent "$sandbox/boot/overlay-user/rockpi-4b-plus-rpi-touchscreen.dtbo"
-	assert_file_absent "$sandbox/usr-src/rockpi-rpi-touchscreen-0.1.0"
+	assert_file_absent "$sandbox/usr-src/rockpi-rpi-touchscreen-0.1.1"
 	printf 'PASS: scoped uninstall and dry run\n'
 }
 
@@ -410,7 +457,7 @@ test_failed_validation_does_not_mutate_boot_configuration()
 	after=$(sha256sum "$sandbox/boot/armbianEnv.txt" | awk '{print $1}')
 	assert_equal "$after" "$before" 'failed validation must not mutate boot configuration'
 	assert_file_absent "$sandbox/boot/armbianEnv.txt.rockpi-rpi-touchscreen.bak"
-	assert_file_absent "$sandbox/usr-src/rockpi-rpi-touchscreen-0.1.0"
+	assert_file_absent "$sandbox/usr-src/rockpi-rpi-touchscreen-0.1.1"
 	printf 'PASS: failed validation leaves boot configuration unchanged\n'
 }
 
@@ -426,22 +473,158 @@ test_post_backup_failure_rolls_back_owned_assets_and_boot_configuration()
 	fi
 	assert_equal "$(cat "$sandbox/boot/armbianEnv.txt")" "$before" \
 		'post-backup failure restores boot configuration'
-	assert_file_absent "$sandbox/usr-src/rockpi-rpi-touchscreen-0.1.0"
+	assert_file_absent "$sandbox/usr-src/rockpi-rpi-touchscreen-0.1.1"
 	assert_file_absent "$sandbox/boot/overlay-user/rockpi-4b-plus-rpi-touchscreen.dtbo"
 	printf 'PASS: post-backup failure rolls back owned assets\n'
 }
 
+test_same_version_changed_source_is_rejected()
+{
+	sandbox=$workdir/immutable-source
+	make_sandbox "$sandbox"
+	run_install "$sandbox" "$sandbox/validate-pass.sh"
+	source_file=$sandbox/usr-src/rockpi-rpi-touchscreen-0.1.1/scripts/dkms-make.sh
+	printf '\n# changed source\n' >> "$source_file"
+	before=$(sha256sum "$source_file" | awk '{print $1}')
+	if run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+		fail 'same-version changed source was accepted'
+	fi
+	assert_equal "$(sha256sum "$source_file" | awk '{print $1}')" "$before" \
+		'immutable same-version source was overwritten'
+	grep -Fq 'same-version DKMS source differs' "$sandbox/output" ||
+		fail 'source mismatch was not explained'
+	printf 'PASS: same-version changed source is rejected\n'
+}
+
+test_changed_dtbo_is_transactionally_refreshed()
+{
+	sandbox=$workdir/dtbo-refresh
+	make_sandbox "$sandbox"
+	run_install "$sandbox" "$sandbox/validate-pass.sh"
+	destination=$sandbox/boot/overlay-user/rockpi-4b-plus-rpi-touchscreen.dtbo
+	printf '%s\n' stale > "$destination"
+	run_install "$sandbox" "$sandbox/validate-pass.sh"
+	cmp "$sandbox/build/rockpi-4b-plus-rpi-touchscreen.dtbo" "$destination" ||
+		fail 'changed installed DTBO was not refreshed'
+	printf 'PASS: changed DTBO is transactionally refreshed\n'
+}
+
+test_dkms_source_package_is_allowlisted()
+{
+	sandbox=$workdir/source-allowlist
+	make_sandbox "$sandbox"
+	run_install "$sandbox" "$sandbox/validate-pass.sh"
+	source=$sandbox/usr-src/rockpi-rpi-touchscreen-0.1.1
+	actual=$(cd "$source" && find . -type f -print | LC_ALL=C sort)
+	expected='./LICENSE
+./LICENSES/GPL-2.0-only.txt
+./LICENSES/UPSTREAM.md
+./Makefile
+./dkms.conf
+./scripts/dkms-make.sh
+./src/ft5426_protocol.h
+./src/raspits_ft5426.c'
+	assert_equal "$actual" "$expected" 'DKMS source package contains only allowlisted files'
+	assert_equal "$(stat -c '%a' "$source")" '755' 'DKMS source root must be traversable'
+	assert_equal "$(stat -c '%a' "$source/src")" '755' 'DKMS source subdirectories must be traversable'
+	printf 'PASS: DKMS source package allowlist\n'
+}
+
+test_boot_rollback_failure_continues_cleanup_and_preserves_backup()
+{
+	sandbox=$workdir/rollback-replacement-failure
+	make_sandbox "$sandbox"
+	config=$sandbox/boot/armbianEnv.txt
+	output=$sandbox/output
+	if MV_FAIL_ALWAYS_TARGET="$config" \
+		run_install "$sandbox" "$sandbox/validate-pass.sh" > "$output" 2>&1; then
+		fail 'rollback boot-config replacement failure was accepted'
+	fi
+	[ -f "$sandbox/boot/armbianEnv.txt.rockpi-rpi-touchscreen.bak" ] ||
+		fail 'rollback did not retain the exact recovery backup'
+	assert_file_absent "$sandbox/usr-src/rockpi-rpi-touchscreen-0.1.1"
+	assert_file_absent "$sandbox/boot/overlay-user/rockpi-4b-plus-rpi-touchscreen.dtbo"
+	grep -Fq 'boot configuration backup retained at' "$output" ||
+		fail 'rollback replacement failure was not reported'
+	printf 'PASS: rollback replacement failure preserves recovery and continues cleanup\n'
+}
+
+test_uninstall_dkms_failure_retains_source_and_fails()
+{
+	sandbox=$workdir/uninstall-dkms-failure
+	make_sandbox "$sandbox"
+	run_install "$sandbox" "$sandbox/validate-pass.sh"
+	output=$sandbox/output
+	if DKMS_REMOVE_GENUINE_FAIL=1 run_uninstall "$sandbox" > "$output" 2>&1; then
+		fail 'uninstall accepted genuine DKMS removal failure'
+	fi
+	[ -d "$sandbox/usr-src/rockpi-rpi-touchscreen-0.1.1" ] ||
+		fail 'uninstall removed source after genuine DKMS failure'
+	! grep -Fq 'PASS: removed' "$output" ||
+		fail 'uninstall printed success after genuine DKMS failure'
+	printf 'PASS: genuine DKMS uninstall failure retains source and fails\n'
+}
+
+test_uninstall_accepts_unregistered_dkms()
+{
+	sandbox=$workdir/uninstall-unregistered
+	make_sandbox "$sandbox"
+	run_install "$sandbox" "$sandbox/validate-pass.sh"
+	rm -f "$sandbox/dkms.state"
+	run_uninstall "$sandbox"
+	assert_file_absent "$sandbox/usr-src/rockpi-rpi-touchscreen-0.1.1"
+	printf 'PASS: uninstall accepts already-unregistered DKMS package\n'
+}
+
+seed_old_release()
+{
+	sandbox=$1
+	old=$sandbox/usr-src/rockpi-rpi-touchscreen-0.1.0
+	mkdir -p "$old"
+	printf '%s\n' 'PACKAGE_NAME="rockpi-rpi-touchscreen"' 'PACKAGE_VERSION="0.1.0"' > "$old/dkms.conf"
+	printf '%s\n' '0.1.0' > "$sandbox/dkms.state"
+}
+
+test_migration_removes_old_release_only_after_success()
+{
+	sandbox=$workdir/migration-success
+	make_sandbox "$sandbox"
+	seed_old_release "$sandbox"
+	run_install "$sandbox" "$sandbox/validate-pass.sh"
+	assert_file_absent "$sandbox/usr-src/rockpi-rpi-touchscreen-0.1.0"
+	grep -Fxq '0.1.1' "$sandbox/dkms.state" || fail 'new DKMS version was not registered'
+	! grep -Fxq '0.1.0' "$sandbox/dkms.state" || fail 'old DKMS version remained after successful migration'
+	printf 'PASS: successful 0.1.0 to 0.1.1 migration\n'
+}
+
+test_failed_migration_retains_old_release()
+{
+	sandbox=$workdir/migration-failure
+	make_sandbox "$sandbox"
+	seed_old_release "$sandbox"
+	if DKMS_FAIL_ON=build run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+		fail 'failed migration was accepted'
+	fi
+	[ -f "$sandbox/usr-src/rockpi-rpi-touchscreen-0.1.0/dkms.conf" ] ||
+		fail 'failed migration removed old source'
+	grep -Fxq '0.1.0' "$sandbox/dkms.state" || fail 'failed migration removed old DKMS registration'
+	assert_file_absent "$sandbox/usr-src/rockpi-rpi-touchscreen-0.1.1"
+	printf 'PASS: failed migration retains 0.1.0 release\n'
+}
+
 test_install_is_idempotent_and_preserves_unrelated_boot_text
-test_reinstall_refreshes_the_owned_dkms_source_tree
-test_refresh_copy_failure_preserves_registered_source
-test_refresh_swap_failure_preserves_registered_source
-test_refresh_post_swap_dkms_failure_restores_registered_source
-test_refresh_late_boot_failure_restores_registered_source
-test_refresh_rollback_move_failure_preserves_manual_recovery_backup
 test_dkms_make_command_suppresses_automatic_kernelrelease
 test_uninstall_removes_only_project_token_and_dry_run_is_scoped
 test_failed_validation_does_not_mutate_boot_configuration
 test_post_backup_failure_rolls_back_owned_assets_and_boot_configuration
 test_boot_configuration_uses_atomic_mv_for_update_and_rollback
 test_offline_boot_rollback_changes_only_explicit_target_root
+test_same_version_changed_source_is_rejected
+test_changed_dtbo_is_transactionally_refreshed
+test_dkms_source_package_is_allowlisted
+test_boot_rollback_failure_continues_cleanup_and_preserves_backup
+test_uninstall_dkms_failure_retains_source_and_fails
+test_uninstall_accepts_unregistered_dkms
+test_migration_removes_old_release_only_after_success
+test_failed_migration_retains_old_release
 printf 'PASS: transactional installer lifecycle\n'

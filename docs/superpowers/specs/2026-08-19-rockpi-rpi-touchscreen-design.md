@@ -47,6 +47,7 @@ for current kernels and safe lifecycle management:
 - Validate touch-count and finger-ID values before indexing arrays.
 - Avoid repeated logging during normal polling or when no touch is present.
 - Fail probe cleanly when the controller is absent or unreadable.
+- Release active slots after three consecutive poll read or parse failures.
 - Expose 800x480 coordinate bounds; rotation remains a userspace concern.
 
 DKMS will rebuild the module after compatible kernel upgrades. A failed DKMS
@@ -127,7 +128,8 @@ is connected.
 
 ## Publication
 
-The local repository will use small, reviewable commits. It will not be
-published until offline tests pass and the physical display and touch input
-have been validated. Publication will include source attribution, limitations,
-supported board/kernel versions, and reproducible install/uninstall steps.
+The local repository will use small, reviewable commits. It may be published
+after offline tests pass if clearly labeled draft and hardware-unverified.
+Publication will include source attribution, limitations, supported
+board/kernel versions, and reproducible install/uninstall steps; hardware
+support will not be called complete until the physical checks pass.

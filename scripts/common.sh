@@ -1,7 +1,7 @@
 #!/bin/sh
 
 PROJECT_NAME=rockpi-rpi-touchscreen
-PROJECT_VERSION=0.1.0
+PROJECT_VERSION=0.1.1
 PROJECT_SOURCE_DIR=${DKMS_TREE:-/usr/src}/${PROJECT_NAME}-${PROJECT_VERSION}
 OVERLAY_NAME=rockpi-4b-plus-rpi-touchscreen
 OVERLAY_TOKEN=$OVERLAY_NAME
@@ -44,16 +44,28 @@ active_dtb()
 
 atomic_install_file()
 {
+	try_atomic_install_file "$@" || die "cannot atomically install $1 as $2"
+}
+
+try_atomic_install_file()
+{
 	source_file=$1
 	destination_file=$2
 	destination_dir=$(dirname -- "$destination_file")
-	mkdir -p "$destination_dir"
-	temporary_file=$(mktemp "$destination_dir/.${PROJECT_NAME}.XXXXXX") || die "cannot create temporary file in $destination_dir"
-	cp "$source_file" "$temporary_file" || {
+	mkdir -p "$destination_dir" || return 1
+	temporary_file=$(mktemp "$destination_dir/.${PROJECT_NAME}.XXXXXX") || return 1
+	if ! cp "$source_file" "$temporary_file"; then
 		rm -f "$temporary_file"
-		die "cannot copy $source_file"
-	}
-	atomic_replace_temp "$temporary_file" "$destination_file"
+		return 1
+	fi
+	if ! chmod 0644 "$temporary_file"; then
+		rm -f "$temporary_file"
+		return 1
+	fi
+	if ! mv -f "$temporary_file" "$destination_file"; then
+		rm -f "$temporary_file"
+		return 1
+	fi
 }
 
 atomic_replace_temp()
