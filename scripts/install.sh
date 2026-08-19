@@ -19,6 +19,7 @@ overlay_destination=$OVERLAY_DIRECTORY/$OVERLAY_NAME.dtbo
 
 source_created=0
 overlay_created=0
+overlay_backup_created=0
 overlay_replaced=0
 previous_overlay_file=
 dkms_registration_created=0
@@ -48,9 +49,15 @@ rollback()
 			if try_atomic_install_file "$previous_overlay_file" "$overlay_destination"; then
 				rm -f "$previous_overlay_file"
 				previous_overlay_file=
+				overlay_backup_created=0
 			else
 				rollback_failed=1
 				rollback_note="$rollback_note prior overlay retained at $previous_overlay_file;"
+			fi
+		elif [ "$overlay_backup_created" -eq 1 ] && [ -f "$previous_overlay_file" ]; then
+			if ! rm -f "$previous_overlay_file"; then
+				rollback_failed=1
+				rollback_note="$rollback_note overlay backup cleanup failed: $previous_overlay_file;"
 			fi
 		fi
 		if [ "$dkms_registration_created" -eq 1 ] &&
@@ -131,13 +138,14 @@ installed_module=$(modinfo -k "$KERNEL_RELEASE" -n raspits_ft5426)
 cmp "$built_module" "$installed_module" || die 'installed module checksum does not match the DKMS build'
 
 if [ ! -e "$overlay_destination" ]; then
-	atomic_install_file "$overlay_output" "$overlay_destination"
 	overlay_created=1
+	atomic_install_file "$overlay_output" "$overlay_destination"
 elif ! cmp -s "$overlay_output" "$overlay_destination"; then
 	previous_overlay_file=$(mktemp "$BOOT_DIRECTORY/.${PROJECT_NAME}.overlay-backup.XXXXXX")
+	overlay_backup_created=1
 	cp "$overlay_destination" "$previous_overlay_file"
-	atomic_install_file "$overlay_output" "$overlay_destination"
 	overlay_replaced=1
+	atomic_install_file "$overlay_output" "$overlay_destination"
 fi
 cmp "$overlay_output" "$overlay_destination" || die 'installed DTBO checksum verification failed'
 
@@ -151,13 +159,19 @@ completed=1
 if [ "$overlay_replaced" -eq 1 ]; then
 	rm -f "$previous_overlay_file"
 	previous_overlay_file=
+	overlay_backup_created=0
 	overlay_replaced=0
 fi
 trap - EXIT HUP INT TERM
 
 old_version=0.1.0
 old_source=${DKMS_TREE:-/usr/src}/${PROJECT_NAME}-${old_version}
-if dkms status -m "$PROJECT_NAME" -v "$old_version" 2>/dev/null | grep -Fq "$PROJECT_NAME/$old_version"; then
+if ! old_status=$(dkms status -m "$PROJECT_NAME" -v "$old_version" 2>&1); then
+	printf 'ERROR: cannot verify old DKMS state; retained %s/%s registration and source %s: %s\n' \
+		"$PROJECT_NAME" "$old_version" "$old_source" "$old_status" >&2
+	exit 1
+fi
+if printf '%s\n' "$old_status" | grep -Fq "$PROJECT_NAME/$old_version"; then
 	if dkms remove -m "$PROJECT_NAME" -v "$old_version" --all; then
 		rm -rf "$old_source"
 	else

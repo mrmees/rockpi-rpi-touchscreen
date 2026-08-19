@@ -203,3 +203,64 @@ src/raspits_ft5426.c
 The protected `/etc/X11/xorg.conf.d/20-dfrobot-display.conf` hash is identical
 before and after migration. No reboot, shutdown, push, or physical hardware
 claim was performed.
+
+## Residual re-review adjudication
+
+Follow-up date: 2026-08-19 (America/Chicago)
+
+Scope was limited to the three residuals: old-version status truthfulness,
+DTBO rollback ownership ordering, and validator command prerequisites.
+
+### RED
+
+The seeded 0.1.0 status-query failure reproduced the unsafe success path:
+
+```text
+$ sh tests/test_scripts.sh
+FAIL: installer accepted unverifiable old DKMS state
+```
+
+A mock `mv` that completed the DTBO replacement and then returned failure
+reproduced the ownership window before the old `overlay_replaced=1` assignment:
+
+```text
+$ sh tests/test_scripts.sh
+FAIL: late failure after replacement must restore the prior DTBO
+(got: e3b0c44298fc..., expected: fe2643724814...)
+```
+
+### GREEN
+
+`dkms status` is now captured separately. A nonzero query retains the old
+registration and source, prints `ERROR: cannot verify old DKMS state; retained
+...`, exits nonzero, and never reaches the install PASS. Orphaned 0.1.0 source
+is removed only after a successful status query proves no registration exists.
+
+DTBO creation/replacement ownership is recorded before atomic replacement.
+Private backup ownership is tracked independently: an interruption before
+replacement cleans the backup, while any failure after replacement restores
+the exact previous DTBO and removes the private backup after successful
+restoration.
+
+```text
+$ sh tests/test_scripts.sh
+PASS: late failure after DTBO replacement restores prior artifact
+PASS: failed old-version status retains source and suppresses success
+PASS: transactional installer lifecycle
+
+$ sh tests/test_validate.sh
+PASS: validation diagnostics policy
+```
+
+The validator now declares `chmod`, `cp`, `dirname`, and `mv`, which are used
+by its atomic artifact installation path.
+
+### Production reconciliation
+
+No production refresh was required. The residual changes affect only
+`scripts/install.sh`, `scripts/validate.sh`, and sandbox tests; none is part of
+the immutable `/usr/src/rockpi-rpi-touchscreen-0.1.1` allowlist. Installed state
+remains DKMS 0.1.1 with only `/usr/src/rockpi-rpi-touchscreen-0.1.1`, DTBO hash
+`14ce963260d82e49088ef35aa677bd7c84577b8533e885e2f4b7ac40c3bffe21`, and
+unchanged Xorg hash
+`7720b05721c77a8d002e63215ba62f61559340abf28906d4fa9a7d4cb1e9ae0a`.

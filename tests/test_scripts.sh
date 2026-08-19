@@ -71,6 +71,7 @@ install)
 		"${MODULES_DIR:?}/$kernel/updates/dkms/raspits_ft5426.ko"
 	;;
 status)
+	[ "${DKMS_STATUS_FAIL_VERSION:-}" != "$version" ] || exit 24
 	if [ -f "${DKMS_STATE:?}" ]; then
 		while IFS= read -r registered; do
 			[ -z "$version" ] || [ "$registered" = "$version" ] || continue
@@ -155,7 +156,12 @@ if [ -n "${MV_FAIL_TARGET:-}" ] && [ "$last" = "$MV_FAIL_TARGET" ] &&
 	: > "$MV_FAIL_ONCE_MARKER"
 	exit 1
 fi
-exec /bin/mv "$@"
+/bin/mv "$@"
+if [ -n "${MV_FAIL_AFTER_TARGET:-}" ] && [ "$last" = "$MV_FAIL_AFTER_TARGET" ] &&
+	[ ! -e "${MV_FAIL_AFTER_ONCE_MARKER:?}" ]; then
+	: > "$MV_FAIL_AFTER_ONCE_MARKER"
+	exit 1
+fi
 EOF
 chmod +x "$sandbox/bin/mv"
 	cat > "$sandbox/bin/cp" <<'EOF'
@@ -612,6 +618,44 @@ test_failed_migration_retains_old_release()
 	printf 'PASS: failed migration retains 0.1.0 release\n'
 }
 
+test_old_status_failure_retains_source_and_does_not_claim_success()
+{
+	sandbox=$workdir/migration-status-failure
+	make_sandbox "$sandbox"
+	seed_old_release "$sandbox"
+	output=$sandbox/output
+	if DKMS_STATUS_FAIL_VERSION=0.1.0 \
+		run_install "$sandbox" "$sandbox/validate-pass.sh" > "$output" 2>&1; then
+		fail 'installer accepted unverifiable old DKMS state'
+	fi
+	[ -f "$sandbox/usr-src/rockpi-rpi-touchscreen-0.1.0/dkms.conf" ] ||
+		fail 'status failure removed old source'
+	grep -Fxq '0.1.0' "$sandbox/dkms.state" || fail 'status failure removed old registration'
+	! grep -Fq 'PASS: installed' "$output" || fail 'status failure printed unconditional install success'
+	grep -Fq 'cannot verify old DKMS state; retained' "$output" ||
+		fail 'status failure did not explain retained old state'
+	printf 'PASS: failed old-version status retains source and suppresses success\n'
+}
+
+test_late_failure_after_dtbo_replacement_restores_previous_dtbo()
+{
+	sandbox=$workdir/dtbo-signal-rollback
+	make_sandbox "$sandbox"
+	run_install "$sandbox" "$sandbox/validate-pass.sh"
+	destination=$sandbox/boot/overlay-user/rockpi-4b-plus-rpi-touchscreen.dtbo
+	printf '%s\n' 'previous-dtbo' > "$destination"
+	previous_checksum=$(sha256sum "$destination" | awk '{print $1}')
+	if MV_FAIL_AFTER_TARGET="$destination" MV_FAIL_AFTER_ONCE_MARKER="$sandbox/mv-failed-after" \
+		run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+		fail 'installer survived injected late failure after DTBO replacement'
+	fi
+	assert_equal "$(sha256sum "$destination" | awk '{print $1}')" "$previous_checksum" \
+		'late failure after replacement must restore the prior DTBO'
+	[ -z "$(find "$sandbox/boot" -maxdepth 1 -name '.rockpi-rpi-touchscreen.overlay-backup.*' -print -quit)" ] ||
+		fail 'successful DTBO rollback leaked its private backup'
+	printf 'PASS: late failure after DTBO replacement restores prior artifact\n'
+}
+
 test_install_is_idempotent_and_preserves_unrelated_boot_text
 test_dkms_make_command_suppresses_automatic_kernelrelease
 test_uninstall_removes_only_project_token_and_dry_run_is_scoped
@@ -627,4 +671,6 @@ test_uninstall_dkms_failure_retains_source_and_fails
 test_uninstall_accepts_unregistered_dkms
 test_migration_removes_old_release_only_after_success
 test_failed_migration_retains_old_release
+test_late_failure_after_dtbo_replacement_restores_previous_dtbo
+test_old_status_failure_retains_source_and_does_not_claim_success
 printf 'PASS: transactional installer lifecycle\n'

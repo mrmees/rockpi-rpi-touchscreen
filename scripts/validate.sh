@@ -5,7 +5,7 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$script_dir/common.sh"
 
 [ "${1:-}" = '--offline' ] || die "usage: $0 --offline"
-require_command awk cat dtc fdtoverlay grep head ln make mkdir modinfo mktemp rm sed tail tr
+require_command awk cat chmod cp dirname dtc fdtoverlay grep head ln make mkdir modinfo mktemp mv rm sed tail tr
 
 compatible_file=${COMPATIBLE_FILE:-/proc/device-tree/compatible}
 [ -r "$compatible_file" ] || die "cannot read board compatible string: $compatible_file"
