@@ -18,4 +18,8 @@ clean:
 test:
 	cc -std=c11 -Wall -Wextra -Werror -I. tests/test_protocol.c -o /tmp/test_ft5426
 	/tmp/test_ft5426
+	sh tests/test_overlay.sh
+	sh tests/test_scripts.sh
+	sh tests/test_validate.sh
+	sh tests/test_docs.sh
 endif
