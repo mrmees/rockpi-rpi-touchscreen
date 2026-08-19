@@ -28,12 +28,36 @@ function_body()
 			if (started && depth == 0)
 				exit
 		}
+		END {
+			if (!found || !started || depth != 0)
+				exit 1
+		}
 	' "$panel"
 }
 
 line_of()
 {
-	grep -n -m 1 "$1" "$panel" | cut -d: -f1
+	awk -v pattern="$1" '
+		index($0, pattern) {
+			print NR
+			found = 1
+			exit
+		}
+		END { if (!found) exit 1 }
+	' "$panel"
+}
+
+body_line()
+{
+	pattern=$1
+	awk -v pattern="$pattern" '
+		index($0, pattern) {
+			print NR
+			found = 1
+			exit
+		}
+		END { if (!found) exit 1 }
+	'
 }
 
 test -f "$panel" || fail 'missing compatibility panel driver'
@@ -45,10 +69,7 @@ grep -Fq 'dsi->format = MIPI_DSI_FMT_RGB888;' "$panel" ||
 grep -Fq 'MIPI_DSI_MODE_VIDEO_BURST | MIPI_DSI_MODE_LPM;' "$panel" ||
 	fail 'DSI must use Radxa burst and low-power flags'
 
-while IFS= read -r command; do
-	grep -Fq "{ $command }," "$panel" ||
-		fail "missing Radxa TC358762 command: $command"
-done <<'EOF'
+expected_sequence=$(cat <<'EOF'
 0x10, 0x02, 0x03, 0x00, 0x00, 0x00
 0x64, 0x01, 0x0c, 0x00, 0x00, 0x00
 0x68, 0x01, 0x0c, 0x00, 0x00, 0x00
@@ -67,8 +88,36 @@ done <<'EOF'
 0x04, 0x02, 0x01, 0x00, 0x00, 0x00
 0x10, 0x04, 0x03, 0x00, 0x00, 0x00
 EOF
-[ "$(grep -Ec '^[[:space:]]*\{ 0x[0-9a-f][0-9a-f], ' "$panel")" -eq 17 ] ||
-	fail 'TC358762 initialization must contain exactly 17 commands'
+)
+actual_sequence=$(awk '
+	/static const u8 sequence\[\]\[6\] = \{/ {
+		inside = 1
+		next
+	}
+	inside && /^[[:space:]]*};/ { exit }
+	inside {
+		line = $0
+		sub(/^[[:space:]]*\{ /, "", line)
+		sub(/ \},[[:space:]]*$/, "", line)
+		print line
+	}
+' "$panel")
+[ "$actual_sequence" = "$expected_sequence" ] ||
+	fail 'TC358762 initializer must match the exact ordered Radxa sequence'
+
+tc_init_body=$(function_body rockpi_tc358762_init)
+tc_write=$(printf '%s\n' "$tc_init_body" |
+	body_line 'ret = rockpi_tc358762_write(ctx, sequence[i])') ||
+	fail 'TC358762 loop must assign each generic-write result'
+tc_check=$(printf '%s\n' "$tc_init_body" |
+	body_line 'if (ret)') ||
+	fail 'TC358762 loop must check each generic-write result'
+tc_return=$(printf '%s\n' "$tc_init_body" |
+	body_line 'return ret;') ||
+	fail 'TC358762 loop must return the first generic-write error'
+[ "$tc_check" -eq $((tc_write + 1)) ] &&
+	[ "$tc_return" -eq $((tc_check + 1)) ] ||
+	fail 'TC358762 write assignment must be immediately checked and returned'
 
 prepare_body=$(function_body rockpi_panel_prepare)
 printf '%s\n' "$prepare_body" |
@@ -77,20 +126,81 @@ printf '%s\n' "$prepare_body" |
 if printf '%s\n' "$prepare_body" | grep -Fq 'mipi_dsi_generic_write'; then
 	fail 'prepare must not issue DSI bridge writes'
 fi
+printf '%s\n' "$prepare_body" | grep -Fq 'failed to power on panel:' ||
+	fail 'prepare must log MCU power-on failures'
+printf '%s\n' "$prepare_body" | grep -Fq 'failed to read panel ready state:' ||
+	fail 'prepare must log MCU ready-read failures'
 
 enable_body=$(function_body rockpi_panel_enable)
 init_line=$(printf '%s\n' "$enable_body" |
-	grep -n -m 1 'rockpi_tc358762_init(ctx)' | cut -d: -f1) ||
+	body_line 'rockpi_tc358762_init(ctx)') ||
 	fail 'enable must call the TC358762 initialization helper'
+init_check=$(printf '%s\n' "$enable_body" |
+	body_line 'if (ret)') ||
+	fail 'enable must check the TC358762 initialization result'
+init_log=$(printf '%s\n' "$enable_body" |
+	body_line 'failed to initialize TC358762:') ||
+	fail 'enable must log the TC358762 initialization error'
+init_return=$(printf '%s\n' "$enable_body" |
+	body_line 'return ret;') ||
+	fail 'enable must return the TC358762 initialization error'
+[ "$init_check" -eq $((init_line + 1)) ] &&
+	[ "$init_log" -eq $((init_check + 1)) ] &&
+	[ "$init_return" -eq $((init_log + 1)) ] ||
+	fail 'enable must check, log, and return the TC358762 initialization error'
 backlight_line=$(printf '%s\n' "$enable_body" |
-	grep -n -m 1 'rockpi_backlight_set(ctx, 255)' | cut -d: -f1) ||
-	fail 'enable must call the backlight helper'
+	body_line 'backlight_enable(ctx->backlight)') ||
+	fail 'enable must use the serialized backlight core helper'
 [ "$init_line" -lt "$backlight_line" ] ||
 	fail 'enable must initialize TC358762 before enabling backlight'
-printf '%s\n' "$enable_body" | grep -Eq 'if \(ret\)[[:space:]]*$' ||
-	fail 'enable must check TC358762 initialization errors'
-printf '%s\n' "$enable_body" | grep -Fq 'return ret;' ||
-	fail 'enable must propagate TC358762 initialization errors'
+printf '%s\n' "$enable_body" | grep -Fq 'failed to initialize TC358762:' ||
+	fail 'enable must log TC358762 initialization failures'
+printf '%s\n' "$enable_body" | grep -Fq 'failed to enable backlight:' ||
+	fail 'enable must log backlight failures'
+printf '%s\n' "$enable_body" | grep -Fq 'failed to set panel orientation:' ||
+	fail 'enable must log orientation I2C failures'
+grep -Fq '.state = BL_CORE_FBBLANK,' "$panel" ||
+	fail 'backlight must start framebuffer-blanked'
+if grep -Fq 'ctx->backlight->props.power' "$panel"; then
+	fail 'panel lifecycle must not mutate backlight power outside the core'
+fi
+
+backlight_body=$(function_body rockpi_backlight_update_status)
+printf '%s\n' "$backlight_body" |
+	grep -Fq '!READ_ONCE(ctx->prepared) || !READ_ONCE(ctx->enabled)' ||
+	fail 'backlight callback must gate brightness on prepared and enabled state'
+printf '%s\n' "$backlight_body" | grep -Fq 'brightness = 0;' ||
+	fail 'backlight callback must force PWM zero while the panel is inactive'
+printf '%s\n' "$backlight_body" | grep -Fq 'failed to update backlight PWM:' ||
+	fail 'backlight callback must log PWM I2C failures'
+if printf '%s\n' "$backlight_body" |
+	grep -Eq '^[[:space:]]*backlight_(enable|disable|update_status)\('; then
+	fail 'backlight callback must not recurse into the backlight core'
+fi
+
+disable_body=$(function_body rockpi_panel_disable)
+disable_state=$(printf '%s\n' "$disable_body" |
+	body_line 'WRITE_ONCE(ctx->enabled, false)') ||
+	fail 'disable must retain false state before the hardware callback'
+disable_core=$(printf '%s\n' "$disable_body" |
+	body_line 'backlight_disable(ctx->backlight)') ||
+	fail 'disable must use the serialized backlight core helper'
+[ "$disable_state" -lt "$disable_core" ] ||
+	fail 'disable must make sysfs gating safe before forcing PWM off'
+printf '%s\n' "$disable_body" | grep -Fq 'failed to disable backlight:' ||
+	fail 'disable must log PWM-off failures while retaining false state'
+
+unprepare_body=$(function_body rockpi_panel_unprepare)
+unprepare_state=$(printf '%s\n' "$unprepare_body" |
+	body_line 'WRITE_ONCE(ctx->prepared, false)') ||
+	fail 'unprepare must retain false state before powering off'
+unprepare_power=$(printf '%s\n' "$unprepare_body" |
+	body_line 'rockpi_mcu_write(ctx, REG_POWERON, 0)') ||
+	fail 'unprepare must always request MCU power off'
+[ "$unprepare_state" -lt "$unprepare_power" ] ||
+	fail 'unprepare must make backlight gating safe before powering off'
+printf '%s\n' "$unprepare_body" | grep -Fq 'failed to power off panel:' ||
+	fail 'unprepare must log power-off failures while retaining false state'
 
 [ "$(grep -c 'rockpi_panel_stop(ctx);' "$panel")" -eq 2 ] ||
 	fail 'remove and shutdown must share the synchronous panel-stop helper'
@@ -103,8 +213,63 @@ panel_register=$(line_of 'drm_panel_add(&ctx->panel)') ||
 	fail 'probe must register the DRM panel'
 [ "$id_read" -lt "$panel_register" ] ||
 	fail 'MCU identity validation must precede panel registration'
+attach_dsi=$(line_of 'ret = mipi_dsi_attach(ctx->dsi)') ||
+	fail 'probe must attach the DSI peripheral'
+[ "$panel_register" -lt "$attach_dsi" ] ||
+	fail 'DRM panel publication must precede DesignWare DSI attach'
 grep -Fq 'if (id != 0xc3)' "$panel" ||
 	fail 'probe must reject every MCU ID except 0xc3'
+
+probe_body=$(function_body rockpi_panel_probe)
+probe_id=$(printf '%s\n' "$probe_body" |
+	body_line 'rockpi_mcu_read(ctx, REG_ID)') ||
+	fail 'probe must identify the MCU'
+probe_force_off=$(printf '%s\n' "$probe_body" |
+	body_line 'rockpi_panel_force_off(ctx)') ||
+	fail 'probe must force inherited PWM and panel power off'
+probe_backlight=$(printf '%s\n' "$probe_body" |
+	body_line 'backlight_device_register') ||
+	fail 'probe must register a backlight'
+probe_panel=$(printf '%s\n' "$probe_body" |
+	body_line 'drm_panel_add(&ctx->panel)') ||
+	fail 'probe must publish the DRM panel'
+probe_attach=$(printf '%s\n' "$probe_body" |
+	body_line 'mipi_dsi_attach(ctx->dsi)') ||
+	fail 'probe must attach the DSI peripheral'
+[ "$probe_id" -lt "$probe_force_off" ] &&
+	[ "$probe_force_off" -lt "$probe_backlight" ] &&
+	[ "$probe_backlight" -lt "$probe_panel" ] &&
+	[ "$probe_panel" -lt "$probe_attach" ] ||
+	fail 'probe must establish hardware off before publishing panel and attaching DSI'
+
+force_off_body=$(function_body rockpi_panel_force_off) ||
+	fail 'missing fail-safe hardware-off helper'
+force_pwm=$(printf '%s\n' "$force_off_body" |
+	body_line 'rockpi_mcu_write(ctx, REG_PWM, 0)') ||
+	fail 'hardware-off helper must force PWM zero'
+force_power=$(printf '%s\n' "$force_off_body" |
+	body_line 'rockpi_mcu_write(ctx, REG_POWERON, 0)') ||
+	fail 'hardware-off helper must force panel power zero'
+force_return=$(printf '%s\n' "$force_off_body" |
+	body_line 'return first_error;') ||
+	fail 'hardware-off helper must preserve and return the first error'
+[ "$force_pwm" -lt "$force_power" ] &&
+	[ "$force_power" -lt "$force_return" ] ||
+	fail 'hardware-off helper must attempt both off writes before returning'
+
+cleanup_panel=$(printf '%s\n' "$probe_body" |
+	body_line 'drm_panel_remove(&ctx->panel)') ||
+	fail 'DSI attach failure must remove the published panel'
+cleanup_backlight=$(printf '%s\n' "$probe_body" |
+	body_line 'backlight_device_unregister(ctx->backlight)') ||
+	fail 'DSI attach failure must unregister the backlight'
+cleanup_dsi=$(printf '%s\n' "$probe_body" |
+	body_line 'mipi_dsi_device_unregister(ctx->dsi)') ||
+	fail 'DSI attach failure must unregister the DSI peripheral'
+[ "$probe_attach" -lt "$cleanup_panel" ] &&
+	[ "$cleanup_panel" -lt "$cleanup_backlight" ] &&
+	[ "$cleanup_backlight" -lt "$cleanup_dsi" ] ||
+	fail 'DSI attach failure must unwind panel, backlight, then DSI peripheral'
 
 grep -Fq 'https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/gpu/drm/panel/panel-raspberrypi-touchscreen.c' "$panel" ||
 	fail 'missing immutable Linux v6.18 source reference'

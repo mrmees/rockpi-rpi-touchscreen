@@ -138,11 +138,45 @@ static int rockpi_backlight_set(struct rockpi_rpi_panel *ctx, u8 brightness)
 	return rockpi_mcu_write(ctx, REG_PWM, brightness);
 }
 
+static int rockpi_panel_force_off(struct rockpi_rpi_panel *ctx)
+{
+	int first_error;
+	int ret;
+
+	first_error = rockpi_mcu_write(ctx, REG_PWM, 0);
+	if (first_error)
+		dev_err(&ctx->i2c->dev,
+			"failed to force inherited backlight off: %d\n",
+			first_error);
+
+	ret = rockpi_mcu_write(ctx, REG_POWERON, 0);
+	if (ret) {
+		dev_err(&ctx->i2c->dev,
+			"failed to force inherited panel power off: %d\n", ret);
+		if (!first_error)
+			first_error = ret;
+	}
+
+	return first_error;
+}
+
 static int rockpi_backlight_update_status(struct backlight_device *backlight)
 {
 	struct rockpi_rpi_panel *ctx = bl_get_data(backlight);
+	int brightness;
+	int ret;
 
-	return rockpi_backlight_set(ctx, backlight_get_brightness(backlight));
+	if (!READ_ONCE(ctx->prepared) || !READ_ONCE(ctx->enabled))
+		brightness = 0;
+	else
+		brightness = backlight_get_brightness(backlight);
+
+	ret = rockpi_backlight_set(ctx, brightness);
+	if (ret)
+		dev_err(&ctx->i2c->dev, "failed to update backlight PWM: %d\n",
+			ret);
+
+	return ret;
 }
 
 static const struct backlight_ops rockpi_backlight_ops = {
@@ -172,32 +206,42 @@ to_rockpi_panel(struct drm_panel *panel)
 static int rockpi_panel_prepare(struct drm_panel *panel)
 {
 	struct rockpi_rpi_panel *ctx = to_rockpi_panel(panel);
+	int power_off_ret;
 	int ret;
 	int i;
 
-	if (ctx->prepared)
+	if (READ_ONCE(ctx->prepared))
 		return 0;
 
 	ret = rockpi_mcu_write(ctx, REG_POWERON, 1);
-	if (ret)
+	if (ret) {
+		dev_err(panel->dev, "failed to power on panel: %d\n", ret);
 		return ret;
+	}
 
 	for (i = 0; i < ROCKPI_PANEL_READY_RETRIES; i++) {
 		ret = rockpi_mcu_read(ctx, REG_PORTB);
-		if (ret < 0)
+		if (ret < 0) {
+			dev_err(panel->dev,
+				"failed to read panel ready state: %d\n", ret);
 			goto power_off;
+		}
 		if (ret & BIT(0)) {
-			ctx->prepared = true;
+			WRITE_ONCE(ctx->prepared, true);
 			return 0;
 		}
 		usleep_range(1000, 2000);
 	}
 
 	ret = -ETIMEDOUT;
+	dev_err(panel->dev, "timed out waiting for panel ready state\n");
 
 power_off:
-	if (rockpi_mcu_write(ctx, REG_POWERON, 0))
-		dev_err(panel->dev, "failed to power off after prepare error\n");
+	power_off_ret = rockpi_mcu_write(ctx, REG_POWERON, 0);
+	if (power_off_ret)
+		dev_err(panel->dev,
+			"failed to power off after prepare error: %d\n",
+			power_off_ret);
 
 	return ret;
 }
@@ -205,33 +249,52 @@ power_off:
 static int rockpi_panel_enable(struct drm_panel *panel)
 {
 	struct rockpi_rpi_panel *ctx = to_rockpi_panel(panel);
+	int disable_ret;
 	int ret;
 
-	if (ctx->enabled)
+	if (READ_ONCE(ctx->enabled))
 		return 0;
-	if (!ctx->prepared)
+	if (!READ_ONCE(ctx->prepared)) {
+		dev_err(panel->dev, "cannot enable an unprepared panel\n");
 		return -EPERM;
+	}
 
 	ret = rockpi_tc358762_init(ctx);
-	if (ret)
-		return ret;
-
-	ret = rockpi_backlight_set(ctx, 255);
-	if (ret)
-		return ret;
-
-	ret = rockpi_mcu_write(ctx, REG_PORTA, BIT(2));
 	if (ret) {
-		if (rockpi_backlight_set(ctx, 0))
-			dev_err(panel->dev,
-				"failed to disable backlight after enable error\n");
+		dev_err(panel->dev, "failed to initialize TC358762: %d\n", ret);
 		return ret;
 	}
 
-	ctx->backlight->props.brightness = 255;
-	ctx->backlight->props.power = BACKLIGHT_POWER_ON;
-	ctx->enabled = true;
+	WRITE_ONCE(ctx->enabled, true);
+	ret = backlight_device_set_brightness(ctx->backlight, 255);
+	if (ret) {
+		dev_err(panel->dev, "failed to set backlight brightness: %d\n",
+			ret);
+		goto disable_backlight;
+	}
+
+	ret = backlight_enable(ctx->backlight);
+	if (ret) {
+		dev_err(panel->dev, "failed to enable backlight: %d\n", ret);
+		goto disable_backlight;
+	}
+
+	ret = rockpi_mcu_write(ctx, REG_PORTA, BIT(2));
+	if (ret) {
+		dev_err(panel->dev, "failed to set panel orientation: %d\n", ret);
+		goto disable_backlight;
+	}
+
 	return 0;
+
+disable_backlight:
+	WRITE_ONCE(ctx->enabled, false);
+	disable_ret = backlight_disable(ctx->backlight);
+	if (disable_ret)
+		dev_err(panel->dev,
+			"failed to disable backlight after enable error: %d\n",
+			disable_ret);
+	return ret;
 }
 
 static int rockpi_panel_disable(struct drm_panel *panel)
@@ -239,16 +302,12 @@ static int rockpi_panel_disable(struct drm_panel *panel)
 	struct rockpi_rpi_panel *ctx = to_rockpi_panel(panel);
 	int ret;
 
-	if (!ctx->enabled)
-		return 0;
-
-	ret = rockpi_backlight_set(ctx, 0);
+	WRITE_ONCE(ctx->enabled, false);
+	ret = backlight_disable(ctx->backlight);
 	if (ret)
-		return ret;
+		dev_err(panel->dev, "failed to disable backlight: %d\n", ret);
 
-	ctx->backlight->props.power = BACKLIGHT_POWER_OFF;
-	ctx->enabled = false;
-	return 0;
+	return ret;
 }
 
 static int rockpi_panel_unprepare(struct drm_panel *panel)
@@ -256,15 +315,12 @@ static int rockpi_panel_unprepare(struct drm_panel *panel)
 	struct rockpi_rpi_panel *ctx = to_rockpi_panel(panel);
 	int ret;
 
-	if (!ctx->prepared)
-		return 0;
-
+	WRITE_ONCE(ctx->prepared, false);
 	ret = rockpi_mcu_write(ctx, REG_POWERON, 0);
 	if (ret)
-		return ret;
+		dev_err(panel->dev, "failed to power off panel: %d\n", ret);
 
-	ctx->prepared = false;
-	return 0;
+	return ret;
 }
 
 static int rockpi_panel_get_modes(struct drm_panel *panel,
@@ -327,6 +383,7 @@ static int rockpi_panel_probe(struct i2c_client *i2c)
 		.max_brightness = 255,
 		.brightness = 255,
 		.power = BACKLIGHT_POWER_OFF,
+		.state = BL_CORE_FBBLANK,
 	};
 	struct mipi_dsi_device_info dsi_info = {
 		.type = ROCKPI_PANEL_DSI_NAME,
@@ -355,6 +412,11 @@ static int rockpi_panel_probe(struct i2c_client *i2c)
 	if (id != 0xc3)
 		return dev_err_probe(dev, -ENODEV,
 				     "unexpected MCU ID 0x%02x\n", id);
+
+	ret = rockpi_panel_force_off(ctx);
+	if (ret)
+		return dev_err_probe(dev, ret,
+				     "failed to establish safe initial state\n");
 
 	endpoint = of_graph_get_endpoint_by_regs(dev->of_node, 0, -1);
 	if (!endpoint)
@@ -394,27 +456,28 @@ static int rockpi_panel_probe(struct i2c_client *i2c)
 	ctx->dsi->mode_flags = MIPI_DSI_MODE_VIDEO |
 		MIPI_DSI_MODE_VIDEO_BURST | MIPI_DSI_MODE_LPM;
 
-	ret = mipi_dsi_attach(ctx->dsi);
-	if (ret)
-		goto unregister_dsi;
-
 	ctx->backlight = backlight_device_register("rockpi-rpi-touchscreen",
 						   dev, ctx,
 						   &rockpi_backlight_ops,
 						   &backlight_props);
 	if (IS_ERR(ctx->backlight)) {
 		ret = PTR_ERR(ctx->backlight);
-		goto detach_dsi;
+		goto unregister_dsi;
 	}
 
-	/* Register last: this unblocks the DSI host's component bind. */
+	/* The DesignWare host resolves the graph bridge during attach. */
 	drm_panel_add(&ctx->panel);
+
+	ret = mipi_dsi_attach(ctx->dsi);
+	if (ret)
+		goto remove_panel;
+
 	dev_info(dev, "registered RK3399-safe Raspberry Pi touchscreen panel\n");
 	return 0;
 
-detach_dsi:
-	if (mipi_dsi_detach(ctx->dsi))
-		dev_err(dev, "failed to detach DSI after probe error\n");
+remove_panel:
+	drm_panel_remove(&ctx->panel);
+	backlight_device_unregister(ctx->backlight);
 unregister_dsi:
 	mipi_dsi_device_unregister(ctx->dsi);
 	return dev_err_probe(dev, ret, "failed to initialize panel\n");
@@ -429,15 +492,15 @@ static void rockpi_panel_remove(struct i2c_client *i2c)
 	struct rockpi_rpi_panel *ctx = i2c_get_clientdata(i2c);
 	int ret;
 
-	drm_panel_remove(&ctx->panel);
 	ret = rockpi_panel_stop(ctx);
 	if (ret)
 		dev_err(&i2c->dev, "panel stop failed during remove: %d\n", ret);
-	backlight_device_unregister(ctx->backlight);
 
 	ret = mipi_dsi_detach(ctx->dsi);
 	if (ret)
 		dev_err(&i2c->dev, "failed to detach DSI device: %d\n", ret);
+	drm_panel_remove(&ctx->panel);
+	backlight_device_unregister(ctx->backlight);
 	mipi_dsi_device_unregister(ctx->dsi);
 }
 
