@@ -69,12 +69,12 @@ case $input in
 	[ -z "${DTC_COMPILE_DIAGNOSTIC:-}" ] || printf '%s\n' "$DTC_COMPILE_DIAGNOSTIC" >&2
 	;;
 *merged.dtb)
-	if [ "${MERGED_VARIANT:-valid}" = 'dsi0-disabled' ]; then
-		dsi0_status='status = "disabled";'
+	if [ "${MERGED_VARIANT:-valid}" = 'dsi0-enabled' ]; then
+		dsi0_status='status = "okay";'
 	elif [ "${MERGED_VARIANT:-valid}" = 'dsi0-nested-status' ]; then
 		dsi0_status=
 	else
-		dsi0_status='status = "okay";'
+		dsi0_status='status = "disabled";'
 	fi
 	cat > "$output" <<EOF_DTS
 dsi@ff960000 {
@@ -201,8 +201,8 @@ test_validate_uses_kernel_build_for_clean_and_scoped_merged_tree_checks()
 {
 	sandbox=$workdir/scoped-tree
 	make_validate_sandbox "$sandbox"
-	if MERGED_VARIANT=dsi0-disabled run_validate "$sandbox"; then
-		fail 'disabled DSI0 was accepted by merged-tree validation'
+	if MERGED_VARIANT=dsi0-enabled run_validate "$sandbox"; then
+		fail 'enabled unused DSI0 was accepted by merged-tree validation'
 	fi
 	grep -Fqx -- "-C $repo_root KDIR=$sandbox/modules/test-kernel/build clean" "$sandbox/make.log" ||
 		fail 'make clean did not receive the selected kernel build path'

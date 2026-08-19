@@ -3,13 +3,10 @@
 
 /*
  * Rock Pi 4B+ support for the original Raspberry Pi 7-inch Touch Display.
- * The connector needs both RK3399 DSI hosts enabled; video is routed through
- * the little VOP to DSI1 and the panel/touch controllers share I2C1.
+ * Video is routed through the little VOP to DSI1; the unused DSI0 host must
+ * remain disabled so it does not block the shared Rockchip DRM component.
+ * The panel and touch controllers share I2C1.
  */
-
-&mipi_dsi {
-	status = "okay";
-};
 
 &mipi_dsi1 {
 	status = "okay";

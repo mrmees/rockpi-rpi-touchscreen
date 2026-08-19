@@ -138,9 +138,9 @@ hdmi=$(node_from_file "$workdir/merged.dts" 'hdmi@ff940000')
 panel=$(printf '%s\n' "$i2c1" | extract_named_node 'panel@45')
 touch=$(printf '%s\n' "$i2c1" | extract_named_node 'touchscreen@38')
 
-require_text "$dsi0" 'status = "okay";' 'DSI0 is enabled'
+require_text "$dsi0" 'status = "disabled";' 'unused DSI0 remains disabled'
 require_text "$dsi1" 'status = "okay";' 'DSI1 is enabled'
-printf 'PASS: DSI0 and DSI1 enabled\n'
+printf 'PASS: unused DSI0 disabled and DSI1 enabled\n'
 
 require_text "$panel" 'compatible = "raspberrypi,7inch-touchscreen-panel";' 'panel compatible'
 require_text "$panel" 'reg = <0x45>;' 'panel address 0x45'

@@ -157,7 +157,7 @@ git commit -m "feat: add safe FT5426 polling driver"
 - Create: `tests/test_overlay.sh`
 
 **Interfaces:**
-- Consumes: active DTB symbols `mipi_dsi`, `mipi_dsi1`, `mipi1_in_vopl`, `mipi1_in_vopb`, `vopl_out_mipi1`, and `i2c1`.
+- Consumes: active DTB symbols `mipi_dsi1`, `mipi1_in_vopl`, `mipi1_in_vopb`, `vopl_out_mipi1`, and `i2c1`.
 - Produces: `build/rockpi-4b-plus-rpi-touchscreen.dtbo` and a test-only merged DTB.
 
 - [ ] **Step 1: Write the failing overlay integration test**
@@ -175,8 +175,10 @@ Expected: missing overlay source failure.
 
 - [ ] **Step 3: Implement the mainline-compatible overlay**
 
-The overlay must enable `&mipi_dsi` and `&mipi_dsi1`, connect a new DSI1
-output endpoint to an I2C1 panel node, and select little VOP:
+The overlay must leave the unused `&mipi_dsi` (DSI0) disabled, enable
+`&mipi_dsi1`, connect a new DSI1 output endpoint to an I2C1 panel node, and
+select little VOP. Enabling the unconnected DSI0 host blocks the shared
+Rockchip DRM component master and takes HDMI down with it:
 
 ```dts
 &i2c1 {

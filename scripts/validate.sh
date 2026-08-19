@@ -153,7 +153,7 @@ printf 'PASS: module build and metadata\n'
 dtb=$(active_dtb)
 [ -f "$dtb" ] || die "active DTB not found: $dtb"
 run_dtb_decompile base-dtb "$dtb" "$workdir/base.dts"
-for symbol in mipi_dsi mipi_dsi1 mipi1_in_vopl mipi1_in_vopb vopl_out_mipi1 i2c1; do
+for symbol in mipi_dsi1 mipi1_in_vopl mipi1_in_vopb vopl_out_mipi1 i2c1; do
 	grep -Eq "^[[:space:]]*$symbol[[:space:]]*=" "$workdir/base.dts" || die "active DTB is missing symbol: $symbol"
 done
 printf 'PASS: active DTB symbols\n'
@@ -178,9 +178,9 @@ hdmi=$(node_from_file "$workdir/merged.dts" 'hdmi@ff940000')
 panel=$(printf '%s\n' "$i2c1" | extract_named_node 'panel@45')
 touch=$(printf '%s\n' "$i2c1" | extract_named_node 'touchscreen@38')
 
-require_direct_property "$dsi0" status '"okay"' 'merged DSI0 is not enabled'
+require_direct_property "$dsi0" status '"disabled"' 'unused merged DSI0 is not disabled'
 require_direct_property "$dsi1" status '"okay"' 'merged DSI1 is not enabled'
-printf 'PASS: DSI0 and DSI1 enabled\n'
+printf 'PASS: unused DSI0 disabled and DSI1 enabled\n'
 require_text "$panel" 'compatible = "raspberrypi,7inch-touchscreen-panel";' 'merged panel compatible is missing'
 require_text "$panel" 'reg = <0x45>;' 'merged panel address is missing'
 require_text "$touch" 'compatible = "raspits_ft5426";' 'merged touch compatible is missing'
