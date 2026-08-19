@@ -238,6 +238,13 @@ EOF
 	printf 'PASS: installer gives DKMS the kernel-matching compiler path\n'
 }
 
+test_dkms_make_command_suppresses_automatic_kernelrelease()
+{
+	grep -Fqx "MAKE[0]=\"'make' KDIR=/lib/modules/\${kernelver}/build modules\"" "$repo_root/dkms.conf" ||
+		fail 'DKMS make command must quote make so DKMS does not append KERNELRELEASE'
+	printf 'PASS: DKMS make command suppresses automatic KERNELRELEASE\n'
+}
+
 test_uninstall_removes_only_project_token_and_dry_run_is_scoped()
 {
 	sandbox=$workdir/uninstall
@@ -298,6 +305,7 @@ test_post_backup_failure_rolls_back_owned_assets_and_boot_configuration()
 
 test_install_is_idempotent_and_preserves_unrelated_boot_text
 test_install_uses_a_kernel_matching_compiler_path_for_dkms
+test_dkms_make_command_suppresses_automatic_kernelrelease
 test_uninstall_removes_only_project_token_and_dry_run_is_scoped
 test_failed_validation_does_not_mutate_boot_configuration
 test_post_backup_failure_rolls_back_owned_assets_and_boot_configuration
