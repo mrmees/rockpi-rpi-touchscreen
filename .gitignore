@@ -1,0 +1,10 @@
+.worktrees/
+.superpowers/
+build/
+*.ko
+*.o
+*.mod
+*.mod.c
+*.symvers
+modules.order
+Module.symvers
