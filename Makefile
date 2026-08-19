@@ -1,6 +1,8 @@
 ifneq ($(KERNELRELEASE),)
 obj-m += raspits_ft5426.o
 raspits_ft5426-y := src/raspits_ft5426.o
+obj-m += panel_rockpi_rpi_touchscreen.o
+panel_rockpi_rpi_touchscreen-y := src/panel_rockpi_rpi_touchscreen.o
 else
 KDIR ?= /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)
@@ -19,6 +21,7 @@ test:
 	cc -std=c11 -Wall -Wextra -Werror -I. tests/test_protocol.c -o /tmp/test_ft5426
 	/tmp/test_ft5426
 	sh tests/test_driver_lifecycle.sh
+	sh tests/test_panel_lifecycle.sh
 	sh tests/test_overlay.sh
 	sh tests/test_scripts.sh
 	sh tests/test_dkms.sh
