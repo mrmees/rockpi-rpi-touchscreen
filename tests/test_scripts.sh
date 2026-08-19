@@ -39,10 +39,11 @@ verbosity=1
 user_overlays=spi-test
 extraargs=console=ttyS2
 EOF
-	cat > "$sandbox/bin/dkms" <<'EOF'
+cat > "$sandbox/bin/dkms" <<'EOF'
 #!/bin/sh
 set -eu
 printf '%s\n' "$*" >> "${DKMS_LOG:?}"
+[ -z "${DKMS_PATH_LOG:-}" ] || printf '%s\n' "$PATH" > "$DKMS_PATH_LOG"
 if [ "${DKMS_FAIL_ON:-}" = "$1" ]; then
 	exit 1
 fi
@@ -114,7 +115,8 @@ run_install()
 	MODULES_DIR="$sandbox/modules" KERNEL_RELEASE=test-kernel \
 	BUILD_DIR="$sandbox/build" BACKUP_PATH="$sandbox/boot/armbianEnv.txt.rockpi-rpi-touchscreen.bak" \
 	VALIDATE_SCRIPT="$validator" VALIDATE_LOG="$sandbox/validate.log" \
-	DKMS_LOG="$sandbox/dkms.log" MV_LOG="$sandbox/mv.log" PATH="$sandbox/bin:$PATH" \
+	DKMS_LOG="$sandbox/dkms.log" DKMS_PATH_LOG="$sandbox/dkms.path" \
+	MV_LOG="$sandbox/mv.log" PATH="$sandbox/bin:$PATH" \
 	sh "$repo_root/scripts/install.sh" "$@"
 }
 
@@ -205,6 +207,37 @@ extraargs=console=ttyS2'
 	printf 'PASS: idempotent install preserves boot configuration and backup\n'
 }
 
+test_install_uses_a_kernel_matching_compiler_path_for_dkms()
+{
+	sandbox=$workdir/kernel-compiler
+	make_sandbox "$sandbox"
+	mkdir -p "$sandbox/modules/test-kernel/build/include/generated"
+	printf '%s\n' '#define CONFIG_CC_VERSION_TEXT "aarch64-linux-gnu-gcc (Debian 14.2.0-19) 14.2.0"' > \
+		"$sandbox/modules/test-kernel/build/include/generated/autoconf.h"
+	cat > "$sandbox/bin/aarch64-linux-gnu-gcc" <<'EOF'
+#!/bin/sh
+printf '%s\n' 'aarch64-linux-gnu-gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0'
+EOF
+	cat > "$sandbox/bin/aarch64-linux-gnu-gcc-14" <<'EOF'
+#!/bin/sh
+case ${0##*/} in
+aarch64-linux-gnu-gcc) printf '%s\n' 'aarch64-linux-gnu-gcc (Debian 14.2.0-19) 14.2.0' ;;
+*) printf '%s\n' 'aarch64-linux-gnu-gcc-14 (Debian 14.2.0-19) 14.2.0' ;;
+esac
+EOF
+	chmod +x "$sandbox/bin/aarch64-linux-gnu-gcc" "$sandbox/bin/aarch64-linux-gnu-gcc-14"
+
+	run_install "$sandbox" "$sandbox/validate-pass.sh"
+	compiler_directory=$sandbox/usr-src/rockpi-rpi-touchscreen-0.1.0/.module-compiler
+	[ -L "$compiler_directory/aarch64-linux-gnu-gcc" ] ||
+		fail 'installer did not create the compiler shim in its DKMS source tree'
+	case $(cat "$sandbox/dkms.path") in
+	"$compiler_directory":*) ;;
+	*) fail 'DKMS did not inherit the kernel-matching compiler path' ;;
+	esac
+	printf 'PASS: installer gives DKMS the kernel-matching compiler path\n'
+}
+
 test_uninstall_removes_only_project_token_and_dry_run_is_scoped()
 {
 	sandbox=$workdir/uninstall
@@ -264,6 +297,7 @@ test_post_backup_failure_rolls_back_owned_assets_and_boot_configuration()
 }
 
 test_install_is_idempotent_and_preserves_unrelated_boot_text
+test_install_uses_a_kernel_matching_compiler_path_for_dkms
 test_uninstall_removes_only_project_token_and_dry_run_is_scoped
 test_failed_validation_does_not_mutate_boot_configuration
 test_post_backup_failure_rolls_back_owned_assets_and_boot_configuration

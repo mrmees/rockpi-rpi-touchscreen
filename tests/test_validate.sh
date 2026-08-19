@@ -212,13 +212,58 @@ test_validate_uses_the_kernel_recorded_compiler()
 		"$sandbox/modules/test-kernel/build/include/generated/compile.h"
 	cat > "$sandbox/bin/test-kernel-gcc" <<'EOF'
 #!/bin/sh
-exit 0
+printf '%s\n' 'test-kernel-gcc 1.0'
 EOF
 	chmod +x "$sandbox/bin/test-kernel-gcc"
 	run_validate "$sandbox"
-	grep -Fqx -- "-C $repo_root KDIR=$sandbox/modules/test-kernel/build CC=test-kernel-gcc W=1 modules" \
+	grep -Fqx -- "-C $repo_root KDIR=$sandbox/modules/test-kernel/build CC=$sandbox/bin/test-kernel-gcc W=1 modules" \
 		"$sandbox/make.log" || fail 'module build did not use the kernel-recorded compiler'
 	printf 'PASS: kernel-recorded compiler is used\n'
+}
+
+test_versioned_compiler_is_shimmed_to_the_kernel_recorded_name()
+{
+	sandbox=$workdir/versioned-compiler
+	make_validate_sandbox "$sandbox"
+	mkdir -p "$sandbox/modules/test-kernel/build/include/generated"
+	printf '%s\n' '#define LINUX_COMPILER "aarch64-linux-gnu-gcc (Debian 14.2.0-19) 14.2.0"' > \
+		"$sandbox/modules/test-kernel/build/include/generated/compile.h"
+	cat > "$sandbox/bin/aarch64-linux-gnu-gcc" <<'EOF'
+#!/bin/sh
+printf '%s\n' 'aarch64-linux-gnu-gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0'
+EOF
+	cat > "$sandbox/bin/aarch64-linux-gnu-gcc-14" <<'EOF'
+#!/bin/sh
+case ${0##*/} in
+aarch64-linux-gnu-gcc) printf '%s\n' 'aarch64-linux-gnu-gcc (Debian 14.2.0-19) 14.2.0' ;;
+*) printf '%s\n' 'aarch64-linux-gnu-gcc-14 (Debian 14.2.0-19) 14.2.0' ;;
+esac
+EOF
+	chmod +x "$sandbox/bin/aarch64-linux-gnu-gcc" "$sandbox/bin/aarch64-linux-gnu-gcc-14"
+	run_validate "$sandbox"
+	grep -Eq -- "-C $repo_root KDIR=$sandbox/modules/test-kernel/build CC=.*/module-compiler/aarch64-linux-gnu-gcc W=1 modules" \
+		"$sandbox/make.log" || fail 'versioned compiler was not shimmed to the kernel-recorded name'
+	printf 'PASS: versioned compiler matches the kernel compiler banner\n'
+}
+
+test_unmatched_kernel_compiler_is_rejected_before_module_build()
+{
+	sandbox=$workdir/unmatched-compiler
+	make_validate_sandbox "$sandbox"
+	mkdir -p "$sandbox/modules/test-kernel/build/include/generated"
+	printf '%s\n' '#define LINUX_COMPILER "test-kernel-gcc (Debian 14.2.0-19) 14.2.0"' > \
+		"$sandbox/modules/test-kernel/build/include/generated/compile.h"
+	cat > "$sandbox/bin/test-kernel-gcc" <<'EOF'
+#!/bin/sh
+printf '%s\n' 'test-kernel-gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0'
+EOF
+	chmod +x "$sandbox/bin/test-kernel-gcc"
+	if run_validate "$sandbox" > "$sandbox/output" 2>&1; then
+		fail 'validator accepted an unmatched compiler banner'
+	fi
+	grep -Fq 'no compiler matches the kernel banner' "$sandbox/output" ||
+		fail 'validator did not explain the unmatched compiler banner'
+	printf 'PASS: unmatched compiler banner fails validation\n'
 }
 
 test_module_warning_fails_validation
@@ -227,4 +272,6 @@ test_unexpected_base_dtb_warning_fails_validation
 test_documented_base_dtb_diagnostics_are_filtered
 test_validate_uses_kernel_build_for_clean_and_scoped_merged_tree_checks
 test_validate_uses_the_kernel_recorded_compiler
+test_versioned_compiler_is_shimmed_to_the_kernel_recorded_name
+test_unmatched_kernel_compiler_is_rejected_before_module_build
 printf 'PASS: validation diagnostics policy\n'

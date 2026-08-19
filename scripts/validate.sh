@@ -5,7 +5,7 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$script_dir/common.sh"
 
 [ "${1:-}" = '--offline' ] || die "usage: $0 --offline"
-require_command awk dtc fdtoverlay grep make mkdir modinfo mktemp rm sed tail tr
+require_command awk dtc fdtoverlay grep ln make mkdir modinfo mktemp rm sed tail tr
 
 compatible_file=${COMPATIBLE_FILE:-/proc/device-tree/compatible}
 [ -r "$compatible_file" ] || die "cannot read board compatible string: $compatible_file"
@@ -113,10 +113,48 @@ require_equal()
 }
 
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
-module_compiler=${MODULE_CC:-}
-if [ -z "$module_compiler" ] && [ -r "$KERNEL_BUILD/include/generated/compile.h" ]; then
-	module_compiler=$(awk -F '"' '/^[[:space:]]*#define[[:space:]]+LINUX_COMPILER[[:space:]]+/ { split($2, words, " "); print words[1]; exit }' "$KERNEL_BUILD/include/generated/compile.h")
-	command -v "$module_compiler" >/dev/null 2>&1 || module_compiler=
+module_compiler=
+compiler_header=$KERNEL_BUILD/include/generated/compile.h
+compiler_config=$KERNEL_BUILD/include/generated/autoconf.h
+kernel_compiler_banner=
+if [ -r "$compiler_config" ]; then
+	kernel_compiler_banner=$(awk -F '"' '/^[[:space:]]*#define[[:space:]]+CONFIG_CC_VERSION_TEXT[[:space:]]+/ { print $2; exit }' "$compiler_config")
+fi
+if [ -z "$kernel_compiler_banner" ] && [ -r "$compiler_header" ]; then
+	kernel_compiler_banner=$(awk -F '"' '/^[[:space:]]*#define[[:space:]]+LINUX_COMPILER[[:space:]]+/ { sub(/, GNU ld .*/, "", $2); print $2; exit }' "$compiler_header")
+fi
+if [ -n "$kernel_compiler_banner" ]; then
+		kernel_compiler_name=$(printf '%s\n' "$kernel_compiler_banner" | awk '{ print $1 }')
+		kernel_compiler_major=$(printf '%s\n' "$kernel_compiler_banner" | awk '
+			{
+				for (i = NF; i > 0; i--)
+					if ($i ~ /^[0-9]+\.[0-9]+/) {
+						split($i, version, ".")
+						print version[1]
+						exit
+					}
+			}')
+		compiler_candidate=${MODULE_CC:-$kernel_compiler_name}
+		if command -v "$compiler_candidate" >/dev/null 2>&1; then
+			compiler_candidate=$(command -v "$compiler_candidate")
+			compiler_banner=$("$compiler_candidate" --version 2>/dev/null | sed -n '1p')
+			if [ "$compiler_banner" = "$kernel_compiler_banner" ]; then
+				module_compiler=$compiler_candidate
+			elif [ -z "${MODULE_CC:-}" ] && [ -n "$kernel_compiler_major" ] &&
+				command -v "$kernel_compiler_name-$kernel_compiler_major" >/dev/null 2>&1; then
+				compiler_candidate=$(command -v "$kernel_compiler_name-$kernel_compiler_major")
+			fi
+		fi
+		if [ -z "$module_compiler" ] && [ -n "${compiler_candidate:-}" ] && [ -x "$compiler_candidate" ]; then
+			compiler_directory=$workdir/module-compiler
+			mkdir "$compiler_directory"
+			ln -s "$compiler_candidate" "$compiler_directory/$kernel_compiler_name"
+			compiler_banner=$("$compiler_directory/$kernel_compiler_name" --version 2>/dev/null | sed -n '1p')
+			[ "$compiler_banner" = "$kernel_compiler_banner" ] &&
+				module_compiler=$compiler_directory/$kernel_compiler_name
+		fi
+		[ -n "$module_compiler" ] ||
+			die "no compiler matches the kernel banner: $kernel_compiler_banner (set MODULE_CC to a matching compiler)"
 fi
 run_warning_free module-clean make -C "$repo_root" KDIR="$KERNEL_BUILD" clean
 if [ -n "$module_compiler" ]; then
