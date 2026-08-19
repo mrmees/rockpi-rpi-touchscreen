@@ -17,6 +17,24 @@ overlay_destination=$OVERLAY_DIRECTORY/$OVERLAY_NAME.dtbo
 [ -f "$overlay_output" ] || die "validated overlay not found: $overlay_output"
 [ -f "$ARMBIAN_ENV" ] || die "boot configuration not found: $ARMBIAN_ENV"
 
+old_version=0.1.1
+old_source=${DKMS_TREE:-/usr/src}/${PROJECT_NAME}-${old_version}
+if ! old_status=$(dkms status -m "$PROJECT_NAME" -v "$old_version" 2>&1); then
+	printf 'ERROR: cannot verify old DKMS state; retained %s/%s registration and source %s: %s\n' \
+		"$PROJECT_NAME" "$old_version" "$old_source" "$old_status" >&2
+	exit 1
+fi
+old_registered=0
+if printf '%s\n' "$old_status" | grep -Fq "$PROJECT_NAME/$old_version"; then
+	old_registered=1
+fi
+old_source_owned=0
+if [ -f "$old_source/dkms.conf" ] &&
+	grep -Fq 'PACKAGE_NAME="rockpi-rpi-touchscreen"' "$old_source/dkms.conf" &&
+	grep -Fq 'PACKAGE_VERSION="0.1.1"' "$old_source/dkms.conf"; then
+	old_source_owned=1
+fi
+
 source_created=0
 overlay_created=0
 overlay_backup_created=0
@@ -26,6 +44,7 @@ dkms_registration_created=0
 backup_created=0
 completed=0
 stage_directory=
+recovery_directory=
 backup_file=${BACKUP_PATH:-$ARMBIAN_ENV.$PROJECT_NAME.$(date -u +%Y%m%dT%H%M%SZ).bak}
 
 rollback()
@@ -34,6 +53,7 @@ rollback()
 	trap - EXIT HUP INT TERM
 	rollback_failed=0
 	rollback_note=
+	new_registration_retained=0
 	if [ "$completed" -ne 1 ]; then
 		if [ "$backup_created" -eq 1 ] && [ -f "$backup_file" ]; then
 			if ! try_atomic_install_file "$backup_file" "$ARMBIAN_ENV"; then
@@ -63,9 +83,23 @@ rollback()
 		if [ "$dkms_registration_created" -eq 1 ] &&
 			! dkms remove -m "$PROJECT_NAME" -v "$PROJECT_VERSION" --all >/dev/null 2>&1; then
 			rollback_failed=1
-			rollback_note="$rollback_note DKMS registration removal failed;"
+			new_registration_retained=1
+			rollback_note="$rollback_note DKMS registration removal failed; new source retained at $PROJECT_SOURCE_DIR;"
 		fi
-		if [ "$source_created" -eq 1 ] && ! rm -rf "$PROJECT_SOURCE_DIR"; then
+		if [ -n "$recovery_directory" ] && [ -d "$recovery_directory/prior-modules" ]; then
+			for module_name in $MODULE_NAMES; do
+				prior_module=$recovery_directory/prior-modules/$module_name.ko
+				prior_path_file=$recovery_directory/prior-modules/$module_name.path
+				[ -f "$prior_module" ] || continue
+				prior_path=$(cat "$prior_path_file")
+				if ! try_atomic_install_file "$prior_module" "$prior_path"; then
+					rollback_failed=1
+					rollback_note="$rollback_note prior $module_name module retained at $prior_module;"
+				fi
+			done
+		fi
+		if [ "$source_created" -eq 1 ] && [ "$new_registration_retained" -eq 0 ] &&
+			! rm -rf "$PROJECT_SOURCE_DIR"; then
 			rollback_failed=1
 			rollback_note="$rollback_note new source removal failed: $PROJECT_SOURCE_DIR;"
 		fi
@@ -73,6 +107,11 @@ rollback()
 			! rm -rf "$stage_directory"; then
 			rollback_failed=1
 			rollback_note="$rollback_note staged source cleanup failed: $stage_directory;"
+		fi
+		if [ "$rollback_failed" -eq 0 ] && [ -n "$recovery_directory" ] &&
+			[ -d "$recovery_directory" ] && ! rm -rf "$recovery_directory"; then
+			rollback_failed=1
+			rollback_note="$rollback_note transaction recovery cleanup failed: $recovery_directory;"
 		fi
 	fi
 	if [ "$rollback_failed" -ne 0 ]; then
@@ -86,19 +125,22 @@ trap rollback EXIT HUP INT TERM
 
 source_parent=$(dirname -- "$PROJECT_SOURCE_DIR")
 mkdir -p "$source_parent"
+recovery_directory=$(mktemp -d "$source_parent/.${PROJECT_NAME}.transaction.XXXXXX")
 stage_directory=$(mktemp -d "$source_parent/.${PROJECT_NAME}.stage.XXXXXX")
 mkdir -p "$stage_directory/src" "$stage_directory/scripts" "$stage_directory/LICENSES"
 chmod 0755 "$stage_directory" "$stage_directory/src" "$stage_directory/scripts" "$stage_directory/LICENSES"
 install -m 0644 "$repo_root/Makefile" "$repo_root/dkms.conf" "$repo_root/LICENSE" "$stage_directory/"
 install -m 0644 "$repo_root/LICENSES/GPL-2.0-only.txt" "$stage_directory/LICENSES/"
 install -m 0644 "$repo_root/LICENSES/UPSTREAM.md" "$stage_directory/LICENSES/"
-install -m 0644 "$repo_root/src/ft5426_protocol.h" "$repo_root/src/raspits_ft5426.c" "$stage_directory/src/"
+install -m 0644 "$repo_root/src/ft5426_protocol.h" "$repo_root/src/raspits_ft5426.c" \
+	"$repo_root/src/panel_rockpi_rpi_touchscreen.c" "$stage_directory/src/"
 install -m 0755 "$repo_root/scripts/dkms-make.sh" "$stage_directory/scripts/"
 source_digest()
 {
 	(
 		cd "$1"
 		sha256sum Makefile dkms.conf src/ft5426_protocol.h src/raspits_ft5426.c \
+			src/panel_rockpi_rpi_touchscreen.c \
 			scripts/dkms-make.sh LICENSE LICENSES/GPL-2.0-only.txt LICENSES/UPSTREAM.md | sha256sum | awk '{print $1}'
 	)
 }
@@ -127,15 +169,52 @@ else
 		die 'DKMS package could not be added or found'
 fi
 dkms build -m "$PROJECT_NAME" -v "$PROJECT_VERSION" -k "$KERNEL_RELEASE"
+
+mkdir -p "$recovery_directory/prior-modules"
+for module_name in $MODULE_NAMES; do
+	if prior_module_path=$(modinfo -k "$KERNEL_RELEASE" -n "$module_name" 2>/dev/null) &&
+		[ -f "$prior_module_path" ]; then
+		cp "$prior_module_path" "$recovery_directory/prior-modules/$module_name.ko"
+		printf '%s\n' "$prior_module_path" > "$recovery_directory/prior-modules/$module_name.path"
+	fi
+done
 dkms install -m "$PROJECT_NAME" -v "$PROJECT_VERSION" -k "$KERNEL_RELEASE"
 
 dkms_state_root=${DKMS_STATE_DIR:-/var/lib/dkms}
-built_module=$(find "$dkms_state_root/$PROJECT_NAME/$PROJECT_VERSION/$KERNEL_RELEASE" \
-	-type f -name raspits_ft5426.ko -print 2>/dev/null | head -n 1)
-[ -n "$built_module" ] || die 'cannot locate the DKMS-built module for checksum verification'
-installed_module=$(modinfo -k "$KERNEL_RELEASE" -n raspits_ft5426)
-[ -f "$installed_module" ] || die "installed module not found: $installed_module"
-cmp "$built_module" "$installed_module" || die 'installed module checksum does not match the DKMS build'
+dkms status -m "$PROJECT_NAME" -v "$PROJECT_VERSION" |
+	grep -Fq "$PROJECT_NAME/$PROJECT_VERSION" ||
+	die "DKMS did not report $PROJECT_NAME/$PROJECT_VERSION installed"
+for module_name in $MODULE_NAMES; do
+	built_module=$(find "$dkms_state_root/$PROJECT_NAME/$PROJECT_VERSION/$KERNEL_RELEASE" \
+		-type f -name "$module_name.ko" -print 2>/dev/null | head -n 1)
+	[ -n "$built_module" ] || die "cannot locate the DKMS-built $module_name module"
+	installed_module=$(modinfo -k "$KERNEL_RELEASE" -n "$module_name")
+	[ -f "$installed_module" ] || die "installed module not found: $installed_module"
+	built_checksum=$(sha256sum "$built_module" | awk '{print $1}')
+	installed_checksum=$(sha256sum "$installed_module" | awk '{print $1}')
+	[ "$built_checksum" = "$installed_checksum" ] ||
+		die "installed $module_name checksum does not match the DKMS build"
+	[ "$(modinfo -F license "$built_module")" = 'GPL v2' ] &&
+		[ "$(modinfo -F license "$installed_module")" = 'GPL v2' ] ||
+		die "$module_name built or installed module license is not GPL v2"
+	built_vermagic=$(modinfo -F vermagic "$built_module")
+	installed_vermagic=$(modinfo -F vermagic "$installed_module")
+	[ "$built_vermagic" = "$installed_vermagic" ] ||
+		die "$module_name built and installed vermagic differ"
+	case $built_vermagic in
+	"$KERNEL_RELEASE "*) ;;
+	*) die "$module_name vermagic does not match $KERNEL_RELEASE" ;;
+	esac
+	case $module_name in
+	raspits_ft5426) expected_alias='of:N*T*Craspits_ft5426' ;;
+	panel_rockpi_rpi_touchscreen) expected_alias='of:N*T*Crockpi,rpi-7inch-touchscreen-panel' ;;
+	*) die "no module metadata policy for $module_name" ;;
+	esac
+	modinfo -F alias "$built_module" | grep -Fxq "$expected_alias" ||
+		die "$module_name built module is missing device-tree alias $expected_alias"
+	modinfo -F alias "$installed_module" | grep -Fxq "$expected_alias" ||
+		die "$module_name installed module is missing device-tree alias $expected_alias"
+done
 
 if [ ! -e "$overlay_destination" ]; then
 	overlay_created=1
@@ -154,7 +233,21 @@ if [ ! -e "$backup_file" ]; then
 	sha256sum "$backup_file" > "$backup_file.sha256"
 	backup_created=1
 fi
+[ -f "$backup_file.sha256" ] || die "boot backup checksum not found: $backup_file.sha256"
+sha256sum -c "$backup_file.sha256" >/dev/null || die "boot backup checksum verification failed: $backup_file"
 add_overlay_token "$ARMBIAN_ENV" "$OVERLAY_TOKEN"
+[ "$(awk -v token="$OVERLAY_TOKEN" '
+	/^[[:space:]]*user_overlays[[:space:]]*=/ {
+		value = $0
+		sub(/^[^=]*=/, "", value)
+		n = split(value, tokens, /[[:space:]]+/)
+		for (i = 1; i <= n; i++) if (tokens[i] == token) count++
+	}
+	END { print count + 0 }
+' "$ARMBIAN_ENV")" -eq 1 ] || die 'boot configuration does not contain exactly one project overlay token'
+[ "$(source_digest "$PROJECT_SOURCE_DIR")" = "$expected_source_digest" ] ||
+	die 'final installed DKMS source checksum verification failed'
+cmp "$overlay_output" "$overlay_destination" || die 'final installed DTBO checksum verification failed'
 completed=1
 if [ "$overlay_replaced" -eq 1 ]; then
 	rm -f "$previous_overlay_file"
@@ -162,28 +255,24 @@ if [ "$overlay_replaced" -eq 1 ]; then
 	overlay_backup_created=0
 	overlay_replaced=0
 fi
+rm -rf "$recovery_directory"
+recovery_directory=
 trap - EXIT HUP INT TERM
 
-old_version=0.1.0
-old_source=${DKMS_TREE:-/usr/src}/${PROJECT_NAME}-${old_version}
-if ! old_status=$(dkms status -m "$PROJECT_NAME" -v "$old_version" 2>&1); then
-	printf 'ERROR: cannot verify old DKMS state; retained %s/%s registration and source %s: %s\n' \
-		"$PROJECT_NAME" "$old_version" "$old_source" "$old_status" >&2
-	exit 1
-fi
-if printf '%s\n' "$old_status" | grep -Fq "$PROJECT_NAME/$old_version"; then
+if [ "$old_registered" -eq 1 ]; then
 	if dkms remove -m "$PROJECT_NAME" -v "$old_version" --all; then
-		rm -rf "$old_source"
+		if [ "$old_source_owned" -eq 1 ]; then
+			rm -rf "$old_source"
+		fi
 	else
 		printf 'WARNING: installed %s/%s; retained old DKMS %s and source %s because removal failed\n' \
 			"$PROJECT_NAME" "$PROJECT_VERSION" "$old_version" "$old_source" >&2
 	fi
-elif [ -f "$old_source/dkms.conf" ] &&
-	grep -Fq 'PACKAGE_NAME="rockpi-rpi-touchscreen"' "$old_source/dkms.conf" &&
-	grep -Fq 'PACKAGE_VERSION="0.1.0"' "$old_source/dkms.conf"; then
+elif [ "$old_source_owned" -eq 1 ]; then
 	rm -rf "$old_source"
 fi
 
-printf 'PASS: installed %s/%s and verified module, source, and DTBO checksums\n' "$PROJECT_NAME" "$PROJECT_VERSION"
+printf 'PASS: installed %s/%s and verified both modules, source, backup, boot token, and DTBO checksums\n' \
+	"$PROJECT_NAME" "$PROJECT_VERSION"
 printf 'NEXT: power off; follow docs/wiring.md; boot with HDMI; run the README first-boot checks.\n'
 printf 'ROLLBACK: sudo sh scripts/uninstall.sh (or use docs/recovery.md offline).\n'

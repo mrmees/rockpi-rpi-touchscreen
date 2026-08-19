@@ -145,10 +145,24 @@ repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 run_warning_free module-clean make -C "$repo_root" KDIR="$KERNEL_BUILD" clean
 run_warning_free module-build "$script_dir/dkms-make.sh" "$KERNEL_RELEASE" \
 	make -C "$repo_root" KDIR="$KERNEL_BUILD" W=1 modules
-module_file=$repo_root/raspits_ft5426.ko
-[ "$(modinfo -F license "$module_file")" = 'GPL v2' ] || die 'module metadata is missing GPL v2 license'
-modinfo -F alias "$module_file" | grep -Fxq 'of:N*T*Craspits_ft5426' || die 'module metadata is missing device-tree alias'
-printf 'PASS: module build and metadata\n'
+for module_name in $MODULE_NAMES; do
+	module_file=$repo_root/$module_name.ko
+	[ -f "$module_file" ] || die "module build did not produce $module_name.ko"
+	[ "$(modinfo -F license "$module_file")" = 'GPL v2' ] ||
+		die "$module_name module metadata is missing GPL v2 license"
+	case $(modinfo -F vermagic "$module_file") in
+	"$KERNEL_RELEASE "*) ;;
+	*) die "$module_name module vermagic does not match $KERNEL_RELEASE" ;;
+	esac
+	case $module_name in
+	raspits_ft5426) expected_alias='of:N*T*Craspits_ft5426' ;;
+	panel_rockpi_rpi_touchscreen) expected_alias='of:N*T*Crockpi,rpi-7inch-touchscreen-panel' ;;
+	*) die "no metadata policy for module: $module_name" ;;
+	esac
+	modinfo -F alias "$module_file" | grep -Fxq "$expected_alias" ||
+		die "$([ "$module_name" = panel_rockpi_rpi_touchscreen ] && printf panel || printf touch) module metadata is missing $([ "$module_name" = panel_rockpi_rpi_touchscreen ] && printf project || printf expected) device-tree alias"
+done
+printf 'PASS: both module builds and metadata\n'
 
 dtb=$(active_dtb)
 [ -f "$dtb" ] || die "active DTB not found: $dtb"
@@ -181,7 +195,10 @@ touch=$(printf '%s\n' "$i2c1" | extract_named_node 'touchscreen@38')
 require_direct_property "$dsi0" status '"disabled"' 'unused merged DSI0 is not disabled'
 require_direct_property "$dsi1" status '"okay"' 'merged DSI1 is not enabled'
 printf 'PASS: unused DSI0 disabled and DSI1 enabled\n'
-require_text "$panel" 'compatible = "raspberrypi,7inch-touchscreen-panel";' 'merged panel compatible is missing'
+require_text "$panel" 'compatible = "rockpi,rpi-7inch-touchscreen-panel";' 'merged project panel compatible is missing'
+if printf '%s\n' "$panel" | grep -Fq 'compatible = "raspberrypi,7inch-touchscreen-panel";'; then
+	die 'merged tree retains the upstream panel compatible'
+fi
 require_text "$panel" 'reg = <0x45>;' 'merged panel address is missing'
 require_text "$touch" 'compatible = "raspits_ft5426";' 'merged touch compatible is missing'
 require_text "$touch" 'reg = <0x38>;' 'merged touch address is missing'

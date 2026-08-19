@@ -16,6 +16,21 @@ fail()
 	exit 1
 }
 
+test_two_module_package_metadata()
+{
+	metadata=$(bash -c '. "$1"; printf "%s\n" "$PACKAGE_NAME" "$PACKAGE_VERSION" "${BUILT_MODULE_NAME[0]-}" "${BUILT_MODULE_NAME[1]-}" "${BUILT_MODULE_LOCATION[0]-}" "${BUILT_MODULE_LOCATION[1]-}" "${DEST_MODULE_LOCATION[0]-}" "${DEST_MODULE_LOCATION[1]-}"' sh "$repo_root/dkms.conf")
+	expected='rockpi-rpi-touchscreen
+0.2.0
+raspits_ft5426
+panel_rockpi_rpi_touchscreen
+.
+.
+/updates/dkms
+/updates/dkms'
+	[ "$metadata" = "$expected" ] || fail 'DKMS metadata does not describe the two-module 0.2.0 package'
+	printf 'PASS: DKMS metadata owns both modules at version 0.2.0\n'
+}
+
 make_sandbox()
 {
 	sandbox=$1
@@ -88,6 +103,7 @@ EOF
 	printf 'PASS: autonomous DKMS make rejects an unmatched compiler\n'
 }
 
+test_two_module_package_metadata
 test_autonomous_dkms_make_uses_target_kernel_compiler
 test_autonomous_dkms_make_rejects_unmatched_compiler
 printf 'PASS: DKMS autonomous compiler selection\n'

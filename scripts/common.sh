@@ -1,8 +1,9 @@
 #!/bin/sh
 
 PROJECT_NAME=rockpi-rpi-touchscreen
-PROJECT_VERSION=0.1.1
+PROJECT_VERSION=0.2.0
 PROJECT_SOURCE_DIR=${DKMS_TREE:-/usr/src}/${PROJECT_NAME}-${PROJECT_VERSION}
+MODULE_NAMES='raspits_ft5426 panel_rockpi_rpi_touchscreen'
 OVERLAY_NAME=rockpi-4b-plus-rpi-touchscreen
 OVERLAY_TOKEN=$OVERLAY_NAME
 BOOT_DIRECTORY=${BOOT_DIR:-/boot}

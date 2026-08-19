@@ -42,7 +42,7 @@
 	status = "okay";
 
 	panel@45 {
-		compatible = "raspberrypi,7inch-touchscreen-panel";
+		compatible = "rockpi,rpi-7inch-touchscreen-panel";
 		reg = <0x45>;
 
 		port {

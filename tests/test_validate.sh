@@ -29,15 +29,25 @@ set -eu
 printf '%s\n' "$*" >> "${MAKE_LOG:?}"
 [ -z "${MAKE_CC_LOG:-}" ] || printf '%s\n' "${CC:-}" >> "$MAKE_CC_LOG"
 case " $* " in
-*' modules '*) [ -z "${MAKE_DIAGNOSTIC:-}" ] || printf '%s\n' "$MAKE_DIAGNOSTIC" >&2 ;;
+*' modules '*)
+	[ -z "${MAKE_DIAGNOSTIC:-}" ] || printf '%s\n' "$MAKE_DIAGNOSTIC" >&2
+	rm -f "${REPO_ROOT:?}/raspits_ft5426.ko" "${REPO_ROOT:?}/panel_rockpi_rpi_touchscreen.ko"
+	: > "${REPO_ROOT:?}/raspits_ft5426.ko"
+	: > "${REPO_ROOT:?}/panel_rockpi_rpi_touchscreen.ko"
+	;;
 esac
 EOF
 	chmod +x "$sandbox/bin/make"
 	cat > "$sandbox/bin/modinfo" <<'EOF'
 #!/bin/sh
-case "$2" in
-license) printf '%s\n' 'GPL v2' ;;
-alias) printf '%s\n' 'of:N*T*Craspits_ft5426' ;;
+set -eu
+field=$2
+module=${3##*/}
+case "$field:$module" in
+license:raspits_ft5426.ko|license:panel_rockpi_rpi_touchscreen.ko) printf '%s\n' 'GPL v2' ;;
+vermagic:raspits_ft5426.ko|vermagic:panel_rockpi_rpi_touchscreen.ko) printf '%s\n' 'test-kernel SMP mod_unload aarch64' ;;
+alias:raspits_ft5426.ko) printf '%s\n' 'of:N*T*Craspits_ft5426' ;;
+alias:panel_rockpi_rpi_touchscreen.ko) printf '%s\n' 'of:N*T*Crockpi,rpi-7inch-touchscreen-panel' ;;
 *) exit 1 ;;
 esac
 EOF
@@ -102,7 +112,7 @@ dsi@ff968000 {
 };
 i2c@ff110000 {
 	panel@45 {
-		compatible = "raspberrypi,7inch-touchscreen-panel";
+		compatible = "${PANEL_COMPATIBLE:-rockpi,rpi-7inch-touchscreen-panel}";
 		reg = <0x45>;
 		port {
 			endpoint {
@@ -155,7 +165,41 @@ run_validate()
 	BOOT_DIR="$sandbox/boot" MODULES_DIR="$sandbox/modules" KERNEL_RELEASE=test-kernel \
 	COMPATIBLE_FILE="$sandbox/compatible" BUILD_DIR="$sandbox/build" \
 	MAKE_LOG="$sandbox/make.log" MAKE_CC_LOG="$sandbox/make-cc.log" PATH="$sandbox/bin:$PATH" \
+	REPO_ROOT="$repo_root" \
 	sh "$repo_root/scripts/validate.sh" --offline "$@"
+}
+
+test_old_upstream_panel_compatible_fails_validation()
+{
+	sandbox=$workdir/upstream-panel-compatible
+	make_validate_sandbox "$sandbox"
+	if PANEL_COMPATIBLE='raspberrypi,7inch-touchscreen-panel' run_validate "$sandbox"; then
+		fail 'validator accepted the upstream panel compatible on the RK3399 route'
+	fi
+	printf 'PASS: upstream panel compatible fails validation\n'
+}
+
+test_validator_checks_distinct_module_aliases()
+{
+	sandbox=$workdir/module-aliases
+	make_validate_sandbox "$sandbox"
+	cat > "$sandbox/bin/modinfo" <<'EOF'
+#!/bin/sh
+set -eu
+case "$2" in
+license) printf '%s\n' 'GPL v2' ;;
+vermagic) printf '%s\n' 'test-kernel SMP mod_unload aarch64' ;;
+alias) printf '%s\n' 'of:N*T*Craspits_ft5426' ;;
+*) exit 1 ;;
+esac
+EOF
+	chmod +x "$sandbox/bin/modinfo"
+	if run_validate "$sandbox" > "$sandbox/output" 2>&1; then
+		fail 'validator accepted the touch alias for the panel module'
+	fi
+	grep -Fq 'panel module metadata is missing project device-tree alias' "$sandbox/output" ||
+		fail 'validator did not identify the panel alias failure'
+	printf 'PASS: validator requires distinct aliases for both modules\n'
 }
 
 test_module_warning_fails_validation()
@@ -295,6 +339,8 @@ EOF
 }
 
 test_module_warning_fails_validation
+test_old_upstream_panel_compatible_fails_validation
+test_validator_checks_distinct_module_aliases
 test_overlay_warning_fails_validation
 test_unexpected_base_dtb_warning_fails_validation
 test_documented_base_dtb_diagnostics_are_filtered

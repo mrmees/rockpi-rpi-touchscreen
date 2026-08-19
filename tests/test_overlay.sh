@@ -5,8 +5,8 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 armbian_env=${ARMBIAN_ENV:-/boot/armbianEnv.txt}
 dtb_root=${DTB_ROOT:-/boot/dtb}
 overlay=$repo_root/overlays/rockpi-4b-plus-rpi-touchscreen.dts
-output=$repo_root/build/rockpi-4b-plus-rpi-touchscreen.dtbo
 workdir=$(mktemp -d)
+output=$workdir/rockpi-4b-plus-rpi-touchscreen.dtbo
 
 cleanup()
 {
@@ -125,7 +125,6 @@ assert_active_dtb_resolution
 	exit 1
 }
 
-mkdir -p "$(dirname -- "$output")"
 dtc -@ -I dts -O dtb -o "$output" "$overlay"
 fdtoverlay -i "$dtb" -o "$workdir/merged.dtb" "$output"
 dtc -I dtb -O dts -o "$workdir/merged.dts" "$workdir/merged.dtb"
@@ -142,7 +141,11 @@ require_text "$dsi0" 'status = "disabled";' 'unused DSI0 remains disabled'
 require_text "$dsi1" 'status = "okay";' 'DSI1 is enabled'
 printf 'PASS: unused DSI0 disabled and DSI1 enabled\n'
 
-require_text "$panel" 'compatible = "raspberrypi,7inch-touchscreen-panel";' 'panel compatible'
+require_text "$panel" 'compatible = "rockpi,rpi-7inch-touchscreen-panel";' 'project panel compatible'
+if printf '%s\n' "$panel" | grep -Fq 'compatible = "raspberrypi,7inch-touchscreen-panel";'; then
+	printf 'FAIL: upstream panel compatible remains on the RK3399 route\n' >&2
+	exit 1
+fi
 require_text "$panel" 'reg = <0x45>;' 'panel address 0x45'
 printf 'PASS: panel at 0x45\n'
 

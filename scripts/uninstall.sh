@@ -41,6 +41,9 @@ if [ "$dry_run" -eq 1 ]; then
 	remove_overlay_token "$temporary_config" "$OVERLAY_TOKEN"
 	printf 'REMOVE: %s\n' "$overlay_destination"
 	printf 'REMOVE: %s\n' "$PROJECT_SOURCE_DIR"
+	for module_name in $MODULE_NAMES; do
+		printf 'MODULE: %s\n' "$module_name"
+	done
 	printf 'DKMS REMOVE: %s/%s\n' "$PROJECT_NAME" "$PROJECT_VERSION"
 	grep -m 1 '^[[:space:]]*user_overlays[[:space:]]*=' "$temporary_config" || printf 'user_overlays=\n'
 	rm -f "$temporary_config"
