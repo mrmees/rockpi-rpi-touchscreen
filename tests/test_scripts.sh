@@ -99,6 +99,12 @@ printf '%s\n' "$*" >> "${MV_LOG:?}"
 if [ -n "${MV_FAIL_SOURCE:-}" ] && [ "$1" = "$MV_FAIL_SOURCE" ]; then
 	exit 1
 fi
+case ${MV_FAIL_ROLLBACK_PREFIX:-} in
+'') ;;
+*) case $1 in
+   "${MV_FAIL_ROLLBACK_PREFIX}"*) exit 1 ;;
+   esac ;;
+esac
 if [ -n "${MV_FAIL_TARGET:-}" ] && [ "$last" = "$MV_FAIL_TARGET" ] &&
 	[ ! -e "${MV_FAIL_ONCE_MARKER:?}" ]; then
 	: > "$MV_FAIL_ONCE_MARKER"
@@ -254,6 +260,7 @@ source_snapshot()
 {
 	(
 		cd "$1"
+		find . -printf '%y %m %p %l\n' | sort
 		find . -type f -exec sha256sum {} \; | sort
 	)
 }
@@ -307,6 +314,56 @@ test_refresh_post_swap_dkms_failure_restores_registered_source()
 	}
 	assert_refresh_failure_preserves_source_and_boot "$workdir/refresh-dkms-failure" refresh_with_dkms_failure
 	printf 'PASS: refresh post-swap DKMS failure restores registered source and boot configuration\n'
+}
+
+test_refresh_late_boot_failure_restores_registered_source()
+{
+	sandbox=$workdir/refresh-late-boot-failure
+	make_sandbox "$sandbox"
+	run_install "$sandbox" "$sandbox/validate-pass.sh"
+	source=$sandbox/usr-src/rockpi-rpi-touchscreen-0.1.0
+	printf '%s\n' 'old registered source' > "$source/old-source-sentinel"
+	source_before=$(source_snapshot "$source")
+	boot_before=$(sha256sum "$sandbox/boot/armbianEnv.txt" | awk '{print $1}')
+	if MV_FAIL_TARGET="$sandbox/boot/armbianEnv.txt" \
+		MV_FAIL_ONCE_MARKER="$sandbox/late-boot-mv-failed" \
+		run_install "$sandbox" "$sandbox/validate-pass.sh"; then
+		fail 'refresh accepted a late boot configuration write failure'
+	fi
+	assert_equal "$(source_snapshot "$source")" "$source_before" \
+		'late boot failure restores the registered source identity'
+	assert_equal "$(sha256sum "$sandbox/boot/armbianEnv.txt" | awk '{print $1}')" "$boot_before" \
+		'late boot failure restores the boot configuration hash'
+	printf 'PASS: refresh late boot failure restores registered source and boot configuration\n'
+}
+
+test_refresh_rollback_move_failure_preserves_manual_recovery_backup()
+{
+	sandbox=$workdir/refresh-rollback-move-failure
+	make_sandbox "$sandbox"
+	run_install "$sandbox" "$sandbox/validate-pass.sh"
+	source=$sandbox/usr-src/rockpi-rpi-touchscreen-0.1.0
+	printf '%s\n' 'old registered source' > "$source/old-source-sentinel"
+	source_before=$(source_snapshot "$source")
+	boot_before=$(sha256sum "$sandbox/boot/armbianEnv.txt" | awk '{print $1}')
+	output=$sandbox/output
+	if DKMS_FAIL_ON=build \
+		MV_FAIL_ROLLBACK_PREFIX="$sandbox/usr-src/.rockpi-rpi-touchscreen.previous." \
+		run_install "$sandbox" "$sandbox/validate-pass.sh" > "$output" 2>&1; then
+		fail 'refresh accepted a rollback source move failure'
+	fi
+	previous=$(find "$sandbox/usr-src" -mindepth 1 -maxdepth 1 -type d \
+		-name '.rockpi-rpi-touchscreen.previous.*' -print -quit)
+	[ -n "$previous" ] || fail 'rollback did not preserve the prior source backup'
+	assert_equal "$(source_snapshot "$previous")" "$source_before" \
+		'manual recovery backup preserves the registered source identity'
+	assert_equal "$(sha256sum "$sandbox/boot/armbianEnv.txt" | awk '{print $1}')" "$boot_before" \
+		'rollback move failure leaves boot configuration unchanged'
+	grep -Fq 'ERROR: transaction failed with status' "$output" ||
+		fail 'rollback move failure did not distinguish the transaction failure'
+	grep -Fq "ERROR: manual recovery source backup: $previous" "$output" ||
+		fail 'rollback move failure did not print the exact manual recovery backup path'
+	printf 'PASS: rollback move failure preserves named manual recovery backup\n'
 }
 
 test_dkms_make_command_suppresses_automatic_kernelrelease()
@@ -379,6 +436,8 @@ test_reinstall_refreshes_the_owned_dkms_source_tree
 test_refresh_copy_failure_preserves_registered_source
 test_refresh_swap_failure_preserves_registered_source
 test_refresh_post_swap_dkms_failure_restores_registered_source
+test_refresh_late_boot_failure_restores_registered_source
+test_refresh_rollback_move_failure_preserves_manual_recovery_backup
 test_dkms_make_command_suppresses_automatic_kernelrelease
 test_uninstall_removes_only_project_token_and_dry_run_is_scoped
 test_failed_validation_does_not_mutate_boot_configuration

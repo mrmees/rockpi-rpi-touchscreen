@@ -31,30 +31,63 @@ backup_file=${BACKUP_PATH:-$ARMBIAN_ENV.$PROJECT_NAME.$(date -u +%Y%m%dT%H%M%SZ)
 
 rollback()
 {
-	status=$?
+	transaction_status=$?
 	trap - EXIT HUP INT TERM
+	rollback_failed=0
+	rollback_note=
+	manual_source_backup=
 	if [ "$completed" -ne 1 ]; then
 		if [ "$backup_created" -eq 1 ] && [ -f "$backup_file" ]; then
-			atomic_install_file "$backup_file" "$ARMBIAN_ENV" || true
+			if ! atomic_install_file "$backup_file" "$ARMBIAN_ENV"; then
+				rollback_failed=1
+				rollback_note="$rollback_note boot configuration backup retained at $backup_file;"
+			fi
 		fi
 		if [ "$overlay_created" -eq 1 ]; then
-			rm -f "$overlay_destination" || true
+			if ! rm -f "$overlay_destination"; then
+				rollback_failed=1
+				rollback_note="$rollback_note overlay removal failed: $overlay_destination;"
+			fi
 		fi
 		if [ "$dkms_registration_created" -eq 1 ]; then
-			dkms remove -m "$PROJECT_NAME" -v "$PROJECT_VERSION" --all >/dev/null 2>&1 || true
+			if ! dkms remove -m "$PROJECT_NAME" -v "$PROJECT_VERSION" --all >/dev/null 2>&1; then
+				rollback_failed=1
+				rollback_note="$rollback_note DKMS registration removal failed;"
+			fi
 		fi
 		if [ "$source_created" -eq 1 ]; then
-			rm -rf "$PROJECT_SOURCE_DIR" || true
+			if ! rm -rf "$PROJECT_SOURCE_DIR"; then
+				rollback_failed=1
+				rollback_note="$rollback_note new source removal failed: $PROJECT_SOURCE_DIR;"
+			fi
 		fi
 		if [ "$source_swapped" -eq 1 ] && [ -n "$previous_source_directory" ] && [ -d "$previous_source_directory" ]; then
-			rm -rf "$PROJECT_SOURCE_DIR" || true
-			mv "$previous_source_directory" "$PROJECT_SOURCE_DIR" || true
+			if ! rm -rf "$PROJECT_SOURCE_DIR"; then
+				rollback_failed=1
+				manual_source_backup=$previous_source_directory
+				rollback_note="$rollback_note replacement source removal failed;"
+			elif ! mv "$previous_source_directory" "$PROJECT_SOURCE_DIR"; then
+				rollback_failed=1
+				manual_source_backup=$previous_source_directory
+				rollback_note="$rollback_note prior source restoration failed;"
+			fi
 		fi
 		if [ -n "$stage_directory" ] && [ -d "$stage_directory" ]; then
-			rm -rf "$stage_directory" || true
+			if ! rm -rf "$stage_directory"; then
+				rollback_failed=1
+				rollback_note="$rollback_note staged source cleanup failed: $stage_directory;"
+			fi
 		fi
 	fi
-	exit "$status"
+	if [ "$rollback_failed" -ne 0 ]; then
+		printf 'ERROR: transaction failed with status %s; rollback also failed: %s\n' \
+			"$transaction_status" "$rollback_note" >&2
+		if [ -n "$manual_source_backup" ]; then
+			printf 'ERROR: manual recovery source backup: %s\n' "$manual_source_backup" >&2
+		fi
+		exit 1
+	fi
+	exit "$transaction_status"
 }
 trap rollback EXIT HUP INT TERM
 
