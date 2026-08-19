@@ -5,7 +5,7 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$script_dir/common.sh"
 
 require_root
-require_command awk cp date dirname dkms grep install mkdir mktemp mv rm sed sha256sum tail
+require_command awk chmod cp date dirname dkms grep mkdir mktemp mv rm sed sha256sum tail
 
 validator=${VALIDATE_SCRIPT:-$script_dir/validate.sh}
 [ -x "$validator" ] || [ -f "$validator" ] || die "validation script not found: $validator"
@@ -32,7 +32,7 @@ rollback()
 	trap - EXIT HUP INT TERM
 	if [ "$completed" -ne 1 ]; then
 		if [ "$backup_created" -eq 1 ] && [ -f "$backup_file" ]; then
-			cp "$backup_file" "$ARMBIAN_ENV" || true
+			atomic_install_file "$backup_file" "$ARMBIAN_ENV" || true
 		fi
 		if [ "$overlay_created" -eq 1 ]; then
 			rm -f "$overlay_destination" || true

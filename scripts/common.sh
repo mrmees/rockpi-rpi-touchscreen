@@ -53,11 +53,21 @@ atomic_install_file()
 		rm -f "$temporary_file"
 		die "cannot copy $source_file"
 	}
-	install -m 0644 "$temporary_file" "$destination_file" || {
+	atomic_replace_temp "$temporary_file" "$destination_file"
+}
+
+atomic_replace_temp()
+{
+	temporary_file=$1
+	destination_file=$2
+	chmod 0644 "$temporary_file" || {
 		rm -f "$temporary_file"
-		die "cannot atomically install $destination_file"
+		die "cannot set mode on temporary file for $destination_file"
 	}
-	rm -f "$temporary_file"
+	mv -f "$temporary_file" "$destination_file" || {
+		rm -f "$temporary_file"
+		die "cannot atomically replace $destination_file"
+	}
 }
 
 add_overlay_token()
@@ -94,11 +104,7 @@ add_overlay_token()
 		rm -f "$temporary_file"
 		die "cannot update boot configuration"
 	}
-	install -m 0644 "$temporary_file" "$config_file" || {
-		rm -f "$temporary_file"
-		die "cannot atomically update boot configuration"
-	}
-	rm -f "$temporary_file"
+	atomic_replace_temp "$temporary_file" "$config_file"
 }
 
 remove_overlay_token()
@@ -127,9 +133,5 @@ remove_overlay_token()
 		rm -f "$temporary_file"
 		die "cannot update boot configuration"
 	}
-	install -m 0644 "$temporary_file" "$config_file" || {
-		rm -f "$temporary_file"
-		die "cannot atomically update boot configuration"
-	}
-	rm -f "$temporary_file"
+	atomic_replace_temp "$temporary_file" "$config_file"
 }

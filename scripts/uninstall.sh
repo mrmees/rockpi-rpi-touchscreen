@@ -5,14 +5,33 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$script_dir/common.sh"
 
 dry_run=0
+offline_boot_root=
 case ${1:-} in
 '') ;;
 --dry-run) dry_run=1 ;;
-*) die "usage: $0 [--dry-run]" ;;
+--offline-boot-root)
+	[ "$#" -eq 2 ] || die "usage: $0 [--dry-run|--offline-boot-root TARGET_ROOT]"
+	offline_boot_root=$2
+	case $offline_boot_root in
+	/*) ;;
+	*) die 'offline target root must be an absolute path' ;;
+	esac
+	[ -d "$offline_boot_root" ] || die "offline target root does not exist: $offline_boot_root"
+	;;
+*) die "usage: $0 [--dry-run|--offline-boot-root TARGET_ROOT]" ;;
 esac
 
 require_root
-require_command cp dkms grep install mktemp rm
+if [ -n "$offline_boot_root" ]; then
+	require_command awk chmod mktemp mv rm
+	target_config=$offline_boot_root/boot/armbianEnv.txt
+	[ -f "$target_config" ] || die "target boot configuration not found: $target_config"
+	remove_overlay_token "$target_config" "$OVERLAY_TOKEN"
+	printf 'PASS: removed %s overlay token from %s\n' "$OVERLAY_TOKEN" "$target_config"
+	exit 0
+fi
+
+require_command awk chmod cp dkms grep mktemp mv rm
 overlay_destination=$OVERLAY_DIRECTORY/$OVERLAY_NAME.dtbo
 
 if [ "$dry_run" -eq 1 ]; then

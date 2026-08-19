@@ -64,12 +64,31 @@ last=
 for argument do
 	last=$argument
 done
+if [ -n "${INSTALL_FORBIDDEN_TARGET:-}" ] && [ "$last" = "$INSTALL_FORBIDDEN_TARGET" ]; then
+	exit 1
+fi
 if [ -n "${INSTALL_FAIL_TARGET:-}" ] && [ "$last" = "$INSTALL_FAIL_TARGET" ]; then
 	exit 1
 fi
 exec /usr/bin/install "$@"
 EOF
 	chmod +x "$sandbox/bin/install"
+	cat > "$sandbox/bin/mv" <<'EOF'
+#!/bin/sh
+set -eu
+last=
+for argument do
+	last=$argument
+done
+printf '%s\n' "$*" >> "${MV_LOG:?}"
+if [ -n "${MV_FAIL_TARGET:-}" ] && [ "$last" = "$MV_FAIL_TARGET" ] &&
+	[ ! -e "${MV_FAIL_ONCE_MARKER:?}" ]; then
+	: > "$MV_FAIL_ONCE_MARKER"
+	exit 1
+fi
+exec /bin/mv "$@"
+EOF
+	chmod +x "$sandbox/bin/mv"
 	cat > "$sandbox/validate-pass.sh" <<'EOF'
 #!/bin/sh
 set -eu
@@ -95,7 +114,7 @@ run_install()
 	MODULES_DIR="$sandbox/modules" KERNEL_RELEASE=test-kernel \
 	BUILD_DIR="$sandbox/build" BACKUP_PATH="$sandbox/boot/armbianEnv.txt.rockpi-rpi-touchscreen.bak" \
 	VALIDATE_SCRIPT="$validator" VALIDATE_LOG="$sandbox/validate.log" \
-	DKMS_LOG="$sandbox/dkms.log" PATH="$sandbox/bin:$PATH" \
+	DKMS_LOG="$sandbox/dkms.log" MV_LOG="$sandbox/mv.log" PATH="$sandbox/bin:$PATH" \
 	sh "$repo_root/scripts/install.sh" "$@"
 }
 
@@ -105,8 +124,54 @@ run_uninstall()
 	shift
 	BOOT_DIR="$sandbox/boot" DKMS_TREE="$sandbox/usr-src" \
 	MODULES_DIR="$sandbox/modules" KERNEL_RELEASE=test-kernel \
-	DKMS_LOG="$sandbox/dkms.log" PATH="$sandbox/bin:$PATH" \
+	DKMS_LOG="$sandbox/dkms.log" MV_LOG="$sandbox/mv.log" PATH="$sandbox/bin:$PATH" \
 	sh "$repo_root/scripts/uninstall.sh" "$@"
+}
+
+run_offline_boot_rollback()
+{
+	sandbox=$1
+	target_root=$2
+	BOOT_DIR="$sandbox/host-boot" DKMS_TREE="$sandbox/host-usr-src" \
+	DKMS_LOG="$sandbox/dkms.log" MV_LOG="$sandbox/mv.log" PATH="$sandbox/bin:$PATH" \
+	sh "$repo_root/scripts/uninstall.sh" --offline-boot-root "$target_root"
+}
+
+test_boot_configuration_uses_atomic_mv_for_update_and_rollback()
+{
+	sandbox=$workdir/atomic-boot-config
+	make_sandbox "$sandbox"
+	config=$sandbox/boot/armbianEnv.txt
+	before=$(cat "$config")
+	if INSTALL_FORBIDDEN_TARGET="$config" MV_FAIL_TARGET="$config" \
+		MV_FAIL_ONCE_MARKER="$sandbox/mv-failed-once" \
+		run_install "$sandbox" "$sandbox/validate-pass.sh"; then
+		fail 'installer accepted failed atomic boot configuration move'
+	fi
+	assert_equal "$(cat "$config")" "$before" \
+		'failed atomic update restores boot configuration through atomic replacement'
+	awk -v target="$config" '$NF == target { count++ } END { exit count == 2 ? 0 : 1 }' \
+		"$sandbox/mv.log" || fail 'boot update and rollback must each use mv to the boot configuration'
+	printf 'PASS: boot configuration update and rollback use atomic mv\n'
+}
+
+test_offline_boot_rollback_changes_only_explicit_target_root()
+{
+	sandbox=$workdir/offline-boot-rollback
+	make_sandbox "$sandbox"
+	target_root=$sandbox/target-root
+	mkdir -p "$target_root/boot" "$sandbox/host-usr-src/rockpi-rpi-touchscreen-0.1.0"
+	printf '%s\n' 'user_overlays=spi-test rockpi-4b-plus-rpi-touchscreen' > "$target_root/boot/armbianEnv.txt"
+	: > "$sandbox/host-usr-src/rockpi-rpi-touchscreen-0.1.0/sentinel"
+	: > "$sandbox/dkms.log"
+
+	run_offline_boot_rollback "$sandbox" "$target_root"
+	assert_equal "$(cat "$target_root/boot/armbianEnv.txt")" 'user_overlays=spi-test' \
+		'offline rollback removes only the project token from the explicit target root'
+	[ -f "$sandbox/host-usr-src/rockpi-rpi-touchscreen-0.1.0/sentinel" ] ||
+		fail 'offline rollback changed the running-host source tree'
+	[ ! -s "$sandbox/dkms.log" ] || fail 'offline rollback invoked DKMS'
+	printf 'PASS: target-root boot-config-only offline rollback\n'
 }
 
 test_install_is_idempotent_and_preserves_unrelated_boot_text()
@@ -186,7 +251,8 @@ test_post_backup_failure_rolls_back_owned_assets_and_boot_configuration()
 	sandbox=$workdir/rollback
 	make_sandbox "$sandbox"
 	before=$(cat "$sandbox/boot/armbianEnv.txt")
-	if INSTALL_FAIL_TARGET="$sandbox/boot/armbianEnv.txt" \
+	if MV_FAIL_TARGET="$sandbox/boot/armbianEnv.txt" \
+		MV_FAIL_ONCE_MARKER="$sandbox/mv-failed-once" \
 		run_install "$sandbox" "$sandbox/validate-pass.sh"; then
 		fail 'installer accepted failed atomic boot configuration write'
 	fi
@@ -201,4 +267,6 @@ test_install_is_idempotent_and_preserves_unrelated_boot_text
 test_uninstall_removes_only_project_token_and_dry_run_is_scoped
 test_failed_validation_does_not_mutate_boot_configuration
 test_post_backup_failure_rolls_back_owned_assets_and_boot_configuration
+test_boot_configuration_uses_atomic_mv_for_update_and_rollback
+test_offline_boot_rollback_changes_only_explicit_target_root
 printf 'PASS: transactional installer lifecycle\n'
