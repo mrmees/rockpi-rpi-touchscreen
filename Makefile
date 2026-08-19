@@ -20,6 +20,7 @@ test:
 	/tmp/test_ft5426
 	sh tests/test_overlay.sh
 	sh tests/test_scripts.sh
+	sh tests/test_dkms.sh
 	sh tests/test_validate.sh
 	sh tests/test_docs.sh
 endif

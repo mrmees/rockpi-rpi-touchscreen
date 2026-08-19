@@ -5,7 +5,7 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$script_dir/common.sh"
 
 require_root
-require_command awk chmod cp date dirname dkms grep ln mkdir mktemp mv rm sed sha256sum tail
+require_command awk chmod cp date dirname dkms grep mkdir mktemp mv rm sed sha256sum tail
 
 validator=${VALIDATE_SCRIPT:-$script_dir/validate.sh}
 [ -x "$validator" ] || [ -f "$validator" ] || die "validation script not found: $validator"
@@ -56,39 +56,10 @@ if [ ! -e "$PROJECT_SOURCE_DIR" ]; then
 	mv "$stage_directory" "$PROJECT_SOURCE_DIR"
 	source_created=1
 	trap rollback EXIT HUP INT TERM
-fi
-
-compiler_config=$KERNEL_BUILD/include/generated/autoconf.h
-if [ -r "$compiler_config" ]; then
-	kernel_compiler_banner=$(awk -F '"' '/^[[:space:]]*#define[[:space:]]+CONFIG_CC_VERSION_TEXT[[:space:]]+/ { print $2; exit }' "$compiler_config")
-	[ -n "$kernel_compiler_banner" ] || die "kernel compiler banner is missing: $compiler_config"
-	kernel_compiler_name=$(printf '%s\n' "$kernel_compiler_banner" | awk '{ print $1 }')
-	kernel_compiler_major=$(printf '%s\n' "$kernel_compiler_banner" | awk '
-		{
-			for (i = NF; i > 0; i--)
-				if ($i ~ /^[0-9]+\.[0-9]+/) {
-					split($i, version, ".")
-					print version[1]
-					exit
-				}
-		}')
-	compiler_candidate=${MODULE_CC:-$kernel_compiler_name}
-	command -v "$compiler_candidate" >/dev/null 2>&1 ||
-		die "kernel compiler is not available: $compiler_candidate"
-	compiler_candidate=$(command -v "$compiler_candidate")
-	compiler_banner=$("$compiler_candidate" --version 2>/dev/null | sed -n '1p')
-	if [ "$compiler_banner" != "$kernel_compiler_banner" ] && [ -z "${MODULE_CC:-}" ] &&
-		[ -n "$kernel_compiler_major" ] && command -v "$kernel_compiler_name-$kernel_compiler_major" >/dev/null 2>&1; then
-		compiler_candidate=$(command -v "$kernel_compiler_name-$kernel_compiler_major")
-	fi
-	compiler_directory=$PROJECT_SOURCE_DIR/.module-compiler
-	mkdir -p "$compiler_directory"
-	ln -sf "$compiler_candidate" "$compiler_directory/$kernel_compiler_name"
-	compiler_banner=$("$compiler_directory/$kernel_compiler_name" --version 2>/dev/null | sed -n '1p')
-	[ "$compiler_banner" = "$kernel_compiler_banner" ] ||
-		die "no compiler matches the kernel banner: $kernel_compiler_banner (set MODULE_CC to a matching compiler)"
-	PATH=$compiler_directory:$PATH
-	export PATH
+else
+	[ -d "$PROJECT_SOURCE_DIR" ] || die "DKMS source path is not a directory: $PROJECT_SOURCE_DIR"
+	[ -f "$PROJECT_SOURCE_DIR/dkms.conf" ] || die "DKMS source path is not owned by this project: $PROJECT_SOURCE_DIR"
+	cp -a "$repo_root/." "$PROJECT_SOURCE_DIR/"
 fi
 
 if dkms add -m "$PROJECT_NAME" -v "$PROJECT_VERSION"; then

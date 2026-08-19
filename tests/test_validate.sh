@@ -23,10 +23,11 @@ make_validate_sandbox()
 	printf '%s\n' 'fdtfile=test.dtb' > "$sandbox/boot/armbianEnv.txt"
 	: > "$sandbox/boot/dtb/test.dtb"
 	printf 'radxa,rockpi4b-plus\000' > "$sandbox/compatible"
-	cat > "$sandbox/bin/make" <<'EOF'
+cat > "$sandbox/bin/make" <<'EOF'
 #!/bin/sh
 set -eu
 printf '%s\n' "$*" >> "${MAKE_LOG:?}"
+[ -z "${MAKE_CC_LOG:-}" ] || printf '%s\n' "${CC:-}" >> "$MAKE_CC_LOG"
 case " $* " in
 *' modules '*) [ -z "${MAKE_DIAGNOSTIC:-}" ] || printf '%s\n' "$MAKE_DIAGNOSTIC" >&2 ;;
 esac
@@ -148,7 +149,7 @@ run_validate()
 	shift
 	BOOT_DIR="$sandbox/boot" MODULES_DIR="$sandbox/modules" KERNEL_RELEASE=test-kernel \
 	COMPATIBLE_FILE="$sandbox/compatible" BUILD_DIR="$sandbox/build" \
-	MAKE_LOG="$sandbox/make.log" PATH="$sandbox/bin:$PATH" \
+	MAKE_LOG="$sandbox/make.log" MAKE_CC_LOG="$sandbox/make-cc.log" PATH="$sandbox/bin:$PATH" \
 	sh "$repo_root/scripts/validate.sh" --offline "$@"
 }
 
@@ -216,8 +217,8 @@ printf '%s\n' 'test-kernel-gcc 1.0'
 EOF
 	chmod +x "$sandbox/bin/test-kernel-gcc"
 	run_validate "$sandbox"
-	grep -Fqx -- "-C $repo_root KDIR=$sandbox/modules/test-kernel/build CC=$sandbox/bin/test-kernel-gcc W=1 modules" \
-		"$sandbox/make.log" || fail 'module build did not use the kernel-recorded compiler'
+	grep -Eq -- "-C $repo_root KDIR=$sandbox/modules/test-kernel/build W=1 modules CC=.*/module-compiler/test-kernel-gcc$" "$sandbox/make.log" ||
+		fail 'module build did not use the kernel-recorded compiler'
 	printf 'PASS: kernel-recorded compiler is used\n'
 }
 
@@ -241,8 +242,8 @@ esac
 EOF
 	chmod +x "$sandbox/bin/aarch64-linux-gnu-gcc" "$sandbox/bin/aarch64-linux-gnu-gcc-14"
 	run_validate "$sandbox"
-	grep -Eq -- "-C $repo_root KDIR=$sandbox/modules/test-kernel/build CC=.*/module-compiler/aarch64-linux-gnu-gcc W=1 modules" \
-		"$sandbox/make.log" || fail 'versioned compiler was not shimmed to the kernel-recorded name'
+	grep -Eq -- "-C $repo_root KDIR=$sandbox/modules/test-kernel/build W=1 modules CC=.*/module-compiler/aarch64-linux-gnu-gcc$" "$sandbox/make.log" ||
+		fail 'versioned compiler was not shimmed to the kernel-recorded name'
 	printf 'PASS: versioned compiler matches the kernel compiler banner\n'
 }
 

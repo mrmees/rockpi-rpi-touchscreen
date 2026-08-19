@@ -23,9 +23,11 @@ the configuration with a timestamp and `.sha256` checksum.
 
 ## Offline rollback
 
-If neither display works, shut down and mount the Rock Pi boot filesystem on
-another Linux system. Let `TARGET_ROOT` be the absolute mount root containing
-`boot/armbianEnv.txt`, then run this repository's uninstaller from the host:
+If neither display works, shut down and mount the Rock Pi system storage on
+another Linux system. `TARGET_ROOT` is the mounted system root containing
+`boot/armbianEnv.txt`; for example, if the mounted configuration is
+`/mnt/rockpi/boot/armbianEnv.txt`, use `TARGET_ROOT=/mnt/rockpi`. Then run this
+repository's uninstaller from the host:
 
 ```sh
 sudo sh scripts/uninstall.sh --offline-boot-root TARGET_ROOT
