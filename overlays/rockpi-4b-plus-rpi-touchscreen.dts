@@ -1,0 +1,64 @@
+/dts-v1/;
+/plugin/;
+
+/*
+ * Rock Pi 4B+ support for the original Raspberry Pi 7-inch Touch Display.
+ * The connector needs both RK3399 DSI hosts enabled; video is routed through
+ * the little VOP to DSI1 and the panel/touch controllers share I2C1.
+ */
+
+&mipi_dsi {
+	status = "okay";
+};
+
+&mipi_dsi1 {
+	status = "okay";
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@1 {
+			reg = <1>;
+			dsi_out_panel: endpoint {
+				remote-endpoint = <&panel_in_dsi>;
+			};
+		};
+	};
+};
+
+&mipi1_in_vopb {
+	status = "disabled";
+};
+
+&mipi1_in_vopl {
+	status = "okay";
+};
+
+&vopl_out_mipi1 {
+	status = "okay";
+};
+
+&i2c1 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	status = "okay";
+
+	panel@45 {
+		compatible = "raspberrypi,7inch-touchscreen-panel";
+		reg = <0x45>;
+
+		port {
+			panel_in_dsi: endpoint {
+				remote-endpoint = <&dsi_out_panel>;
+			};
+		};
+	};
+
+	touchscreen@38 {
+		compatible = "raspits_ft5426";
+		reg = <0x38>;
+		touchscreen-size-x = <800>;
+		touchscreen-size-y = <480>;
+	};
+};
