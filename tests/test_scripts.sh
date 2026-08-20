@@ -736,6 +736,21 @@ extraargs=console=ttyS2'
 	printf 'PASS: idempotent install preserves boot configuration and backup\n'
 }
 
+test_install_handoff_requires_authorized_dsi_first_acceptance()
+{
+	sandbox=$workdir/install-handoff
+	make_sandbox "$sandbox"
+	output=$(run_install "$sandbox" "$sandbox/validate-pass.sh")
+	printf '%s\n' "$output" | grep -Fqx 'NEXT: installation is complete; no automatic power action occurs. Obtain fresh authorization before any reboot or shutdown.' ||
+		fail 'installer handoff must require fresh authorization without an automatic power action'
+	printf '%s\n' "$output" | grep -Fqx 'NEXT: first authorized boot: keep HDMI disconnected; validate DSI-1, RGB, and physical touch; then hot-plug HDMI.' ||
+		fail 'installer handoff must require DSI-first acceptance before HDMI hot-plug'
+	if printf '%s\n' "$output" | grep -Fq 'boot with HDMI'; then
+		fail 'installer handoff retained the obsolete boot-with-HDMI guidance'
+	fi
+	printf 'PASS: installer handoff requires authorized DSI-first acceptance\n'
+}
+
 test_dkms_make_command_suppresses_automatic_kernelrelease()
 {
 	grep -Fqx "MAKE[0]=\"'sh' scripts/dkms-make.sh \${kernelver} make KDIR=/lib/modules/\${kernelver}/build modules\"" "$repo_root/dkms.conf" ||
@@ -1705,6 +1720,7 @@ if [ -n "${TEST_FILTER:-}" ]; then
 fi
 
 test_install_is_idempotent_and_preserves_unrelated_boot_text
+test_install_handoff_requires_authorized_dsi_first_acceptance
 test_dkms_make_command_suppresses_automatic_kernelrelease
 test_uninstall_removes_only_project_token_and_dry_run_is_scoped
 test_failed_validation_does_not_mutate_boot_configuration

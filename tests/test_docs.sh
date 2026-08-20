@@ -104,5 +104,15 @@ require_text docs/recovery.md 'exact scoped offline rollback'
 require_text README.md 'HDMI hot-plug sequence'
 require_text README.md 'does not reboot or shut down automatically'
 require_text README.md 'production cold-start and reboot acceptance remains pending'
+require_text README.md 'The provider owns the DSI0 PLL supplier and reversible VOP correction; the panel depends on that provider; the touch module owns touch input.'
+require_text README.md 'The first authorized production boot starts with HDMI disconnected: validate DSI-1, RGB, and physical touch first, then hot-plug HDMI.'
+require_text README.md 'No automatic reboot or shutdown occurs; obtain fresh authorization before any power action.'
+require_text docs/recovery.md 'Exact scoped SSH rollback command: `sudo sh scripts/uninstall.sh`.'
+require_text docs/recovery.md 'Exact scoped offline rollback changes only `TARGET_ROOT/boot/armbianEnv.txt`, does not call DKMS, and does not remove host files.'
+require_text LICENSES/UPSTREAM.md 'https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/include/drm/drm_panel.h'
+require_text LICENSES/UPSTREAM.md 'https://github.com/radxa/kernel/blob/c681d6a31c2289dbaca2e1f822bab41530fc0f68/drivers/gpu/drm/rockchip/rockchip_vop_reg.c'
+if grep -Fq 'https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/gpu/drm/rockchip/rockchip_vop_reg.c' "$repo_root/LICENSES/UPSTREAM.md"; then
+	fail 'attribution must not claim that the Linux v6.18 VOP table defines the RK3399 swap fields'
+fi
 
 printf 'PASS: documentation acceptance\n'

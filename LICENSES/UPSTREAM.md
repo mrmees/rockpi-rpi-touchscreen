@@ -49,17 +49,19 @@ commit `c681d6a31c2289dbaca2e1f822bab41530fc0f68`:
 
 https://github.com/radxa/kernel/blob/c681d6a31c2289dbaca2e1f822bab41530fc0f68/drivers/gpu/drm/rockchip/dw-mipi-dsi-rockchip.c
 
-The Linux v6.18 Rockchip VOP register table identifies `SYS_CTRL.data01_swap`
-and the `DSP_CTRL0` blue/green, red/blue, and red/green output fields:
-
-https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/gpu/drm/rockchip/rockchip_vop_reg.c
-
-The same VOP field definitions are present in Radxa's immutable RK3399 source:
+Radxa's immutable RK3399 VOP register table identifies `SYS_CTRL.data01_swap`
+and the `DSP_CTRL0` blue/green, red/blue, and red/green output fields used by
+the compatibility provider:
 
 https://github.com/radxa/kernel/blob/c681d6a31c2289dbaca2e1f822bab41530fc0f68/drivers/gpu/drm/rockchip/rockchip_vop_reg.c
 
-The mainline panel source above is also the attribution for DRM panel prepare
-ordering; the project retains the required `prepare_prev_first` ordering before
-the TC358762 prepare sequence. The project implementation is GPL-2.0-only and
-uses a separately tested, reversible compatibility core so the provider accesses
-only the GRF-selected live VOP.
+Linux v6.18's DRM panel header defines `prepare_prev_first`: the previous
+controller is prepared before the panel, a requirement for DSI panels whose host
+must reach LP-11 before panel power-up. The project sets that field before the
+TC358762 prepare sequence:
+
+https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/include/drm/drm_panel.h
+
+The project implementation is GPL-2.0-only and uses a separately tested,
+reversible compatibility core so the provider accesses only the GRF-selected
+live VOP.

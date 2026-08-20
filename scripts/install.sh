@@ -594,5 +594,6 @@ trap - EXIT HUP INT TERM
 
 printf 'PASS: installed %s/%s and verified all three modules, source, backup, boot token, and DTBO checksums\n' \
 	"$PROJECT_NAME" "$PROJECT_VERSION"
-printf 'NEXT: power off; follow docs/wiring.md; boot with HDMI; run the README first-boot checks.\n'
+printf 'NEXT: installation is complete; no automatic power action occurs. Obtain fresh authorization before any reboot or shutdown.\n'
+printf 'NEXT: first authorized boot: keep HDMI disconnected; validate DSI-1, RGB, and physical touch; then hot-plug HDMI.\n'
 printf 'ROLLBACK: sudo sh scripts/uninstall.sh (or use docs/recovery.md offline).\n'

@@ -31,6 +31,8 @@ sudo sh scripts/uninstall.sh --dry-run
 Then run the exact scoped SSH rollback, which removes only this project's DTBO,
 DKMS source, three 0.2.4 modules, and `user_overlays` token:
 
+Exact scoped SSH rollback command: `sudo sh scripts/uninstall.sh`.
+
 ```sh
 sudo sh scripts/uninstall.sh
 ```
@@ -88,6 +90,8 @@ This exact scoped offline rollback changes only `TARGET_ROOT/boot/armbianEnv.txt
 it does not call DKMS and does not remove files from the host. It will remove the `rockpi-4b-plus-rpi-touchscreen` token from `user_overlays` while retaining unrelated overlay tokens. If the script is unavailable, edit that one line
 carefully and remove the `rockpi-4b-plus-rpi-touchscreen` token from
 `user_overlays`; do not delete unrelated names or the entire line.
+
+Exact scoped offline rollback changes only `TARGET_ROOT/boot/armbianEnv.txt`, does not call DKMS, and does not remove host files.
 
 Unmount the boot filesystem cleanly, reconnect HDMI if needed, and boot before
 attempting the DSI wiring again. Do not use the touchscreen as the only

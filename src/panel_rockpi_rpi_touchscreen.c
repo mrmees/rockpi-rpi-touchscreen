@@ -230,9 +230,8 @@ static int rockpi_panel_prepare(struct drm_panel *panel)
 				"failed to read panel ready state: %d\n", ret);
 			goto power_off;
 		}
-		if (ret & BIT(0)) {
+		if (ret & BIT(0))
 			break;
-		}
 		usleep_range(1000, 2000);
 	}
 

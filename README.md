@@ -22,11 +22,12 @@ do not describe this release as production-hardware-validated yet.
 
 DKMS `0.2.4` installs all three production modules:
 `rockpi_rk3399_display_compat`, `panel_rockpi_rpi_touchscreen`, and `raspits_ft5426`.
-`rockpi_rk3399_display_compat` owns the disabled-DSI0 PLL supplier and the
-reversible VOP correction; `panel_rockpi_rpi_touchscreen` consumes that provider
-and owns the original panel compatibility path; `raspits_ft5426` owns touch
-input. The panel has a hard module dependency on the provider and defers until
-the provider is ready, so the panel cannot bind with an unprepared PLL source.
+The provider owns the DSI0 PLL supplier and reversible VOP correction; the panel depends on that provider; the touch module owns touch input.
+More specifically, `rockpi_rk3399_display_compat` owns the disabled-DSI0 PLL
+supplier and reversible VOP correction; `panel_rockpi_rpi_touchscreen` owns the
+original panel compatibility path and has a hard module dependency on the
+provider; and `raspits_ft5426` owns touch input. The panel defers until the
+provider is ready, so it cannot bind with an unprepared PLL source.
 The panel driver initializes TC358762 during panel prepare, after the
 Linux 6.18 DesignWare bridge has powered the host in command mode and after the
 panel-controller power wait. It sets the DRM panel's `prepare_prev_first` flag
@@ -118,6 +119,8 @@ Start the authorized boot with the Raspberry Pi display connected and HDMI
 disconnected. Check the current boot's modules, panel and touch probes, a DSI
 connector/mode, both I2C addresses, and the input device:
 
+The first authorized production boot starts with HDMI disconnected: validate DSI-1, RGB, and physical touch first, then hot-plug HDMI.
+
 ```sh
 lsmod | grep -E '^(rockpi_rk3399_display_compat|panel_rockpi_rpi_touchscreen|raspits_ft5426)'
 sudo journalctl -b -k | grep -Ei 'raspberrypi|raspits|ft5426|dsi|panel'
@@ -184,6 +187,7 @@ Production cold-start and reboot acceptance remains pending until video,
 brightness, identity-matrix touch, HDMI hot-plug, persistent logs, and an
 explicitly authorized shutdown/cold-start have all passed. This project never
 reboots or shuts down automatically.
+No automatic reboot or shutdown occurs; obtain fresh authorization before any power action.
 
 ## Limitations
 
