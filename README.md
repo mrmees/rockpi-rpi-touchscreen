@@ -17,15 +17,16 @@ touch operation remain pending after the corrective driver reboot.
 - A DKMS package named `rockpi-rpi-touchscreen` and a user overlay named
   `rockpi-4b-plus-rpi-touchscreen`.
 
-DKMS release `0.2.2` installs two modules: `raspits_ft5426` owns touch input,
+DKMS release `0.2.3` installs two modules: `raspits_ft5426` owns touch input,
 and `panel_rockpi_rpi_touchscreen` owns the original panel compatibility path.
 The compatibility driver initializes TC358762 during panel prepare, after the
 Linux 6.18 DesignWare bridge has powered the host in command mode and after the
-panel-controller power wait. On the previously tested boot, the
-controller, backlight, touch, and 800x480 connector were detected, but the
-screen remained lit black and the kernel logged eleven `failed to write
-command FIFO` errors. Desktop layout changes reproduced the errors because
-they could not correct this driver-lifecycle ordering.
+panel-controller power wait. It sets the DRM panel's `prepare_prev_first` flag
+before publishing the panel, which makes the host enter LP-11 before those
+bridge commands. The prior 0.2.2 hardware attempt omitted that flag, so the
+screen remained black and the command FIFO timed out before the host PHY was
+ready. The touch probe defers on `-ENXIO` while panel power is unavailable and
+retries through the driver core instead of permanently losing touch input.
 
 DSI0 stays disabled; the overlay routes the little VOP only to DSI1 and leaves
 HDMI enabled. The project-specific panel compatible prevents the generic
@@ -63,11 +64,11 @@ sudo sh scripts/install.sh
 It validates the module and merged device tree before registering DKMS,
 installs the DTBO in `/boot/overlay-user/`, backs up `/boot/armbianEnv.txt`,
 and appends one overlay token without removing unrelated user overlays.
-Release `0.2.2` treats `/usr/src/rockpi-rpi-touchscreen-0.2.2` as immutable: a
+Release `0.2.3` treats `/usr/src/rockpi-rpi-touchscreen-0.2.3` as immutable: a
 same-version content mismatch fails instead of silently replacing registered
 source. The installer checksum-compares the source, both DKMS-built/installed
-modules, and DTBO. A `0.2.1` installation owned by this project is removed only
-after `0.2.2`, both modules, the source, boot backup, single overlay token, and
+modules, and DTBO. A `0.2.2` installation owned by this project is removed only
+after `0.2.3`, both modules, the source, boot backup, single overlay token, and
 DTBO all verify. A failed migration retains or restores the old release and
 reports any recovery paths. The installer never changes
 `/etc/X11/xorg.conf.d/20-dfrobot-display.conf`.

@@ -468,6 +468,9 @@ static int rockpi_panel_probe(struct i2c_client *i2c)
 		goto unregister_dsi;
 	}
 
+	/* TC358762 commands in prepare() require the DSI host in LP-11. */
+	ctx->panel.prepare_prev_first = true;
+
 	/* The DesignWare host resolves the graph bridge during attach. */
 	drm_panel_add(&ctx->panel);
 

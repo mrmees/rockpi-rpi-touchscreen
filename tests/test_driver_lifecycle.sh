@@ -15,12 +15,18 @@ line_of()
 	grep -n -m 1 "$1" "$driver" | cut -d: -f1
 }
 
-probe_read=$(line_of 'i2c_smbus_read_byte_data(client, FT5426_REG_FW_VERSION)')
+probe_read=$(line_of 'raspits_read_fw_register(client, FT5426_REG_FW_VERSION')
 probe_register=$(line_of 'input_register_device(input)')
 [ "$probe_read" -lt "$probe_register" ] ||
 	fail 'controller identification must precede input registration'
 grep -Eq 'if \(fw_version < 0\)[[:space:]]*$' "$driver" ||
 	fail 'firmware identification read errors must fail probe'
+grep -Fq 'if (ret == -ENXIO)' "$driver" ||
+	fail 'an unpowered FT5426 must be distinguished from other probe errors'
+grep -Fq 'return dev_err_probe(dev, -EPROBE_DEFER,' "$driver" ||
+	fail 'an unpowered FT5426 must defer until panel power is available'
+[ "$(grep -Fc 'raspits_read_fw_register(client,' "$driver")" -eq 3 ] ||
+	fail 'all three firmware identification reads must use the power-aware helper'
 
 grep -Eq '^#define FT5426_MAX_CONSECUTIVE_FAILURES[[:space:]]+[1-9][0-9]*$' "$driver" ||
 	fail 'polling must define a nonzero bounded failure threshold'

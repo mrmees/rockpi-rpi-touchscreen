@@ -20,15 +20,15 @@ test_two_module_package_metadata()
 {
 	metadata=$(bash -c '. "$1"; printf "%s\n" "$PACKAGE_NAME" "$PACKAGE_VERSION" "${BUILT_MODULE_NAME[0]-}" "${BUILT_MODULE_NAME[1]-}" "${BUILT_MODULE_LOCATION[0]-}" "${BUILT_MODULE_LOCATION[1]-}" "${DEST_MODULE_LOCATION[0]-}" "${DEST_MODULE_LOCATION[1]-}"' sh "$repo_root/dkms.conf")
 	expected='rockpi-rpi-touchscreen
-0.2.2
+0.2.3
 raspits_ft5426
 panel_rockpi_rpi_touchscreen
 .
 .
 /updates/dkms
 /updates/dkms'
-	[ "$metadata" = "$expected" ] || fail 'DKMS metadata does not describe the two-module 0.2.2 package'
-	printf 'PASS: DKMS metadata owns both modules at version 0.2.2\n'
+	[ "$metadata" = "$expected" ] || fail 'DKMS metadata does not describe the two-module 0.2.3 package'
+	printf 'PASS: DKMS metadata owns both modules at version 0.2.3\n'
 }
 
 make_sandbox()

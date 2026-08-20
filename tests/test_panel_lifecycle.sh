@@ -303,6 +303,9 @@ probe_force_off=$(printf '%s\n' "$probe_body" |
 probe_backlight=$(printf '%s\n' "$probe_body" |
 	body_line 'backlight_device_register') ||
 	fail 'probe must register a backlight'
+probe_host_first=$(printf '%s\n' "$probe_body" |
+	body_line 'ctx->panel.prepare_prev_first = true') ||
+	fail 'panel must request DSI host pre-enable before panel prepare'
 probe_panel=$(printf '%s\n' "$probe_body" |
 	body_line 'drm_panel_add(&ctx->panel)') ||
 	fail 'probe must publish the DRM panel'
@@ -311,9 +314,10 @@ probe_attach=$(printf '%s\n' "$probe_body" |
 	fail 'probe must attach the DSI peripheral'
 [ "$probe_id" -lt "$probe_force_off" ] &&
 	[ "$probe_force_off" -lt "$probe_backlight" ] &&
-	[ "$probe_backlight" -lt "$probe_panel" ] &&
+	[ "$probe_backlight" -lt "$probe_host_first" ] &&
+	[ "$probe_host_first" -lt "$probe_panel" ] &&
 	[ "$probe_panel" -lt "$probe_attach" ] ||
-	fail 'probe must establish hardware off before publishing panel and attaching DSI'
+	fail 'probe must establish hardware off and host-first ordering before publishing panel and attaching DSI'
 
 force_off_body=$(function_body rockpi_panel_force_off) ||
 	fail 'missing fail-safe hardware-off helper'

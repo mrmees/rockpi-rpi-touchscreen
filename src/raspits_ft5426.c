@@ -9,6 +9,7 @@
  * kernels, bounded parsing, polling error recovery, and safe lifecycle use.
  */
 #include <linux/bitops.h>
+#include <linux/errno.h>
 #include <linux/i2c.h>
 #include <linux/input.h>
 #include <linux/input/mt.h>
@@ -131,6 +132,24 @@ reschedule:
 				      msecs_to_jiffies(FT5426_POLL_INTERVAL_MS));
 }
 
+static int raspits_read_fw_register(struct i2c_client *client, u8 reg,
+				    const char *name)
+{
+	struct device *dev = &client->dev;
+	int ret;
+
+	ret = i2c_smbus_read_byte_data(client, reg);
+	if (ret == -ENXIO)
+		return dev_err_probe(dev, -EPROBE_DEFER,
+				     "FT5426 is not powered while reading firmware %s\n",
+				     name);
+	if (ret < 0)
+		return dev_err_probe(dev, ret,
+				     "unable to read FT5426 firmware %s\n", name);
+
+	return ret;
+}
+
 static int raspits_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
@@ -145,18 +164,18 @@ static int raspits_probe(struct i2c_client *client)
 	if (!ts)
 		return -ENOMEM;
 
-	fw_version = i2c_smbus_read_byte_data(client, FT5426_REG_FW_VERSION);
+	fw_version = raspits_read_fw_register(client, FT5426_REG_FW_VERSION,
+					      "version");
 	if (fw_version < 0)
-		return dev_err_probe(dev, fw_version,
-				     "unable to read FT5426 firmware version\n");
-	fw_minor = i2c_smbus_read_byte_data(client, FT5426_REG_FW_MINOR);
+		return fw_version;
+	fw_minor = raspits_read_fw_register(client, FT5426_REG_FW_MINOR,
+					    "minor");
 	if (fw_minor < 0)
-		return dev_err_probe(dev, fw_minor,
-				     "unable to read FT5426 firmware minor\n");
-	fw_subminor = i2c_smbus_read_byte_data(client, FT5426_REG_FW_SUBMINOR);
+		return fw_minor;
+	fw_subminor = raspits_read_fw_register(client, FT5426_REG_FW_SUBMINOR,
+					       "subminor");
 	if (fw_subminor < 0)
-		return dev_err_probe(dev, fw_subminor,
-				     "unable to read FT5426 firmware subminor\n");
+		return fw_subminor;
 
 	input = devm_input_allocate_device(dev);
 	if (!input)
