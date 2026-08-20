@@ -469,6 +469,7 @@ for argument do
 	last=$argument
 done
 printf '%s\n' "$*" >> "${MV_LOG:?}"
+[ -z "${OP_LOG:-}" ] || printf 'mv %s\n' "$*" >> "$OP_LOG"
 if [ -n "${MV_FAIL_ALWAYS_TARGET:-}" ] && [ "$last" = "$MV_FAIL_ALWAYS_TARGET" ]; then
 	exit 1
 fi
@@ -486,7 +487,15 @@ if [ -n "${MV_FAIL_TARGET:-}" ] && [ "$last" = "$MV_FAIL_TARGET" ] &&
 	: > "$MV_FAIL_ONCE_MARKER"
 	exit 1
 fi
+if [ -n "${MV_CREATE_FILE_BEFORE_TARGET:-}" ] && [ "$last" = "$MV_CREATE_FILE_BEFORE_TARGET" ]; then
+	printf '%s\n' raced-runtime-asset > "$last"
+	chmod 0600 "$last"
+fi
 /bin/mv "$@"
+if [ -n "${MV_CREATE_FILE_AFTER_SOURCE:-}" ] && [ "$2" = "$MV_CREATE_FILE_AFTER_SOURCE" ]; then
+	printf '%s\n' raced-runtime-asset > "${MV_CREATE_FILE_AFTER_TARGET:?}"
+	chmod 0600 "${MV_CREATE_FILE_AFTER_TARGET:?}"
+fi
 if [ -n "${MV_CORRUPT_AFTER_TARGET:-}" ] && [ "$last" = "$MV_CORRUPT_AFTER_TARGET" ]; then
 	printf '%s\n' corrupt-runtime-asset > "$last"
 fi
@@ -501,6 +510,20 @@ if [ -n "${MV_FAIL_AFTER_TARGET:-}" ] && [ "$last" = "$MV_FAIL_AFTER_TARGET" ] &
 fi
 EOF
 chmod +x "$sandbox/bin/mv"
+	cat > "$sandbox/bin/ln" <<'EOF'
+#!/bin/sh
+set -eu
+last=
+for argument do
+	last=$argument
+done
+if [ -n "${LN_CREATE_FILE_BEFORE_TARGET:-}" ] && [ "$last" = "$LN_CREATE_FILE_BEFORE_TARGET" ]; then
+	printf '%s\n' raced-runtime-asset > "$last"
+	chmod 0600 "$last"
+fi
+exec /bin/ln "$@"
+EOF
+	chmod +x "$sandbox/bin/ln"
 	cat > "$sandbox/bin/cp" <<'EOF'
 #!/bin/sh
 set -eu
@@ -558,9 +581,16 @@ for argument do
 	last=$argument
 done
 [ -z "${RM_LOG:-}" ] || printf '%s\n' "$*" >> "$RM_LOG"
+[ -z "${OP_LOG:-}" ] || printf 'rm %s\n' "$*" >> "$OP_LOG"
 if [ -n "${RM_FAIL_TARGET:-}" ] && [ "$last" = "$RM_FAIL_TARGET" ]; then
 	exit 30
 fi
+case ${RM_FAIL_PREFIX:-} in
+'') ;;
+*) case $last in
+   "${RM_FAIL_PREFIX}"*) exit 30 ;;
+   esac ;;
+esac
 exec /bin/rm "$@"
 EOF
 	chmod +x "$sandbox/bin/rm"
@@ -751,7 +781,8 @@ run_uninstall()
 		DKMS_NEW_ACTIVE_VERIFIED_MARKER="$sandbox/dkms-new-active-verified.marker" \
 		DKMS_MODULE_LOG="$sandbox/dkms-module.log" SHA256_LOG="$sandbox/sha256.log" \
 		DEPMOD_LOG="$sandbox/depmod.log" DKMS_STATE_DIR="$sandbox/var-lib-dkms" \
-		ARCH=aarch64 MV_LOG="$sandbox/mv.log" RM_LOG="$sandbox/rm.log" PATH="$sandbox/bin:$PATH" \
+		ARCH=aarch64 MV_LOG="$sandbox/mv.log" RM_LOG="$sandbox/rm.log" \
+		OP_LOG="$sandbox/operations.log" PATH="$sandbox/bin:$PATH" \
 		sh "$repo_root/scripts/uninstall.sh" "$@" || status=$?
 	protected_after=$(/usr/bin/sha256sum "$protected" | awk '{print $1}')
 	assert_equal "$protected_after" "$protected_before" \
@@ -1016,15 +1047,17 @@ test_uninstall_late_failure_restores_removed_runtime_assets()
 	if grep -Fq 'rollback also failed' "$sandbox/output"; then
 		fail 'late runtime rollback reported failure'
 	fi
-	autostart_remove_line=$(awk -v target="$autostart" '$NF == target { print NR; exit }' "$sandbox/rm.log")
-	mapper_remove_line=$(awk -v target="$mapper" '$NF == target { print NR; exit }' "$sandbox/rm.log")
+	autostart_remove_line=$(awk -v source="$autostart" '$1 == "mv" && $3 == source { print NR; exit }' \
+		"$sandbox/operations.log")
+	mapper_remove_line=$(awk -v source="$mapper" '$1 == "mv" && $3 == source { print NR; exit }' \
+		"$sandbox/operations.log")
 	source_remove_line=$(awk -v target="$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5" \
-		'$NF == target { print NR; exit }' "$sandbox/rm.log")
+		'$1 == "rm" && $NF == target { print NR; exit }' "$sandbox/operations.log")
 	[ -n "$autostart_remove_line" ] && [ -n "$mapper_remove_line" ] && [ -n "$source_remove_line" ] ||
-		fail 'late failure was not injected after runtime asset removal'
+		fail 'late failure was not injected after runtime asset claims'
 	[ "$autostart_remove_line" -lt "$mapper_remove_line" ] &&
 		[ "$mapper_remove_line" -lt "$source_remove_line" ] ||
-		fail 'uninstall did not remove autostart then mapper before the late failure'
+		fail 'uninstall did not claim autostart then mapper before the late failure'
 	assert_equal "$(sha256sum "$mapper" | awk '{print $1}')" "$mapper_before" \
 		'late rollback did not restore touch mapper bytes'
 	assert_equal "$(sha256sum "$autostart" | awk '{print $1}')" "$autostart_before" \
@@ -1041,7 +1074,7 @@ test_uninstall_runtime_restore_failure_retains_recovery()
 	run_install "$sandbox" "$sandbox/validate-pass.sh"
 	mapper=$sandbox/usr-libexec/rockpi-rpi-touchscreen-map-touch
 	autostart=$sandbox/etc/xdg/autostart/rockpi-rpi-touchscreen-touch-map.desktop
-	if MV_CORRUPT_FILE_AFTER_TARGET="$autostart" MV_CORRUPT_FILE_TRIGGER="$mapper" \
+	if LN_CREATE_FILE_BEFORE_TARGET="$autostart" \
 		RM_FAIL_TARGET="$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5" \
 		run_uninstall "$sandbox" > "$sandbox/output" 2>&1; then
 		fail 'uninstall accepted a failed runtime asset restoration'
@@ -1059,9 +1092,137 @@ test_uninstall_runtime_restore_failure_retains_recovery()
 		fail 'runtime restoration failure did not report the recovery directory'
 	cmp "$repo_root/scripts/map-touchscreen.sh" "$mapper" ||
 		fail 'runtime restoration failure did not restore mapper before autostart recovery'
-	grep -Fqx 'corrupt-runtime-asset' "$autostart" ||
+	grep -Fqx 'raced-runtime-asset' "$autostart" ||
 		fail 'runtime rollback overwrote an autostart modified after its snapshot'
 	printf 'PASS: failed runtime restoration retains named recovery\n'
+}
+
+test_uninstall_dry_run_retains_modified_runtime_assets()
+{
+	sandbox=$workdir/uninstall-runtime-dry-run-modified
+	make_sandbox "$sandbox"
+	run_install "$sandbox" "$sandbox/validate-pass.sh"
+	mapper=$sandbox/usr-libexec/rockpi-rpi-touchscreen-map-touch
+	autostart=$sandbox/etc/xdg/autostart/rockpi-rpi-touchscreen-touch-map.desktop
+	printf '%s\n' locally-modified-mapper > "$mapper"
+	chmod 0700 "$mapper"
+	cp "$repo_root/assets/rockpi-rpi-touchscreen-touch-map.desktop" "$autostart"
+	chmod 0600 "$autostart"
+	mapper_before=$(sha256sum "$mapper" | awk '{print $1}')
+	autostart_before=$(sha256sum "$autostart" | awk '{print $1}')
+	dry_run=$(run_uninstall "$sandbox" --dry-run)
+	printf '%s\n' "$dry_run" | grep -Fqx "RETAIN MODIFIED: $mapper" ||
+		fail 'modified mapper dry run did not report retention'
+	printf '%s\n' "$dry_run" | grep -Fqx "RETAIN MODIFIED: $autostart" ||
+		fail 'modified autostart dry run did not report retention'
+	assert_equal "$(sha256sum "$mapper" | awk '{print $1}')" "$mapper_before" \
+		'modified mapper dry run changed bytes'
+	assert_equal "$(sha256sum "$autostart" | awk '{print $1}')" "$autostart_before" \
+		'modified autostart dry run changed bytes'
+	assert_equal "$(stat -c '%a' "$mapper")" '700' 'modified mapper dry run changed mode'
+	assert_equal "$(stat -c '%a' "$autostart")" '600' 'modified autostart dry run changed mode'
+	printf 'PASS: dry run retains and reports modified runtime assets\n'
+}
+
+test_uninstall_claim_revalidates_modified_runtime_asset()
+{
+	sandbox=$workdir/uninstall-runtime-claim-race
+	make_sandbox "$sandbox"
+	run_install "$sandbox" "$sandbox/validate-pass.sh"
+	mapper=$sandbox/usr-libexec/rockpi-rpi-touchscreen-map-touch
+	autostart=$sandbox/etc/xdg/autostart/rockpi-rpi-touchscreen-touch-map.desktop
+	config=$sandbox/boot/armbianEnv.txt
+	output=$sandbox/output
+	MV_CORRUPT_FILE_AFTER_TARGET="$mapper" MV_CORRUPT_FILE_TRIGGER="$config" \
+		run_uninstall "$sandbox" > "$output" 2>&1 ||
+		fail 'uninstall rejected a safely retained post-snapshot mapper modification'
+	grep -Fqx 'corrupt-runtime-asset' "$mapper" ||
+		fail 'uninstall removed the mapper modified after snapshot'
+	assert_equal "$(stat -c '%a' "$mapper")" '755' \
+		'uninstall changed the mode of the post-snapshot modified mapper'
+	grep -Fqx "RETAIN MODIFIED: $mapper" "$output" ||
+		fail 'uninstall did not report the post-snapshot modified mapper'
+	assert_file_absent "$autostart"
+	assert_file_absent "$sandbox/boot/overlay-user/rockpi-4b-plus-rpi-touchscreen.dtbo"
+	assert_file_absent "$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5"
+	printf 'PASS: uninstall revalidates and retains a post-snapshot modified mapper\n'
+}
+
+test_uninstall_claim_preserves_mapper_for_raced_autostart()
+{
+	sandbox=$workdir/uninstall-runtime-autostart-claim-race
+	make_sandbox "$sandbox"
+	run_install "$sandbox" "$sandbox/validate-pass.sh"
+	mapper=$sandbox/usr-libexec/rockpi-rpi-touchscreen-map-touch
+	autostart=$sandbox/etc/xdg/autostart/rockpi-rpi-touchscreen-touch-map.desktop
+	output=$sandbox/output
+	MV_CREATE_FILE_AFTER_SOURCE="$autostart" MV_CREATE_FILE_AFTER_TARGET="$autostart" \
+		run_uninstall "$sandbox" > "$output" 2>&1 ||
+		fail 'uninstall rejected a safely retained raced autostart'
+	grep -Fqx 'raced-runtime-asset' "$autostart" ||
+		fail 'uninstall did not retain autostart that appeared after its claim'
+	assert_equal "$(stat -c '%a' "$autostart")" '600' \
+		'uninstall changed raced autostart mode'
+	cmp "$repo_root/scripts/map-touchscreen.sh" "$mapper" ||
+		fail 'uninstall stranded raced autostart without mapper dependency'
+	grep -Fqx "RETAIN MODIFIED: $autostart" "$output" ||
+		fail 'uninstall did not report raced autostart retention'
+	grep -Fqx "RETAIN DEPENDENCY: $mapper" "$output" ||
+		fail 'uninstall did not report mapper retained for raced autostart'
+	printf 'PASS: raced autostart retains its mapper dependency\n'
+}
+
+test_uninstall_runtime_restore_publication_never_overwrites_race()
+{
+	sandbox=$workdir/uninstall-runtime-restore-race
+	make_sandbox "$sandbox"
+	run_install "$sandbox" "$sandbox/validate-pass.sh"
+	mapper=$sandbox/usr-libexec/rockpi-rpi-touchscreen-map-touch
+	autostart=$sandbox/etc/xdg/autostart/rockpi-rpi-touchscreen-touch-map.desktop
+	if MV_CREATE_FILE_BEFORE_TARGET="$autostart" LN_CREATE_FILE_BEFORE_TARGET="$autostart" \
+		RM_FAIL_TARGET="$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5" \
+		run_uninstall "$sandbox" > "$sandbox/output" 2>&1; then
+		fail 'uninstall accepted a runtime restore publication race'
+	fi
+	grep -Fqx 'raced-runtime-asset' "$autostart" ||
+		fail 'runtime restore publication overwrote the raced autostart asset'
+	assert_equal "$(stat -c '%a' "$autostart")" '600' \
+		'runtime restore publication changed raced autostart mode'
+	grep -Fqx "RETAIN MODIFIED: $autostart" "$sandbox/output" ||
+		fail 'runtime restore publication race did not report retained autostart'
+	grep -Fq "touch autostart restoration failed: $autostart" "$sandbox/output" ||
+		fail 'runtime restore publication race did not name the failed autostart restoration'
+	grep -Fq 'rollback also failed' "$sandbox/output" ||
+		fail 'runtime restore publication race did not retain recovery'
+	recovery=$(find "$sandbox/usr-src" -mindepth 1 -maxdepth 1 -type d \
+		-name '.rockpi-rpi-touchscreen.uninstall.*' -print -quit)
+	[ -n "$recovery" ] || fail 'runtime restore publication race discarded recovery'
+	cmp "$repo_root/scripts/map-touchscreen.sh" "$mapper" ||
+		fail 'runtime restore publication race did not restore mapper first'
+	printf 'PASS: runtime restore publication never overwrites a raced asset\n'
+}
+
+test_uninstall_recovery_cleanup_failure_is_reported()
+{
+	sandbox=$workdir/uninstall-recovery-cleanup-failure
+	make_sandbox "$sandbox"
+	run_install "$sandbox" "$sandbox/validate-pass.sh"
+	recovery_prefix=$sandbox/usr-src/.rockpi-rpi-touchscreen.uninstall.
+	if RM_FAIL_PREFIX="$recovery_prefix" run_uninstall "$sandbox" > "$sandbox/output" 2>&1; then
+		fail 'uninstall accepted a failed recovery cleanup'
+	fi
+	grep -Fq 'uninstall completed but recovery cleanup failed' "$sandbox/output" ||
+		fail 'uninstall did not report committed recovery cleanup failure'
+	recovery=$(find "$sandbox/usr-src" -mindepth 1 -maxdepth 1 -type d \
+		-name '.rockpi-rpi-touchscreen.uninstall.*' -print -quit)
+	[ -n "$recovery" ] || fail 'uninstall did not retain failed recovery cleanup artifacts'
+	grep -Fq "$recovery" "$sandbox/output" ||
+		fail 'uninstall did not name retained recovery cleanup artifacts'
+	assert_file_absent "$sandbox/usr-libexec/rockpi-rpi-touchscreen-map-touch"
+	assert_file_absent "$sandbox/etc/xdg/autostart/rockpi-rpi-touchscreen-touch-map.desktop"
+	assert_file_absent "$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5"
+	assert_file_absent "$sandbox/boot/overlay-user/rockpi-4b-plus-rpi-touchscreen.dtbo"
+	printf 'PASS: committed uninstall reports failed recovery cleanup\n'
 }
 
 test_failed_validation_does_not_mutate_boot_configuration()
@@ -2560,6 +2721,11 @@ test_uninstall_retains_and_reports_modified_mapper
 test_uninstall_retains_and_reports_modified_autostart
 test_uninstall_late_failure_restores_removed_runtime_assets
 test_uninstall_runtime_restore_failure_retains_recovery
+test_uninstall_dry_run_retains_modified_runtime_assets
+test_uninstall_claim_revalidates_modified_runtime_asset
+test_uninstall_claim_preserves_mapper_for_raced_autostart
+test_uninstall_runtime_restore_publication_never_overwrites_race
+test_uninstall_recovery_cleanup_failure_is_reported
 test_failed_validation_does_not_mutate_boot_configuration
 test_installer_requires_the_panel_specific_alias
 test_installer_requires_the_provider_specific_alias

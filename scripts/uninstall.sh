@@ -31,7 +31,7 @@ if [ -n "$offline_boot_root" ]; then
 	exit 0
 fi
 
-require_command awk chmod cmp cp depmod diff dkms find grep mkdir mktemp mv rm stat
+require_command awk chmod cmp cp depmod diff dkms find grep ln mkdir mktemp mv rm stat
 overlay_destination=$OVERLAY_DIRECTORY/$OVERLAY_NAME.dtbo
 touch_mapper_source=$PROJECT_SOURCE_DIR/scripts/map-touchscreen.sh
 touch_autostart_source=$PROJECT_SOURCE_DIR/assets/rockpi-rpi-touchscreen-touch-map.desktop
@@ -50,6 +50,16 @@ runtime_asset_state()
 	else
 		printf '%s\n' modified
 	fi
+}
+
+runtime_asset_matches()
+{
+	runtime_match_source=$1
+	runtime_match_destination=$2
+	runtime_match_mode=$3
+	[ -f "$runtime_match_destination" ] && [ ! -L "$runtime_match_destination" ] &&
+		cmp -s "$runtime_match_source" "$runtime_match_destination" &&
+		[ "$(stat -c '%a' "$runtime_match_destination")" = "$runtime_match_mode" ]
 }
 
 if [ "$dry_run" -eq 1 ]; then
@@ -127,6 +137,7 @@ dependency_index_restore_failed=0
 dkms_state_restore_failed=0
 mapper_remove_attempted=0
 autostart_remove_attempted=0
+mapper_claim_held=0
 dkms_state_root=${DKMS_STATE_DIR:-/var/lib/dkms}
 dkms_state_destination=$dkms_state_root/$PROJECT_NAME/$PROJECT_VERSION
 trap 'snapshot_status=$?; trap - EXIT HUP INT TERM; rm -rf "$transaction_directory"; exit "$snapshot_status"' \
@@ -195,10 +206,65 @@ restore_runtime_asset()
 		printf 'RETAIN MODIFIED: %s\n' "$runtime_destination"
 		return 1
 	fi
-	try_atomic_install_file "$runtime_backup" "$runtime_destination" "$runtime_mode" &&
-		[ -f "$runtime_destination" ] && [ ! -L "$runtime_destination" ] &&
-		cmp -s "$runtime_backup" "$runtime_destination" &&
-		[ "$(stat -c '%a' "$runtime_destination")" = "$runtime_mode" ]
+	runtime_directory=$(dirname -- "$runtime_destination")
+	runtime_temporary=$(mktemp "$runtime_directory/.${PROJECT_NAME}.restore.XXXXXX") || return 1
+	if ! cp "$runtime_backup" "$runtime_temporary" ||
+		! chmod "$runtime_mode" "$runtime_temporary"; then
+		rm -f "$runtime_temporary"
+		return 1
+	fi
+	if ! ln "$runtime_temporary" "$runtime_destination"; then
+		rm -f "$runtime_temporary"
+		if [ -e "$runtime_destination" ] || [ -L "$runtime_destination" ]; then
+			printf 'RETAIN MODIFIED: %s\n' "$runtime_destination"
+		fi
+		return 1
+	fi
+	rm -f "$runtime_temporary" || return 1
+	runtime_asset_matches "$runtime_backup" "$runtime_destination" "$runtime_mode"
+}
+
+restore_runtime_claim()
+{
+	runtime_claim=$1
+	runtime_destination=$2
+	ln "$runtime_claim" "$runtime_destination" || return 1
+	rm -f "$runtime_claim"
+}
+
+claim_runtime_asset()
+{
+	runtime_asset_name=$1
+	runtime_destination=$2
+	runtime_backup=$3
+	runtime_mode=$4
+	runtime_claim_state=error
+	runtime_claim_recovery=
+	runtime_directory=$(dirname -- "$runtime_destination")
+	runtime_claim=$(mktemp "$runtime_directory/.${PROJECT_NAME}.uninstall.$runtime_asset_name.XXXXXX") ||
+		return 1
+	if ! mv -f "$runtime_destination" "$runtime_claim"; then
+		rm -f "$runtime_claim" || return 1
+		if [ -e "$runtime_destination" ] || [ -L "$runtime_destination" ]; then
+			printf 'RETAIN MODIFIED: %s\n' "$runtime_destination"
+			runtime_claim_state=modified
+		else
+			runtime_claim_state=absent
+		fi
+		return 0
+	fi
+	if runtime_asset_matches "$runtime_backup" "$runtime_claim" "$runtime_mode"; then
+		rm -f "$runtime_claim" || return 1
+		runtime_claim_state=removed
+		return 0
+	fi
+	printf 'RETAIN MODIFIED: %s\n' "$runtime_destination"
+	if restore_runtime_claim "$runtime_claim" "$runtime_destination"; then
+		runtime_claim_state=modified
+		return 0
+	fi
+	runtime_claim_recovery=$runtime_claim
+	return 1
 }
 
 restore_runtime_assets()
@@ -206,7 +272,11 @@ restore_runtime_assets()
 	[ -f "$transaction_directory/runtime.snapshot-complete" ] || return 1
 	runtime_restore_failed=0
 	mapper_restored=1
-	if [ "$mapper_remove_attempted" -eq 1 ] &&
+	if [ "$mapper_claim_held" -eq 1 ]; then
+		runtime_restore_failed=1
+		mapper_restored=0
+		rollback_note="$rollback_note touch mapper claim retained;"
+	elif [ "$mapper_remove_attempted" -eq 1 ] &&
 		! restore_runtime_asset "$transaction_directory/runtime/mapper" "$TOUCH_MAPPER_DESTINATION"; then
 		runtime_restore_failed=1
 		mapper_restored=0
@@ -414,15 +484,41 @@ fi
 remove_overlay_token "$ARMBIAN_ENV" "$OVERLAY_TOKEN"
 rm -f "$overlay_destination"
 if [ "$autostart_state" = owned ]; then
-	autostart_remove_attempted=1
-	rm -f "$TOUCH_AUTOSTART_DESTINATION"
+	if ! claim_runtime_asset autostart "$TOUCH_AUTOSTART_DESTINATION" \
+		"$transaction_directory/runtime/autostart" 644; then
+		rollback_note="$rollback_note touch autostart claim retained at $runtime_claim_recovery;"
+		exit 1
+	fi
+	case $runtime_claim_state in
+	removed)
+		autostart_remove_attempted=1
+		autostart_state=absent
+		;;
+	absent) autostart_state=absent ;;
+	modified) autostart_state=modified ;;
+	*) die "unknown touch autostart claim state: $runtime_claim_state" ;;
+	esac
+fi
+if [ "$autostart_state" = absent ] &&
+	{ [ -e "$TOUCH_AUTOSTART_DESTINATION" ] || [ -L "$TOUCH_AUTOSTART_DESTINATION" ]; }; then
+	printf 'RETAIN MODIFIED: %s\n' "$TOUCH_AUTOSTART_DESTINATION"
+	autostart_state=modified
 fi
 if [ "$mapper_state" = owned ]; then
 	if [ "$autostart_state" = modified ]; then
 		printf 'RETAIN DEPENDENCY: %s\n' "$TOUCH_MAPPER_DESTINATION"
 	else
-		mapper_remove_attempted=1
-		rm -f "$TOUCH_MAPPER_DESTINATION"
+		if ! claim_runtime_asset mapper "$TOUCH_MAPPER_DESTINATION" \
+			"$transaction_directory/runtime/mapper" 755; then
+			mapper_claim_held=1
+			rollback_note="$rollback_note touch mapper claim retained at $runtime_claim_recovery;"
+			exit 1
+		fi
+		case $runtime_claim_state in
+		removed) mapper_remove_attempted=1 ;;
+		absent|modified) ;;
+		*) die "unknown touch mapper claim state: $runtime_claim_state" ;;
+		esac
 	fi
 fi
 if [ "$source_present" -eq 1 ]; then
@@ -430,5 +526,9 @@ if [ "$source_present" -eq 1 ]; then
 fi
 completed=1
 trap - EXIT HUP INT TERM
-rm -rf "$transaction_directory"
+if ! rm -rf "$transaction_directory"; then
+	printf 'ERROR: uninstall completed but recovery cleanup failed; recovery retained at %s\n' \
+		"$transaction_directory" >&2
+	exit 1
+fi
 printf 'PASS: removed %s/%s assets\n' "$PROJECT_NAME" "$PROJECT_VERSION"
