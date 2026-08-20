@@ -21,6 +21,29 @@
 		rockchip,vopl = <&vopl>;
 		status = "okay";
 	};
+
+	rockpi_dsi1_vopb_route_filter: rockpi-dsi1-vopb-route-filter {
+		status = "disabled";
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+				dsi1_vopb_filter_sink: endpoint {
+					remote-endpoint = <&mipi1_in_vopb>;
+				};
+			};
+
+			port@1 {
+				reg = <1>;
+				vopb_dsi1_filter_sink: endpoint {
+					remote-endpoint = <&vopb_out_mipi1>;
+				};
+			};
+		};
+	};
 };
 
 &mipi_dsi {
@@ -45,6 +68,7 @@
 
 &mipi1_in_vopb {
 	status = "disabled";
+	remote-endpoint = <&dsi1_vopb_filter_sink>;
 };
 
 &mipi1_in_vopl {
@@ -53,6 +77,11 @@
 
 &vopl_out_mipi1 {
 	status = "okay";
+};
+
+&vopb_out_mipi1 {
+	status = "disabled";
+	remote-endpoint = <&vopb_dsi1_filter_sink>;
 };
 
 &i2c1 {

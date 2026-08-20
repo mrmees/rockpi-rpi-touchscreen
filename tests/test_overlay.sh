@@ -70,6 +70,33 @@ property_cell()
 		awk -v cell="$cell" 'NR == 1 { print $cell; exit }'
 }
 
+property_cell_number()
+{
+	property=$1
+	cell=$2
+	value=$(property_cell "$property" "$cell")
+	case $value in
+	0x*) printf '%d\n' "$((value))" ;;
+	*) printf '%d\n' "$value" ;;
+	esac
+}
+
+count_direct_named_children()
+{
+	name=$1
+	awk -v name="$name" '
+		{
+			line = $0
+			if (depth == 1 && line ~ "^[[:space:]]*" name "[^[:space:]{]*[[:space:]]*\\{")
+				count++
+			opens = gsub(/\{/, "{", line)
+			closes = gsub(/\}/, "}", line)
+			depth += opens - closes
+		}
+		END { print count + 0 }
+	'
+}
+
 require_equal()
 {
 	actual=$1
@@ -133,8 +160,10 @@ assert_active_dtb_resolution
 	exit 1
 }
 
-dtc -Wno-power_domains_property -@ -I dts -O dtb -o "$output" "$overlay"
-dtc -Wno-power_domains_property -I dtb -O dts -o "$workdir/compiled.dts" "$output"
+dtc -Wno-power_domains_property -Wno-graph_port -Wno-graph_child_address -Wno-graph_endpoint \
+	-@ -I dts -O dtb -o "$output" "$overlay"
+dtc -Wno-power_domains_property -Wno-graph_port -Wno-graph_child_address -Wno-graph_endpoint \
+	-I dtb -O dts -o "$workdir/compiled.dts" "$output"
 fdtoverlay -i "$dtb" -o "$workdir/merged.dtb" "$output"
 dtc -I dtb -O dts -o "$workdir/merged.dts" "$workdir/merged.dtb"
 
@@ -221,6 +250,37 @@ printf 'PASS: inverted touch at 0x38\n'
 vopl_endpoint=$(printf '%s\n' "$vopl" | extract_named_node 'endpoint@3')
 dsi1_vopb_input=$(printf '%s\n' "$dsi1" | extract_named_node 'endpoint@0')
 dsi1_input=$(printf '%s\n' "$dsi1" | extract_named_node 'endpoint@1')
+route_filter=$(node_from_file "$workdir/merged.dts" 'rockpi-dsi1-vopb-route-filter') || {
+	printf 'FAIL: merged tree is missing the VOPB route filter\n' >&2
+	exit 1
+}
+vopb_endpoint=$(printf '%s\n' "$vopb" | extract_named_node 'endpoint@3')
+filter_port0=$(printf '%s\n' "$route_filter" | extract_named_node 'port@0')
+filter_port1=$(printf '%s\n' "$route_filter" | extract_named_node 'port@1')
+filter_ports=$(printf '%s\n' "$route_filter" | extract_named_node 'ports')
+filter_dsi_sink=$(printf '%s\n' "$filter_port0" | extract_named_node 'endpoint')
+filter_vopb_sink=$(printf '%s\n' "$filter_port1" | extract_named_node 'endpoint')
+
+require_text "$route_filter" 'status = "disabled";' 'route filter is disabled'
+require_equal "$(printf '%s\n' "$filter_ports" | count_direct_named_children 'port@')" \
+	'2' 'route filter has exactly two direct ports'
+require_equal "$(printf '%s\n' "$filter_port0" | property_cell_number reg 1)" \
+	'0' 'route filter port 0 has reg 0'
+require_equal "$(printf '%s\n' "$filter_port1" | property_cell_number reg 1)" \
+	'1' 'route filter port 1 has reg 1'
+require_equal "$(printf '%s\n' "$dsi1_vopb_input" | property_phandle remote-endpoint)" \
+	"$(printf '%s\n' "$filter_dsi_sink" | property_phandle phandle)" \
+	'DSI VOPB input terminates at route filter port 0'
+require_equal "$(printf '%s\n' "$filter_dsi_sink" | property_phandle remote-endpoint)" \
+	"$(printf '%s\n' "$dsi1_vopb_input" | property_phandle phandle)" \
+	'route filter port 0 connects back to DSI VOPB input'
+require_equal "$(printf '%s\n' "$vopb_endpoint" | property_phandle remote-endpoint)" \
+	"$(printf '%s\n' "$filter_vopb_sink" | property_phandle phandle)" \
+	'VOPB DSI output terminates at route filter port 1'
+require_equal "$(printf '%s\n' "$filter_vopb_sink" | property_phandle remote-endpoint)" \
+	"$(printf '%s\n' "$vopb_endpoint" | property_phandle phandle)" \
+	'route filter port 1 connects back to VOPB DSI output'
+require_text "$vopb_endpoint" 'status = "disabled";' 'VOPB DSI output is disabled'
 require_text "$dsi1_vopb_input" 'status = "disabled";' 'big VOP input is disabled'
 require_text "$dsi1_input" 'status = "okay";' 'little VOP input is enabled'
 require_equal "$(printf '%s\n' "$vopl_endpoint" | property_phandle remote-endpoint)" \
@@ -240,7 +300,7 @@ require_equal "$(printf '%s\n' "$dsi1_output" | property_phandle remote-endpoint
 require_equal "$(printf '%s\n' "$panel_input" | property_phandle remote-endpoint)" \
 	"$(printf '%s\n' "$dsi1_output" | property_phandle phandle)" \
 	'panel input connects back to DSI1 output'
-printf 'PASS: little-VOP to DSI1 to panel graph\n'
+printf 'PASS: VOPB route is terminated and little-VOP to DSI1 to panel graph\n'
 
 require_text "$hdmi" 'status = "okay";' 'HDMI remains enabled'
 printf 'PASS: HDMI remains enabled\n'

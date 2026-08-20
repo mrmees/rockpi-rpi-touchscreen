@@ -159,12 +159,55 @@ property_cell()
 		awk -v cell="$cell" 'NR == 1 { print $cell; exit }'
 }
 
+property_cell_number()
+{
+	property=$1
+	cell=$2
+	value=$(property_cell "$property" "$cell")
+	case $value in
+	0x*) printf '%d\n' "$((value))" ;;
+	*) printf '%d\n' "$value" ;;
+	esac
+}
+
+property_cells()
+{
+	property=$1
+	sed -n "s/^[[:space:]]*${property} = <\\([^>]*\\)>;.*/\\1/p" |
+		awk 'NR == 1 { for (i = 1; i <= NF; i++) print $i; exit }'
+}
+
+count_direct_named_children()
+{
+	name=$1
+	awk -v name="$name" '
+		{
+			line = $0
+			if (depth == 1 && line ~ "^[[:space:]]*" name "[^[:space:]{]*[[:space:]]*\\{")
+				count++
+			opens = gsub(/\{/, "{", line)
+			closes = gsub(/\}/, "}", line)
+			depth += opens - closes
+		}
+		END { print count + 0 }
+	'
+}
+
 require_equal()
 {
 	actual=$1
 	expected=$2
 	message=$3
 	[ -n "$actual" ] && [ "$actual" = "$expected" ] || die "$message (got $actual, expected $expected)"
+}
+
+require_distinct()
+{
+	actual=$1
+	other=$2
+	message=$3
+	[ -n "$actual" ] && [ -n "$other" ] && [ "$actual" != "$other" ] ||
+		die "$message (got $actual, conflicting phandle $other)"
 }
 
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
@@ -215,7 +258,11 @@ dtbo=$build_dir/$OVERLAY_NAME.dtbo
 temporary_dtbo=$workdir/$OVERLAY_NAME.dtbo
 # The standalone overlay cannot expose the external power controller's
 # #power-domain-cells to dtc. The merged-tree checks below validate both cells.
-run_warning_free overlay-compile dtc -Wno-power_domains_property -@ -I dts -O dtb -o "$temporary_dtbo" "$overlay"
+# dtc graph checks inspect generated overlay fragments rather than the merged
+# graph and falsely flag their endpoint-target overlays. The merged-tree checks
+# below validate the complete reciprocal graph without suppressions.
+run_warning_free overlay-compile dtc -Wno-power_domains_property -Wno-graph_port \
+	-Wno-graph_child_address -Wno-graph_endpoint -@ -I dts -O dtb -o "$temporary_dtbo" "$overlay"
 atomic_install_file "$temporary_dtbo" "$dtbo"
 printf 'PASS: overlay compile\n'
 run_warning_free overlay-apply fdtoverlay -i "$dtb" -o "$workdir/merged.dtb" "$dtbo"
@@ -228,6 +275,7 @@ i2c1=$(node_from_file "$workdir/merged.dts" 'i2c@ff110000')
 grf=$(node_from_file "$workdir/merged.dts" 'syscon@ff770000')
 vopb=$(node_from_file "$workdir/merged.dts" 'vop@ff900000')
 vopl=$(node_from_file "$workdir/merged.dts" 'vop@ff8f0000')
+display_subsystem=$(node_from_file "$workdir/merged.dts" 'display-subsystem')
 power=$(node_from_file "$workdir/merged.dts" 'power-controller')
 hdmi=$(node_from_file "$workdir/merged.dts" 'hdmi@ff940000')
 provider_count=$(grep -Fc 'compatible = "rockpi,rk3399-dsi1-rpi-touchscreen-compat";' "$workdir/merged.dts" || true)
@@ -275,8 +323,37 @@ require_direct_boolean "$touch" touchscreen-inverted-y 'merged touch Y inversion
 printf 'PASS: I2C1 panel and touch nodes\n'
 
 vopl_endpoint=$(printf '%s\n' "$vopl" | extract_named_node 'endpoint@3')
+vopb_endpoint=$(printf '%s\n' "$vopb" | extract_named_node 'endpoint@3')
 dsi1_vopb_input=$(printf '%s\n' "$dsi1" | extract_named_node 'endpoint@0')
 dsi1_input=$(printf '%s\n' "$dsi1" | extract_named_node 'endpoint@1')
+route_filter=$(node_from_file "$workdir/merged.dts" 'rockpi-dsi1-vopb-route-filter') ||
+	die 'merged tree is missing the DSI1 VOPB route filter'
+route_filter_ports=$(printf '%s\n' "$route_filter" | extract_named_node 'ports')
+filter_port0=$(printf '%s\n' "$route_filter_ports" | extract_named_node 'port@0')
+filter_port1=$(printf '%s\n' "$route_filter_ports" | extract_named_node 'port@1')
+filter_dsi_sink=$(printf '%s\n' "$filter_port0" | extract_named_node 'endpoint')
+filter_vopb_sink=$(printf '%s\n' "$filter_port1" | extract_named_node 'endpoint')
+
+require_direct_property "$route_filter" status '"disabled"' 'DSI1 VOPB route filter is not disabled'
+require_equal "$(printf '%s\n' "$route_filter_ports" | count_direct_named_children 'port@')" '2' 'DSI1 VOPB route filter does not have exactly two ports'
+require_equal "$(printf '%s\n' "$filter_port0" | property_cell_number reg 1)" '0' 'DSI1 VOPB route filter port 0 reg is wrong'
+require_equal "$(printf '%s\n' "$filter_port1" | property_cell_number reg 1)" '1' 'DSI1 VOPB route filter port 1 reg is wrong'
+require_direct_property "$vopb_endpoint" status '"disabled"' 'VOPB DSI output is not disabled'
+require_equal "$(printf '%s\n' "$dsi1_vopb_input" | property_phandle remote-endpoint)" "$(printf '%s\n' "$filter_dsi_sink" | property_phandle phandle)" 'DSI1 VOPB input does not terminate at route filter port 0'
+require_equal "$(printf '%s\n' "$filter_dsi_sink" | property_phandle remote-endpoint)" "$(printf '%s\n' "$dsi1_vopb_input" | property_phandle phandle)" 'DSI1 VOPB route filter port 0 does not connect back to DSI input'
+require_equal "$(printf '%s\n' "$vopb_endpoint" | property_phandle remote-endpoint)" "$(printf '%s\n' "$filter_vopb_sink" | property_phandle phandle)" 'VOPB DSI output does not terminate at route filter port 1'
+require_equal "$(printf '%s\n' "$filter_vopb_sink" | property_phandle remote-endpoint)" "$(printf '%s\n' "$vopb_endpoint" | property_phandle phandle)" 'DSI1 VOPB route filter port 1 does not connect back to VOPB output'
+
+for filter_endpoint in "$filter_dsi_sink" "$filter_vopb_sink"; do
+	filter_phandle=$(printf '%s\n' "$filter_endpoint" | property_phandle phandle)
+	require_distinct "$filter_phandle" "$(printf '%s\n' "$vopb_endpoint" | property_phandle phandle)" 'DSI1 VOPB route filter endpoint aliases the VOPB output'
+	require_distinct "$filter_phandle" "$(printf '%s\n' "$vopl_endpoint" | property_phandle phandle)" 'DSI1 VOPB route filter endpoint aliases the VOPL output'
+	display_ports=$(printf '%s\n' "$display_subsystem" | property_cells ports)
+	[ -n "$display_ports" ] || die 'display-subsystem ports property is missing'
+	for display_port_phandle in $display_ports; do
+		require_distinct "$filter_phandle" "$display_port_phandle" 'DSI1 VOPB route filter endpoint aliases display-subsystem ports'
+	done
+done
 require_direct_property "$dsi1_vopb_input" status '"disabled"' 'DSI1 big-VOP input is not disabled'
 require_direct_property "$dsi1_input" status '"okay"' 'DSI1 little-VOP input is not enabled'
 require_equal "$(printf '%s\n' "$vopl_endpoint" | property_phandle remote-endpoint)" "$(printf '%s\n' "$dsi1_input" | property_phandle phandle)" 'little-VOP output does not connect to DSI1 input'
@@ -287,7 +364,7 @@ panel_port=$(printf '%s\n' "$panel" | extract_named_node 'port')
 panel_input=$(printf '%s\n' "$panel_port" | extract_named_node 'endpoint')
 require_equal "$(printf '%s\n' "$dsi1_output" | property_phandle remote-endpoint)" "$(printf '%s\n' "$panel_input" | property_phandle phandle)" 'DSI1 output does not connect to panel input'
 require_equal "$(printf '%s\n' "$panel_input" | property_phandle remote-endpoint)" "$(printf '%s\n' "$dsi1_output" | property_phandle phandle)" 'panel input does not connect back to DSI1 output'
-printf 'PASS: DSI1 graph prefers little VOP and connects to panel\n'
+printf 'PASS: DSI1 VOPB route is terminated; DSI1 graph prefers little VOP and connects to panel\n'
 
 require_direct_property "$hdmi" status '"okay"' 'merged tree does not preserve HDMI'
 printf 'PASS: HDMI unchanged\n'

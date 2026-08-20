@@ -120,6 +120,39 @@ case $input in
 	else
 		duplicate_provider=
 	fi
+	if [ "${ROUTE_FILTER_EXTRA_PORT:-0}" = 1 ]; then
+		route_filter_extra_port='port@2 {
+				reg = <2>;
+				endpoint {
+					phandle = <0xa2>;
+					remote-endpoint = <0xa3>;
+				};
+			};'
+	else
+		route_filter_extra_port=
+	fi
+	route_filter="rockpi-dsi1-vopb-route-filter {
+		status = \"${ROUTE_FILTER_STATUS:-disabled}\";
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			port@0 {
+				reg = <${ROUTE_FILTER_PORT0_REG:-0}>;
+				endpoint {
+					phandle = <0xc1>;
+					remote-endpoint = <${ROUTE_FILTER_DSI_REMOTE:-0xc0}>;
+				};
+			};
+			port@1 {
+				reg = <${ROUTE_FILTER_PORT1_REG:-1}>;
+				endpoint {
+					phandle = <0xb1>;
+					remote-endpoint = <${ROUTE_FILTER_VOPB_REMOTE:-0xb0}>;
+				};
+			};
+			$route_filter_extra_port
+		};
+	};"
 	cat > "$output" <<EOF_DTS
 dsi@ff960000 {
 	$dsi0_status
@@ -141,6 +174,8 @@ dsi@ff968000 {
 	};
 	endpoint@0 {
 		status = "disabled";
+		phandle = <0xc0>;
+		remote-endpoint = <${ROUTE_DSI_REMOTE:-0xc1}>;
 	};
 	endpoint@1 {
 		status = "okay";
@@ -174,6 +209,11 @@ syscon@ff770000 {
 };
 vop@ff900000 {
 	phandle = <0x43>;
+	endpoint@3 {
+		status = "disabled";
+		phandle = <0xb0>;
+		remote-endpoint = <${ROUTE_VOPB_REMOTE:-0xb1}>;
+	};
 };
 vop@ff8f0000 {
 	phandle = <0x44>;
@@ -189,8 +229,13 @@ power-controller {
 	#power-domain-cells = <0x01>;
 	phandle = <0x45>;
 };
+display-subsystem {
+	compatible = "rockchip,display-subsystem";
+	ports = <0x70 0x71>;
+};
 $provider
 $duplicate_provider
+$route_filter
 EOF_DTS
 	[ -z "${DTC_MERGED_DIAGNOSTIC:-}" ] || printf '%s\n' "$DTC_MERGED_DIAGNOSTIC" >&2
 	;;
@@ -225,6 +270,17 @@ run_validate()
 	MAKE_LOG="$sandbox/make.log" MAKE_CC_LOG="$sandbox/make-cc.log" PATH="$sandbox/bin:$PATH" \
 	REPO_ROOT="$repo_root" \
 	sh "$repo_root/scripts/validate.sh" --offline "$@"
+}
+
+run_validate_mutation()
+{
+	sandbox=$1
+	mutation=$2
+	env "$mutation" BOOT_DIR="$sandbox/boot" MODULES_DIR="$sandbox/modules" \
+		KERNEL_RELEASE=test-kernel COMPATIBLE_FILE="$sandbox/compatible" \
+		BUILD_DIR="$sandbox/build" MAKE_LOG="$sandbox/make.log" \
+		MAKE_CC_LOG="$sandbox/make-cc.log" PATH="$sandbox/bin:$PATH" \
+		REPO_ROOT="$repo_root" sh "$repo_root/scripts/validate.sh" --offline
 }
 
 test_old_upstream_panel_compatible_fails_validation()
@@ -417,6 +473,29 @@ test_provider_resources_and_touch_orientation_are_strict()
 	printf 'PASS: provider resources, panel link, touch orientation, and DSI0 graph are strict\n'
 }
 
+test_route_filter_policy_is_strict()
+{
+	for mutation in \
+		ROUTE_FILTER_STATUS=okay \
+		ROUTE_DSI_REMOTE=0xc0 \
+		ROUTE_FILTER_DSI_REMOTE=0xc1 \
+		ROUTE_VOPB_REMOTE=0xb0 \
+		ROUTE_FILTER_VOPB_REMOTE=0xb1 \
+		ROUTE_FILTER_PORT0_REG=1 \
+		ROUTE_FILTER_PORT1_REG=0 \
+		ROUTE_FILTER_EXTRA_PORT=1; do
+		sandbox=$workdir/route-filter-${mutation%%=*}
+		make_validate_sandbox "$sandbox"
+		if run_validate_mutation "$sandbox" "$mutation" > "$sandbox/output" 2>&1; then
+			fail "validator accepted route-filter mutation: $mutation"
+		fi
+		if grep -Fq 'PASS: offline validation' "$sandbox/output"; then
+			fail "route-filter mutation reached offline validation PASS: $mutation"
+		fi
+	done
+	printf 'PASS: route-filter policy rejects every mutation\n'
+}
+
 test_validator_atomically_replaces_read_only_dtbo()
 {
 	sandbox=$workdir/read-only-dtbo
@@ -502,6 +581,7 @@ test_documented_base_dtb_diagnostics_are_filtered
 test_validate_uses_kernel_build_for_clean_and_scoped_merged_tree_checks
 test_nested_status_cannot_satisfy_direct_parent_check
 test_provider_resources_and_touch_orientation_are_strict
+test_route_filter_policy_is_strict
 test_validator_atomically_replaces_read_only_dtbo
 test_validate_uses_the_kernel_recorded_compiler
 test_versioned_compiler_is_shimmed_to_the_kernel_recorded_name
