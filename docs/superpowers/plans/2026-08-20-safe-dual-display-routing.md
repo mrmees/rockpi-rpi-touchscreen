@@ -318,6 +318,9 @@ stdbuf -oL xev -root -event randr | while IFS= read -r event_line; do
 done
 ```
 
+Mark the helper executable in git (`chmod 0755 scripts/map-touchscreen.sh`) so
+the source mode, staged mode, installed mode, and `TryExec` contract agree.
+
 If the real `xev` header differs on this image, update the matcher to the literal captured header and the fake to mirror it; do not broaden the match to every line.
 
 - [ ] **Step 4: Add the XDG autostart asset**
