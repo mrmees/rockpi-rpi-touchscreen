@@ -25,14 +25,30 @@ if ! old_status=$(dkms status -m "$PROJECT_NAME" -v "$old_version" 2>&1); then
 	exit 1
 fi
 old_registered=0
-if printf '%s\n' "$old_status" | grep -Fq "$PROJECT_NAME/$old_version"; then
+if printf '%s\n' "$old_status" | dkms_status_has_version "$old_version"; then
 	old_registered=1
+fi
+old_expected_installed="$PROJECT_NAME/$old_version, $KERNEL_RELEASE, $ARCH: installed"
+old_was_installed=0
+if printf '%s\n' "$old_status" | grep -Fxq "$old_expected_installed"; then
+	old_was_installed=1
 fi
 old_source_owned=0
 if [ -f "$old_source/dkms.conf" ] &&
 	grep -Fq 'PACKAGE_NAME="rockpi-rpi-touchscreen"' "$old_source/dkms.conf" &&
 	grep -Fq 'PACKAGE_VERSION="0.1.1"' "$old_source/dkms.conf"; then
 	old_source_owned=1
+fi
+dkms_state_root=${DKMS_STATE_DIR:-/var/lib/dkms}
+if [ "$old_was_installed" -eq 1 ]; then
+	[ "$old_source_owned" -eq 1 ] ||
+		die "installed old DKMS source is missing or unowned: $old_source"
+	old_built_baseline=$(find "$dkms_state_root/$PROJECT_NAME/$old_version/$KERNEL_RELEASE" \
+		-type f -name raspits_ft5426.ko -print 2>/dev/null | head -n 1)
+	old_installed_baseline=$(modinfo -k "$KERNEL_RELEASE" -n raspits_ft5426 2>/dev/null || true)
+	[ -n "$old_built_baseline" ] && [ -f "$old_installed_baseline" ] &&
+		cmp -s "$old_built_baseline" "$old_installed_baseline" ||
+		die 'old installed module does not match its DKMS build; refusing migration'
 fi
 
 source_created=0
@@ -41,6 +57,7 @@ overlay_backup_created=0
 overlay_replaced=0
 previous_overlay_file=
 dkms_registration_created=0
+dkms_install_attempted=0
 backup_created=0
 completed=0
 stage_directory=
@@ -86,17 +103,63 @@ rollback()
 			new_registration_retained=1
 			rollback_note="$rollback_note DKMS registration removal failed; new source retained at $PROJECT_SOURCE_DIR;"
 		fi
+		if [ "$dkms_install_attempted" -eq 1 ] && [ "$old_was_installed" -eq 1 ]; then
+			if ! dkms install -m "$PROJECT_NAME" -v "$old_version" -k "$KERNEL_RELEASE" >/dev/null 2>&1; then
+				rollback_failed=1
+				rollback_note="$rollback_note old DKMS reinstall failed; retained old source at $old_source;"
+			fi
+		fi
 		if [ -n "$recovery_directory" ] && [ -d "$recovery_directory/prior-modules" ]; then
 			for module_name in $MODULE_NAMES; do
-				prior_module=$recovery_directory/prior-modules/$module_name.ko
-				prior_path_file=$recovery_directory/prior-modules/$module_name.path
-				[ -f "$prior_module" ] || continue
-				prior_path=$(cat "$prior_path_file")
-				if ! try_atomic_install_file "$prior_module" "$prior_path"; then
+				prior_paths=$recovery_directory/prior-modules/$module_name.paths
+				current_paths=$recovery_directory/prior-modules/$module_name.current-paths
+				find "${MODULES_DIR:-/lib/modules}/$KERNEL_RELEASE" -type f \
+					\( -name "$module_name.ko" -o -name "$module_name.ko.xz" \
+					-o -name "$module_name.ko.gz" -o -name "$module_name.ko.zst" \) \
+					-print > "$current_paths" 2>/dev/null || true
+				while IFS= read -r current_path; do
+					[ -n "$current_path" ] || continue
+					if ! rm -f "$current_path"; then
+						rollback_failed=1
+						rollback_note="$rollback_note partial $module_name removal failed: $current_path;"
+					fi
+				done < "$current_paths"
+				prior_index=0
+				while IFS= read -r prior_path; do
+					[ -n "$prior_path" ] || continue
+					prior_index=$((prior_index + 1))
+					prior_module=$recovery_directory/prior-modules/$module_name.$prior_index.backup
+					if ! try_atomic_install_file "$prior_module" "$prior_path" ||
+						! cmp -s "$prior_module" "$prior_path"; then
+						rollback_failed=1
+						rollback_note="$rollback_note prior $module_name module retained at $prior_module;"
+					fi
+				done < "$prior_paths"
+				restored_count=$(find "${MODULES_DIR:-/lib/modules}/$KERNEL_RELEASE" -type f \
+					\( -name "$module_name.ko" -o -name "$module_name.ko.xz" \
+					-o -name "$module_name.ko.gz" -o -name "$module_name.ko.zst" \) \
+					-print 2>/dev/null | awk 'END { print NR + 0 }')
+				[ "$restored_count" -eq "$prior_index" ] || {
 					rollback_failed=1
-					rollback_note="$rollback_note prior $module_name module retained at $prior_module;"
-				fi
+					rollback_note="$rollback_note $module_name path-set restoration failed;"
+				}
 			done
+		fi
+		if [ "$dkms_install_attempted" -eq 1 ]; then
+			if ! restored_old_status=$(dkms status -m "$PROJECT_NAME" -v "$old_version" 2>&1) ||
+				[ "$restored_old_status" != "$old_status" ]; then
+				rollback_failed=1
+				rollback_note="$rollback_note old DKMS lifecycle restoration failed (expected: ${old_status:-absent}; got: ${restored_old_status:-unavailable});"
+			elif [ "$old_was_installed" -eq 1 ]; then
+				old_built_module=$(find "${DKMS_STATE_DIR:-/var/lib/dkms}/$PROJECT_NAME/$old_version/$KERNEL_RELEASE" \
+					-type f -name raspits_ft5426.ko -print 2>/dev/null | head -n 1)
+				old_installed_module=$(modinfo -k "$KERNEL_RELEASE" -n raspits_ft5426 2>/dev/null || true)
+				if [ -z "$old_built_module" ] || [ ! -f "$old_installed_module" ] ||
+					! cmp -s "$old_built_module" "$old_installed_module"; then
+					rollback_failed=1
+					rollback_note="$rollback_note old installed module checksum restoration failed;"
+				fi
+			fi
 		fi
 		if [ "$source_created" -eq 1 ] && [ "$new_registration_retained" -eq 0 ] &&
 			! rm -rf "$PROJECT_SOURCE_DIR"; then
@@ -115,6 +178,9 @@ rollback()
 		fi
 	fi
 	if [ "$rollback_failed" -ne 0 ]; then
+		if [ -n "$recovery_directory" ] && [ -d "$recovery_directory" ]; then
+			rollback_note="$rollback_note recovery artifacts retained at $recovery_directory;"
+		fi
 		printf 'ERROR: transaction failed with status %s; rollback also failed:%s\n' \
 			"$transaction_status" "$rollback_note" >&2
 		exit 1
@@ -165,25 +231,33 @@ fi
 if dkms add -m "$PROJECT_NAME" -v "$PROJECT_VERSION"; then
 	dkms_registration_created=1
 else
-	dkms status -m "$PROJECT_NAME" -v "$PROJECT_VERSION" | grep -Fq "$PROJECT_NAME/$PROJECT_VERSION" ||
+		dkms status -m "$PROJECT_NAME" -v "$PROJECT_VERSION" | dkms_status_has_version "$PROJECT_VERSION" ||
 		die 'DKMS package could not be added or found'
 fi
 dkms build -m "$PROJECT_NAME" -v "$PROJECT_VERSION" -k "$KERNEL_RELEASE"
 
 mkdir -p "$recovery_directory/prior-modules"
 for module_name in $MODULE_NAMES; do
-	if prior_module_path=$(modinfo -k "$KERNEL_RELEASE" -n "$module_name" 2>/dev/null) &&
-		[ -f "$prior_module_path" ]; then
-		cp "$prior_module_path" "$recovery_directory/prior-modules/$module_name.ko"
-		printf '%s\n' "$prior_module_path" > "$recovery_directory/prior-modules/$module_name.path"
-	fi
+	prior_paths=$recovery_directory/prior-modules/$module_name.paths
+	find "${MODULES_DIR:-/lib/modules}/$KERNEL_RELEASE" -type f \
+		\( -name "$module_name.ko" -o -name "$module_name.ko.xz" \
+		-o -name "$module_name.ko.gz" -o -name "$module_name.ko.zst" \) \
+		-print > "$prior_paths" 2>/dev/null || true
+	prior_index=0
+	while IFS= read -r prior_module_path; do
+		[ -n "$prior_module_path" ] || continue
+		prior_index=$((prior_index + 1))
+		cp "$prior_module_path" "$recovery_directory/prior-modules/$module_name.$prior_index.backup"
+	done < "$prior_paths"
 done
+dkms_install_attempted=1
 dkms install -m "$PROJECT_NAME" -v "$PROJECT_VERSION" -k "$KERNEL_RELEASE"
 
-dkms_state_root=${DKMS_STATE_DIR:-/var/lib/dkms}
-dkms status -m "$PROJECT_NAME" -v "$PROJECT_VERSION" |
-	grep -Fq "$PROJECT_NAME/$PROJECT_VERSION" ||
-	die "DKMS did not report $PROJECT_NAME/$PROJECT_VERSION installed"
+expected_dkms_status="$PROJECT_NAME/$PROJECT_VERSION, $KERNEL_RELEASE, $ARCH: installed"
+dkms_status=$(dkms status -m "$PROJECT_NAME" -v "$PROJECT_VERSION") ||
+	die "cannot verify DKMS status for $PROJECT_NAME/$PROJECT_VERSION"
+printf '%s\n' "$dkms_status" | grep -Fxq "$expected_dkms_status" ||
+	die "DKMS did not report exact installed state: $expected_dkms_status"
 for module_name in $MODULE_NAMES; do
 	built_module=$(find "$dkms_state_root/$PROJECT_NAME/$PROJECT_VERSION/$KERNEL_RELEASE" \
 		-type f -name "$module_name.ko" -print 2>/dev/null | head -n 1)

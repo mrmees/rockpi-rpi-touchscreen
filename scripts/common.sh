@@ -11,6 +11,7 @@ ARMBIAN_ENV=${ARMBIAN_ENV:-$BOOT_DIRECTORY/armbianEnv.txt}
 OVERLAY_DIRECTORY=${OVERLAY_DIR:-$BOOT_DIRECTORY/overlay-user}
 DTB_DIRECTORY=${DTB_ROOT:-$BOOT_DIRECTORY/dtb}
 KERNEL_RELEASE=${KERNEL_RELEASE:-$(uname -r)}
+ARCH=${ARCH:-$(uname -m)}
 KERNEL_BUILD=${MODULES_DIR:-/lib/modules}/$KERNEL_RELEASE/build
 
 die()
@@ -30,6 +31,19 @@ require_command()
 require_root()
 {
 	[ "$(id -u)" -eq 0 ] || die 'this command must be run as root'
+}
+
+dkms_status_has_version()
+{
+	version=$1
+	prefix=$PROJECT_NAME/$version
+	awk -v prefix="$prefix" '
+		index($0, prefix) == 1 {
+			separator = substr($0, length(prefix) + 1, 1)
+			if (separator == "," || separator == ":") found = 1
+		}
+		END { exit found ? 0 : 1 }
+	'
 }
 
 active_dtb()

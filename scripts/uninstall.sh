@@ -41,6 +41,7 @@ if [ "$dry_run" -eq 1 ]; then
 	remove_overlay_token "$temporary_config" "$OVERLAY_TOKEN"
 	printf 'REMOVE: %s\n' "$overlay_destination"
 	printf 'REMOVE: %s\n' "$PROJECT_SOURCE_DIR"
+	printf 'CONFIG: %s\n' "$ARMBIAN_ENV"
 	for module_name in $MODULE_NAMES; do
 		printf 'MODULE: %s\n' "$module_name"
 	done
@@ -51,15 +52,34 @@ if [ "$dry_run" -eq 1 ]; then
 	exit 0
 fi
 
-remove_overlay_token "$ARMBIAN_ENV" "$OVERLAY_TOKEN"
-rm -f "$overlay_destination"
+[ -f "$ARMBIAN_ENV" ] || die "boot configuration not found: $ARMBIAN_ENV"
+source_present=0
+if [ -e "$PROJECT_SOURCE_DIR" ]; then
+	[ -d "$PROJECT_SOURCE_DIR" ] || die "DKMS source path is not a directory: $PROJECT_SOURCE_DIR"
+	[ -f "$PROJECT_SOURCE_DIR/dkms.conf" ] &&
+		grep -Fxq "PACKAGE_NAME=\"$PROJECT_NAME\"" "$PROJECT_SOURCE_DIR/dkms.conf" &&
+		grep -Fxq "PACKAGE_VERSION=\"$PROJECT_VERSION\"" "$PROJECT_SOURCE_DIR/dkms.conf" ||
+		die "source path is not owned by this project: $PROJECT_SOURCE_DIR"
+	source_present=1
+fi
+
 dkms_status=$(dkms status -m "$PROJECT_NAME" -v "$PROJECT_VERSION") ||
 	die "cannot determine DKMS registration state for $PROJECT_NAME/$PROJECT_VERSION"
-if printf '%s\n' "$dkms_status" | grep -Fq "$PROJECT_NAME/$PROJECT_VERSION"; then
+if printf '%s\n' "$dkms_status" | dkms_status_has_version "$PROJECT_VERSION"; then
 	if ! dkms remove -m "$PROJECT_NAME" -v "$PROJECT_VERSION" --all; then
 		printf 'ERROR: DKMS removal failed; retained source: %s\n' "$PROJECT_SOURCE_DIR" >&2
 		exit 1
 	fi
+	remaining_status=$(dkms status -m "$PROJECT_NAME" -v "$PROJECT_VERSION") ||
+		die "cannot verify DKMS removal for $PROJECT_NAME/$PROJECT_VERSION; retained source: $PROJECT_SOURCE_DIR"
+	if printf '%s\n' "$remaining_status" | dkms_status_has_version "$PROJECT_VERSION"; then
+		die "DKMS removal did not clear $PROJECT_NAME/$PROJECT_VERSION; retained source: $PROJECT_SOURCE_DIR"
+	fi
 fi
-rm -rf "$PROJECT_SOURCE_DIR"
+
+remove_overlay_token "$ARMBIAN_ENV" "$OVERLAY_TOKEN"
+rm -f "$overlay_destination"
+if [ "$source_present" -eq 1 ]; then
+	rm -rf "$PROJECT_SOURCE_DIR"
+fi
 printf 'PASS: removed %s/%s assets\n' "$PROJECT_NAME" "$PROJECT_VERSION"
