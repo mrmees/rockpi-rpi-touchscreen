@@ -177,13 +177,12 @@ property_cells()
 		awk 'NR == 1 { for (i = 1; i <= NF; i++) print $i; exit }'
 }
 
-count_direct_named_children()
+count_direct_port_children()
 {
-	name=$1
-	awk -v name="$name" '
+	awk '
 		{
 			line = $0
-			if (depth == 1 && line ~ "^[[:space:]]*" name "[^[:space:]{]*[[:space:]]*\\{")
+			if (depth == 1 && line ~ "^[[:space:]]*port(@[^[:space:]{]*)?[[:space:]]*\\{")
 				count++
 			opens = gsub(/\{/, "{", line)
 			closes = gsub(/\}/, "}", line)
@@ -258,11 +257,7 @@ dtbo=$build_dir/$OVERLAY_NAME.dtbo
 temporary_dtbo=$workdir/$OVERLAY_NAME.dtbo
 # The standalone overlay cannot expose the external power controller's
 # #power-domain-cells to dtc. The merged-tree checks below validate both cells.
-# dtc graph checks inspect generated overlay fragments rather than the merged
-# graph and falsely flag their endpoint-target overlays. The merged-tree checks
-# below validate the complete reciprocal graph without suppressions.
-run_warning_free overlay-compile dtc -Wno-power_domains_property -Wno-graph_port \
-	-Wno-graph_child_address -Wno-graph_endpoint -@ -I dts -O dtb -o "$temporary_dtbo" "$overlay"
+run_warning_free overlay-compile dtc -Wno-power_domains_property -@ -I dts -O dtb -o "$temporary_dtbo" "$overlay"
 atomic_install_file "$temporary_dtbo" "$dtbo"
 printf 'PASS: overlay compile\n'
 run_warning_free overlay-apply fdtoverlay -i "$dtb" -o "$workdir/merged.dtb" "$dtbo"
@@ -335,7 +330,7 @@ filter_dsi_sink=$(printf '%s\n' "$filter_port0" | extract_named_node 'endpoint')
 filter_vopb_sink=$(printf '%s\n' "$filter_port1" | extract_named_node 'endpoint')
 
 require_direct_property "$route_filter" status '"disabled"' 'DSI1 VOPB route filter is not disabled'
-require_equal "$(printf '%s\n' "$route_filter_ports" | count_direct_named_children 'port@')" '2' 'DSI1 VOPB route filter does not have exactly two ports'
+require_equal "$(printf '%s\n' "$route_filter_ports" | count_direct_port_children)" '2' 'DSI1 VOPB route filter does not have exactly two ports'
 require_equal "$(printf '%s\n' "$filter_port0" | property_cell_number reg 1)" '0' 'DSI1 VOPB route filter port 0 reg is wrong'
 require_equal "$(printf '%s\n' "$filter_port1" | property_cell_number reg 1)" '1' 'DSI1 VOPB route filter port 1 reg is wrong'
 require_direct_property "$vopb_endpoint" status '"disabled"' 'VOPB DSI output is not disabled'

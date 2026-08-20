@@ -68,6 +68,18 @@ EOF
 	cat > "$sandbox/bin/dtc" <<'EOF'
 #!/bin/sh
 set -eu
+
+if [ "${DTC_REJECT_GRAPH_WARNING_SUPPRESSIONS:-0}" = 1 ]; then
+	for argument do
+		case $argument in
+		-Wno-graph_port|-Wno-graph_child_address|-Wno-graph_endpoint)
+			printf 'unexpected graph warning suppression: %s\n' "$argument" >&2
+			exit 1
+			;;
+		esac
+	done
+fi
+
 output=
 input=
 while [ "$#" -gt 0 ]; do
@@ -131,6 +143,17 @@ case $input in
 	else
 		route_filter_extra_port=
 	fi
+	if [ "${ROUTE_FILTER_EXTRA_UNNUMBERED_PORT:-0}" = 1 ]; then
+		route_filter_extra_unnumbered_port='port {
+				reg = <2>;
+				endpoint {
+					phandle = <0xa3>;
+					remote-endpoint = <0xa2>;
+				};
+			};'
+	else
+		route_filter_extra_unnumbered_port=
+	fi
 	route_filter="rockpi-dsi1-vopb-route-filter {
 		status = \"${ROUTE_FILTER_STATUS:-disabled}\";
 		ports {
@@ -151,6 +174,7 @@ case $input in
 				};
 			};
 			$route_filter_extra_port
+			$route_filter_extra_unnumbered_port
 		};
 	};"
 	cat > "$output" <<EOF_DTS
@@ -483,7 +507,8 @@ test_route_filter_policy_is_strict()
 		ROUTE_FILTER_VOPB_REMOTE=0xb1 \
 		ROUTE_FILTER_PORT0_REG=1 \
 		ROUTE_FILTER_PORT1_REG=0 \
-		ROUTE_FILTER_EXTRA_PORT=1; do
+		ROUTE_FILTER_EXTRA_PORT=1 \
+		ROUTE_FILTER_EXTRA_UNNUMBERED_PORT=1; do
 		sandbox=$workdir/route-filter-${mutation%%=*}
 		make_validate_sandbox "$sandbox"
 		if run_validate_mutation "$sandbox" "$mutation" > "$sandbox/output" 2>&1; then
@@ -494,6 +519,16 @@ test_route_filter_policy_is_strict()
 		fi
 	done
 	printf 'PASS: route-filter policy rejects every mutation\n'
+}
+
+test_validator_rejects_graph_warning_suppressions()
+{
+	sandbox=$workdir/graph-warning-suppressions
+	make_validate_sandbox "$sandbox"
+	if ! run_validate_mutation "$sandbox" DTC_REJECT_GRAPH_WARNING_SUPPRESSIONS=1 > "$sandbox/output" 2>&1; then
+		fail 'validator passed a graph warning suppression to dtc'
+	fi
+	printf 'PASS: validator does not suppress graph warnings\n'
 }
 
 test_validator_atomically_replaces_read_only_dtbo()
@@ -582,6 +617,7 @@ test_validate_uses_kernel_build_for_clean_and_scoped_merged_tree_checks
 test_nested_status_cannot_satisfy_direct_parent_check
 test_provider_resources_and_touch_orientation_are_strict
 test_route_filter_policy_is_strict
+test_validator_rejects_graph_warning_suppressions
 test_validator_atomically_replaces_read_only_dtbo
 test_validate_uses_the_kernel_recorded_compiler
 test_versioned_compiler_is_shimmed_to_the_kernel_recorded_name

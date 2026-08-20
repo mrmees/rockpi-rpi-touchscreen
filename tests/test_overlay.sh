@@ -15,6 +15,27 @@ cleanup()
 }
 trap cleanup EXIT HUP INT TERM
 
+REAL_DTC=$(command -v dtc)
+mkdir -p "$workdir/bin"
+cat > "$workdir/bin/dtc" <<'EOF'
+#!/bin/sh
+set -eu
+
+for argument do
+	case $argument in
+	-Wno-graph_port|-Wno-graph_child_address|-Wno-graph_endpoint)
+		printf 'FAIL: overlay test passed a graph warning suppression: %s\n' "$argument" >&2
+		exit 1
+		;;
+	esac
+done
+
+exec "$REAL_DTC" "$@"
+EOF
+chmod +x "$workdir/bin/dtc"
+PATH=$workdir/bin:$PATH
+export PATH REAL_DTC
+
 extract_named_node()
 {
 	node=$1
@@ -160,10 +181,18 @@ assert_active_dtb_resolution
 	exit 1
 }
 
-dtc -Wno-power_domains_property -Wno-graph_port -Wno-graph_child_address -Wno-graph_endpoint \
-	-@ -I dts -O dtb -o "$output" "$overlay"
-dtc -Wno-power_domains_property -Wno-graph_port -Wno-graph_child_address -Wno-graph_endpoint \
-	-I dtb -O dts -o "$workdir/compiled.dts" "$output"
+if ! dtc -Wno-power_domains_property -@ -I dts -O dtb -o "$output" "$overlay" \
+	> "$workdir/overlay-compile.stdout" 2> "$workdir/overlay-compile.stderr"; then
+	cat "$workdir/overlay-compile.stdout" "$workdir/overlay-compile.stderr" >&2
+	printf 'FAIL: overlay compilation failed\n' >&2
+	exit 1
+fi
+if [ -s "$workdir/overlay-compile.stdout" ] || [ -s "$workdir/overlay-compile.stderr" ]; then
+	cat "$workdir/overlay-compile.stdout" "$workdir/overlay-compile.stderr" >&2
+	printf 'FAIL: overlay compilation emitted diagnostics\n' >&2
+	exit 1
+fi
+fdtdump "$output" > "$workdir/compiled.dts" 2>/dev/null
 fdtoverlay -i "$dtb" -o "$workdir/merged.dtb" "$output"
 dtc -I dtb -O dts -o "$workdir/merged.dts" "$workdir/merged.dtb"
 
@@ -184,6 +213,7 @@ require_text "$compiled_panel" 'rockpi,display-compat = <' 'compiled panel provi
 require_text "$compiled_touch" 'touchscreen-inverted-x;' 'compiled touch X inversion'
 require_text "$compiled_touch" 'touchscreen-inverted-y;' 'compiled touch Y inversion'
 printf 'PASS: compiled provider and consumer properties\n'
+printf 'PASS: overlay compilation does not suppress graph warnings\n'
 
 dsi0=$(node_from_file "$workdir/merged.dts" 'dsi@ff960000')
 dsi1=$(node_from_file "$workdir/merged.dts" 'dsi@ff968000')

@@ -63,12 +63,22 @@
 				remote-endpoint = <&panel_in_dsi>;
 			};
 		};
-	};
-};
 
-&mipi1_in_vopb {
-	status = "disabled";
-	remote-endpoint = <&dsi1_vopb_filter_sink>;
+		port@0 {
+			reg = <0>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			endpoint@0 {
+				reg = <0>;
+				status = "disabled";
+				remote-endpoint = <&dsi1_vopb_filter_sink>;
+			};
+
+			endpoint@1 {
+				reg = <1>;
+			};
+		};
+	};
 };
 
 &mipi1_in_vopl {
@@ -79,9 +89,16 @@
 	status = "okay";
 };
 
-&vopb_out_mipi1 {
-	status = "disabled";
-	remote-endpoint = <&vopb_dsi1_filter_sink>;
+&vopb {
+	port {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		endpoint@3 {
+			reg = <3>;
+			status = "disabled";
+			remote-endpoint = <&vopb_dsi1_filter_sink>;
+		};
+	};
 };
 
 &i2c1 {
