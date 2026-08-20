@@ -319,6 +319,88 @@ probe_attach=$(printf '%s\n' "$probe_body" |
 	[ "$probe_panel" -lt "$probe_attach" ] ||
 	fail 'probe must establish hardware off and host-first ordering before publishing panel and attaching DSI'
 
+grep -Fq 'struct rockpi_display_compat *display_compat;' "$panel" ||
+	fail 'panel context must retain the compatibility provider'
+grep -Fq 'bool compat_applied;' "$panel" ||
+	fail 'panel context must track successful compatibility application'
+
+probe_compat=$(printf '%s\n' "$probe_body" |
+	body_line 'rockpi_display_compat_get(dev)') ||
+	fail 'panel probe must acquire the compatibility provider'
+[ "$probe_compat" -lt "$probe_panel" ] ||
+	fail 'panel probe must acquire compatibility before publishing a usable panel'
+
+enable_compat=$(printf '%s\n' "$enable_body" |
+	body_line 'rockpi_display_compat_apply(ctx->display_compat)') ||
+	fail 'panel enable must apply display compatibility'
+enable_applied=$(printf '%s\n' "$enable_body" |
+	body_line 'WRITE_ONCE(ctx->compat_applied, true)') ||
+	fail 'panel enable must record successful compatibility application'
+enable_prepared=$(printf '%s\n' "$enable_body" |
+	body_line 'if (!READ_ONCE(ctx->prepared))') ||
+	fail 'panel enable must reject an unprepared panel'
+enable_state=$(printf '%s\n' "$enable_body" |
+	body_line 'WRITE_ONCE(ctx->enabled, true)') ||
+	fail 'panel enable must establish enabled state before backlight update'
+enable_brightness=$(printf '%s\n' "$enable_body" |
+	body_line 'backlight_device_set_brightness(ctx->backlight, 255)') ||
+	fail 'panel enable must set full backlight brightness'
+enable_orientation=$(printf '%s\n' "$enable_body" |
+	body_line 'rockpi_mcu_write(ctx, REG_PORTA, BIT(2))') ||
+	fail 'panel enable must set panel orientation'
+[ "$enable_prepared" -lt "$enable_compat" ] &&
+	[ "$enable_compat" -lt "$enable_applied" ] &&
+	[ "$enable_applied" -lt "$enable_state" ] &&
+	[ "$enable_state" -lt "$enable_brightness" ] ||
+	fail 'panel enable must check prepared, apply compatibility, then enable backlight'
+printf '%s\n' "$enable_body" |
+	sed -n '/rockpi_display_compat_apply(ctx->display_compat)/,/WRITE_ONCE(ctx->compat_applied, true)/p' |
+	grep -Fq 'return ret;' ||
+	fail 'compatibility apply failure must return with panel disabled'
+enable_restore=$(printf '%s\n' "$enable_body" |
+	body_line 'rockpi_display_compat_restore(ctx->display_compat)') ||
+	fail 'failed panel enable must restore applied compatibility state'
+enable_clear=$(printf '%s\n' "$enable_body" |
+	body_line 'WRITE_ONCE(ctx->compat_applied, false)') ||
+	fail 'failed panel enable must clear compatibility state'
+[ "$enable_orientation" -lt "$enable_restore" ] &&
+	[ "$enable_restore" -lt "$enable_clear" ] ||
+	fail 'every failure after apply must restore compatibility before returning'
+
+disable_restore=$(printf '%s\n' "$disable_body" |
+	body_line 'rockpi_display_compat_restore(ctx->display_compat)') ||
+	fail 'panel disable must restore compatibility state'
+disable_clear=$(printf '%s\n' "$disable_body" |
+	body_line 'WRITE_ONCE(ctx->compat_applied, false)') ||
+	fail 'panel disable must clear compatibility state'
+[ "$disable_core" -lt "$disable_restore" ] &&
+	[ "$disable_restore" -lt "$disable_clear" ] ||
+	fail 'panel disable must turn backlight off before restoring compatibility'
+printf '%s\n' "$disable_body" | grep -Fq 'return ret;' ||
+	fail 'panel disable must preserve the backlight disable result'
+
+remove_body=$(function_body rockpi_panel_remove)
+remove_compat_count=$(printf '%s\n' "$remove_body" |
+	grep -Fc 'rockpi_display_compat_put(ctx->display_compat)')
+[ "$remove_compat_count" -eq 1 ] ||
+	fail 'panel remove must release the compatibility provider exactly once'
+probe_put_count=$(printf '%s\n' "$probe_body" |
+	grep -Fc 'rockpi_display_compat_put(ctx->display_compat)')
+[ "$probe_put_count" -eq 1 ] ||
+	fail 'every probe unwind after provider acquisition must share one provider release'
+probe_remove=$(printf '%s\n' "$probe_body" |
+	body_line 'drm_panel_remove(&ctx->panel)') ||
+	fail 'DSI attach failure must unpublish the panel'
+probe_put=$(printf '%s\n' "$probe_body" |
+	body_line 'rockpi_display_compat_put(ctx->display_compat)') ||
+	fail 'DSI attach failure must release the compatibility provider'
+probe_cleanup_backlight=$(printf '%s\n' "$probe_body" |
+	body_line 'backlight_device_unregister(ctx->backlight)') ||
+	fail 'DSI attach failure must unregister the backlight'
+[ "$probe_remove" -lt "$probe_put" ] &&
+	[ "$probe_put" -lt "$probe_cleanup_backlight" ] ||
+	fail 'probe failure must unpublish panel, release provider, then unregister backlight'
+
 force_off_body=$(function_body rockpi_panel_force_off) ||
 	fail 'missing fail-safe hardware-off helper'
 force_pwm=$(printf '%s\n' "$force_off_body" |

@@ -35,3 +35,13 @@ The compatibility driver remains GPL-2.0-only. It was substantially modified
 in 2026 by the Rock Pi RPi Touchscreen contributors to send TC358762 commands
 during panel prepare after the DesignWare host enters command mode, use current
 kernel APIs, and propagate I2C and DSI errors.
+
+`src/display_compat_core.c` and `src/display_compat_main.c` implement the RK3399
+DSI PHY sequence and live DSI1 VOP selection described by the upstream Rockchip
+DesignWare DSI driver at Linux v6.18 commit
+`7d0a66e4bb9081d75c82ec4957c50034cb0ea449`:
+
+https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/gpu/drm/rockchip/dw-mipi-dsi-rockchip.c
+
+The project implementation is GPL-2.0-only and uses a separately tested,
+reversible compatibility core so the provider accesses only the live VOP.

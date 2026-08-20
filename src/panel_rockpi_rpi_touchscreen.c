@@ -55,6 +55,8 @@
 #include <drm/drm_modes.h>
 #include <drm/drm_panel.h>
 
+#include "display_compat.h"
+
 #define ROCKPI_PANEL_DSI_NAME	"rockpi-rpi-panel"
 #define ROCKPI_PANEL_READY_RETRIES	100
 
@@ -73,8 +75,10 @@ struct rockpi_rpi_panel {
 	struct drm_panel panel;
 	struct mipi_dsi_device *dsi;
 	struct backlight_device *backlight;
+	struct rockpi_display_compat *display_compat;
 	bool prepared;
 	bool enabled;
+	bool compat_applied;
 };
 
 static int rockpi_mcu_read(struct rockpi_rpi_panel *ctx, u8 reg)
@@ -268,6 +272,14 @@ static int rockpi_panel_enable(struct drm_panel *panel)
 		return -EPERM;
 	}
 
+	ret = rockpi_display_compat_apply(ctx->display_compat);
+	if (ret) {
+		dev_err(panel->dev,
+			"failed to apply display compatibility: %d\n", ret);
+		return ret;
+	}
+	WRITE_ONCE(ctx->compat_applied, true);
+
 	WRITE_ONCE(ctx->enabled, true);
 	ret = backlight_device_set_brightness(ctx->backlight, 255);
 	if (ret) {
@@ -297,6 +309,8 @@ disable_backlight:
 		dev_err(panel->dev,
 			"failed to disable backlight after enable error: %d\n",
 			disable_ret);
+	rockpi_display_compat_restore(ctx->display_compat);
+	WRITE_ONCE(ctx->compat_applied, false);
 	return ret;
 }
 
@@ -309,6 +323,10 @@ static int rockpi_panel_disable(struct drm_panel *panel)
 	ret = backlight_disable(ctx->backlight);
 	if (ret)
 		dev_err(panel->dev, "failed to disable backlight: %d\n", ret);
+	if (READ_ONCE(ctx->compat_applied)) {
+		rockpi_display_compat_restore(ctx->display_compat);
+		WRITE_ONCE(ctx->compat_applied, false);
+	}
 
 	return ret;
 }
@@ -470,6 +488,11 @@ static int rockpi_panel_probe(struct i2c_client *i2c)
 
 	/* TC358762 commands in prepare() require the DSI host in LP-11. */
 	ctx->panel.prepare_prev_first = true;
+	ctx->display_compat = rockpi_display_compat_get(dev);
+	if (IS_ERR(ctx->display_compat)) {
+		ret = PTR_ERR(ctx->display_compat);
+		goto unregister_backlight;
+	}
 
 	/* The DesignWare host resolves the graph bridge during attach. */
 	drm_panel_add(&ctx->panel);
@@ -483,6 +506,8 @@ static int rockpi_panel_probe(struct i2c_client *i2c)
 
 remove_panel:
 	drm_panel_remove(&ctx->panel);
+	rockpi_display_compat_put(ctx->display_compat);
+unregister_backlight:
 	backlight_device_unregister(ctx->backlight);
 unregister_dsi:
 	mipi_dsi_device_unregister(ctx->dsi);
@@ -506,6 +531,7 @@ static void rockpi_panel_remove(struct i2c_client *i2c)
 	if (ret)
 		dev_err(&i2c->dev, "failed to detach DSI device: %d\n", ret);
 	drm_panel_remove(&ctx->panel);
+	rockpi_display_compat_put(ctx->display_compat);
 	backlight_device_unregister(ctx->backlight);
 	mipi_dsi_device_unregister(ctx->dsi);
 }

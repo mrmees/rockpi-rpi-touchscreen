@@ -13,6 +13,8 @@ typedef u32 rockpi_u32;
 typedef uint32_t rockpi_u32;
 #endif
 
+#define ROCKPI_BIT(bit) (1U << (bit))
+
 enum rockpi_vop_id {
 	ROCKPI_VOP_BIG,
 	ROCKPI_VOP_LIT,
@@ -59,12 +61,12 @@ struct rockpi_display_io {
 #define ROCKPI_VOP_CFG_DONE		0x0000
 #define ROCKPI_VOP_SYS_CTRL		0x0008
 #define ROCKPI_VOP_DSP_CTRL0		0x0010
-#define ROCKPI_VOP_DATA01_SWAP		(1U << 17)
+#define ROCKPI_VOP_DATA01_SWAP		ROCKPI_BIT(17)
 #define ROCKPI_VOP_RGB_SWAP_MASK	(7U << 12)
 #define ROCKPI_VOP_RGB_SWAP_RB		(3U << 12)
 
 int rockpi_dsi0_start(struct rockpi_dsi0_state *state,
-			      const struct rockpi_display_io *io, void *context);
+		      const struct rockpi_display_io *io, void *context);
 void rockpi_dsi0_stop(struct rockpi_dsi0_state *state,
 		      const struct rockpi_display_io *io, void *context);
 int rockpi_vop_apply(struct rockpi_vop_state *state,

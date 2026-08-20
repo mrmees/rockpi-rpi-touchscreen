@@ -1,13 +1,13 @@
-/* SPDX-License-Identifier: GPL-2.0-only */
+// SPDX-License-Identifier: GPL-2.0-only
 #ifdef __KERNEL__
+#include <linux/array_size.h>
 #include <linux/errno.h>
 #else
 #include <errno.h>
+#define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
 #endif
 
 #include "display_compat_core.h"
-
-#define ROCKPI_BIT(bit) (1U << (bit))
 
 static int rockpi_dsi0_phy_write(const struct rockpi_display_io *io,
 				 void *context, rockpi_u32 code, rockpi_u32 value)
@@ -38,7 +38,7 @@ static bool rockpi_dsi0_io_valid(const struct rockpi_display_io *io)
 }
 
 int rockpi_dsi0_start(struct rockpi_dsi0_state *state,
-			      const struct rockpi_display_io *io, void *context)
+		      const struct rockpi_display_io *io, void *context)
 {
 	static const rockpi_u32 phy[][2] = {
 		{ 0x10, 0xa3 }, { 0x11, 0x06 }, { 0x12, 0xc4 }, { 0x44, 0x32 },
@@ -85,7 +85,7 @@ int rockpi_dsi0_start(struct rockpi_dsi0_state *state,
 	ret = io->write_dsi0(context, ROCKPI_DSI_PHY_TST_CTRL0, 0);
 	if (ret)
 		goto unwind;
-	for (i = 0; i < sizeof(phy) / sizeof(phy[0]); i++) {
+	for (i = 0; i < ARRAY_SIZE(phy); i++) {
 		ret = rockpi_dsi0_phy_write(io, context, phy[i][0], phy[i][1]);
 		if (ret)
 			goto unwind;
