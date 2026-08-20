@@ -5,7 +5,7 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$script_dir/common.sh"
 
 require_root
-require_command awk cat chmod cmp cp date depmod diff dirname dkms find grep head install mkdir mktemp modinfo mv rm sed sha256sum tail
+require_command awk cat chmod cmp cp date depmod diff dirname dkms find grep head install mkdir mktemp modinfo mv rm sed sha256sum stat tail
 
 module_content_checksum()
 {
@@ -84,7 +84,7 @@ overlay_destination=$OVERLAY_DIRECTORY/$OVERLAY_NAME.dtbo
 [ -f "$overlay_output" ] || die "validated overlay not found: $overlay_output"
 [ -f "$ARMBIAN_ENV" ] || die "boot configuration not found: $ARMBIAN_ENV"
 
-old_version=0.2.3
+old_version=0.2.4
 old_source=${DKMS_TREE:-/usr/src}/${PROJECT_NAME}-${old_version}
 if ! old_status=$(dkms status -m "$PROJECT_NAME" -v "$old_version" 2>&1); then
 	printf 'ERROR: cannot verify old DKMS state; retained %s/%s registration and source %s: %s\n' \
@@ -111,20 +111,23 @@ if [ -f "$old_source/dkms.conf" ] &&
 fi
 old_source_faithful=0
 if [ "$old_source_owned" -eq 1 ] &&
-	grep -Fxq 'BUILT_MODULE_NAME[0]="raspits_ft5426"' "$old_source/dkms.conf" &&
+	grep -Fxq 'BUILT_MODULE_NAME[0]="rockpi_rk3399_display_compat"' "$old_source/dkms.conf" &&
 	grep -Fxq 'BUILT_MODULE_LOCATION[0]="."' "$old_source/dkms.conf" &&
 	grep -Fxq 'DEST_MODULE_LOCATION[0]="/updates/dkms"' "$old_source/dkms.conf" &&
 	grep -Fxq 'BUILT_MODULE_NAME[1]="panel_rockpi_rpi_touchscreen"' "$old_source/dkms.conf" &&
 	grep -Fxq 'BUILT_MODULE_LOCATION[1]="."' "$old_source/dkms.conf" &&
 	grep -Fxq 'DEST_MODULE_LOCATION[1]="/updates/dkms"' "$old_source/dkms.conf" &&
-	[ "$(grep -Ec '^[[:space:]]*BUILT_MODULE_NAME\[[0-9]+\][[:space:]]*=' "$old_source/dkms.conf")" -eq 2 ] &&
-	[ "$(grep -Ec '^[[:space:]]*BUILT_MODULE_LOCATION\[[0-9]+\][[:space:]]*=' "$old_source/dkms.conf")" -eq 2 ] &&
-	[ "$(grep -Ec '^[[:space:]]*DEST_MODULE_LOCATION\[[0-9]+\][[:space:]]*=' "$old_source/dkms.conf")" -eq 2 ]; then
+	grep -Fxq 'BUILT_MODULE_NAME[2]="raspits_ft5426"' "$old_source/dkms.conf" &&
+	grep -Fxq 'BUILT_MODULE_LOCATION[2]="."' "$old_source/dkms.conf" &&
+	grep -Fxq 'DEST_MODULE_LOCATION[2]="/updates/dkms"' "$old_source/dkms.conf" &&
+	[ "$(grep -Ec '^[[:space:]]*BUILT_MODULE_NAME\[[0-9]+\][[:space:]]*=' "$old_source/dkms.conf")" -eq 3 ] &&
+	[ "$(grep -Ec '^[[:space:]]*BUILT_MODULE_LOCATION\[[0-9]+\][[:space:]]*=' "$old_source/dkms.conf")" -eq 3 ] &&
+	[ "$(grep -Ec '^[[:space:]]*DEST_MODULE_LOCATION\[[0-9]+\][[:space:]]*=' "$old_source/dkms.conf")" -eq 3 ]; then
 	old_source_faithful=1
 fi
 if [ "$old_registered" -eq 1 ]; then
 	[ "$old_source_faithful" -eq 1 ] ||
-		die "registered old DKMS source is not the faithful two-module $old_version release: $old_source"
+		die "registered old DKMS source is not the faithful three-module $old_version release: $old_source"
 fi
 dkms_state_root=${DKMS_STATE_DIR:-/var/lib/dkms}
 if [ "$old_was_installed" -eq 1 ]; then
@@ -161,6 +164,8 @@ new_lifecycle_phase=$(dkms_lifecycle_phase "$new_status_before" "$PROJECT_VERSIO
 
 source_created=0
 overlay_created=0
+mapper_created=0
+autostart_created=0
 overlay_backup_created=0
 overlay_replaced=0
 previous_overlay_file=
@@ -262,6 +267,14 @@ rollback()
 		if [ "$overlay_created" -eq 1 ] && ! rm -f "$overlay_destination"; then
 			rollback_failed=1
 			rollback_note="$rollback_note overlay removal failed: $overlay_destination;"
+		fi
+		if [ "$mapper_created" -eq 1 ] && ! rm -f "$TOUCH_MAPPER_DESTINATION"; then
+			rollback_failed=1
+			rollback_note="$rollback_note touch mapper removal failed: $TOUCH_MAPPER_DESTINATION;"
+		fi
+		if [ "$autostart_created" -eq 1 ] && ! rm -f "$TOUCH_AUTOSTART_DESTINATION"; then
+			rollback_failed=1
+			rollback_note="$rollback_note touch autostart removal failed: $TOUCH_AUTOSTART_DESTINATION;"
 		fi
 		if [ "$overlay_replaced" -eq 1 ] && [ -f "$previous_overlay_file" ]; then
 			if try_atomic_install_file "$previous_overlay_file" "$overlay_destination"; then
@@ -442,8 +455,10 @@ if [ -d "$dkms_state_root/$PROJECT_NAME/$old_version" ]; then
 		die 'old DKMS state recovery snapshot verification failed'
 fi
 old_dkms_state_snapshot_complete=1
-mkdir -p "$stage_directory/src" "$stage_directory/scripts" "$stage_directory/LICENSES"
-chmod 0755 "$stage_directory" "$stage_directory/src" "$stage_directory/scripts" "$stage_directory/LICENSES"
+mkdir -p "$stage_directory/src" "$stage_directory/scripts" "$stage_directory/assets" \
+	"$stage_directory/LICENSES"
+chmod 0755 "$stage_directory" "$stage_directory/src" "$stage_directory/scripts" \
+	"$stage_directory/assets" "$stage_directory/LICENSES"
 install -m 0644 "$repo_root/Makefile" "$repo_root/dkms.conf" "$repo_root/LICENSE" "$stage_directory/"
 install -m 0644 "$repo_root/LICENSES/GPL-2.0-only.txt" "$stage_directory/LICENSES/"
 install -m 0644 "$repo_root/LICENSES/UPSTREAM.md" "$stage_directory/LICENSES/"
@@ -452,6 +467,9 @@ install -m 0644 "$repo_root/src/ft5426_protocol.h" "$repo_root/src/raspits_ft542
 	"$repo_root/src/display_compat_core.h" "$repo_root/src/display_compat_core.c" \
 	"$repo_root/src/display_compat_main.c" "$stage_directory/src/"
 install -m 0755 "$repo_root/scripts/dkms-make.sh" "$stage_directory/scripts/"
+install -m 0755 "$repo_root/scripts/map-touchscreen.sh" "$stage_directory/scripts/"
+install -m 0644 "$repo_root/assets/rockpi-rpi-touchscreen-touch-map.desktop" \
+	"$stage_directory/assets/"
 source_digest()
 {
 	(
@@ -459,10 +477,30 @@ source_digest()
 		sha256sum Makefile dkms.conf src/ft5426_protocol.h src/raspits_ft5426.c \
 			src/panel_rockpi_rpi_touchscreen.c src/display_compat.h \
 			src/display_compat_core.h src/display_compat_core.c src/display_compat_main.c \
-			scripts/dkms-make.sh LICENSE LICENSES/GPL-2.0-only.txt LICENSES/UPSTREAM.md | sha256sum | awk '{print $1}'
+			scripts/dkms-make.sh scripts/map-touchscreen.sh \
+			assets/rockpi-rpi-touchscreen-touch-map.desktop \
+			LICENSE LICENSES/GPL-2.0-only.txt LICENSES/UPSTREAM.md | sha256sum | awk '{print $1}'
 	)
 }
 expected_source_digest=$(source_digest "$stage_directory")
+
+preflight_runtime_asset()
+{
+	runtime_source=$1
+	runtime_destination=$2
+	runtime_mode=$3
+	if [ -e "$runtime_destination" ] || [ -L "$runtime_destination" ]; then
+		[ -f "$runtime_destination" ] && [ ! -L "$runtime_destination" ] &&
+			cmp -s "$runtime_source" "$runtime_destination" &&
+			[ "$(stat -c '%a' "$runtime_destination")" = "$runtime_mode" ] ||
+			die "runtime asset conflicts with project ownership: $runtime_destination"
+	fi
+}
+
+preflight_runtime_asset "$stage_directory/scripts/map-touchscreen.sh" \
+	"$TOUCH_MAPPER_DESTINATION" 755
+preflight_runtime_asset "$stage_directory/assets/rockpi-rpi-touchscreen-touch-map.desktop" \
+	"$TOUCH_AUTOSTART_DESTINATION" 644
 
 if [ -e "$PROJECT_SOURCE_DIR" ]; then
 	[ -d "$PROJECT_SOURCE_DIR" ] || die "DKMS source path is not a directory: $PROJECT_SOURCE_DIR"
@@ -563,6 +601,27 @@ elif ! cmp -s "$overlay_output" "$overlay_destination"; then
 fi
 cmp "$overlay_output" "$overlay_destination" || die 'installed DTBO checksum verification failed'
 
+if [ ! -e "$TOUCH_MAPPER_DESTINATION" ]; then
+	try_atomic_install_file "$PROJECT_SOURCE_DIR/scripts/map-touchscreen.sh" \
+		"$TOUCH_MAPPER_DESTINATION" 0755 || die 'touch mapper installation failed'
+	mapper_created=1
+fi
+if [ ! -e "$TOUCH_AUTOSTART_DESTINATION" ]; then
+	try_atomic_install_file \
+		"$PROJECT_SOURCE_DIR/assets/rockpi-rpi-touchscreen-touch-map.desktop" \
+		"$TOUCH_AUTOSTART_DESTINATION" 0644 || die 'touch autostart installation failed'
+	autostart_created=1
+fi
+cmp -s "$PROJECT_SOURCE_DIR/scripts/map-touchscreen.sh" "$TOUCH_MAPPER_DESTINATION" ||
+	die 'installed touch mapper checksum verification failed'
+[ "$(stat -c '%a' "$TOUCH_MAPPER_DESTINATION")" = 755 ] ||
+	die 'installed touch mapper mode verification failed'
+cmp -s "$PROJECT_SOURCE_DIR/assets/rockpi-rpi-touchscreen-touch-map.desktop" \
+	"$TOUCH_AUTOSTART_DESTINATION" ||
+	die 'installed touch autostart checksum verification failed'
+[ "$(stat -c '%a' "$TOUCH_AUTOSTART_DESTINATION")" = 644 ] ||
+	die 'installed touch autostart mode verification failed'
+
 if [ ! -e "$backup_file" ]; then
 	cp "$ARMBIAN_ENV" "$backup_file"
 	sha256sum "$backup_file" > "$backup_file.sha256"
@@ -584,6 +643,15 @@ add_overlay_token "$ARMBIAN_ENV" "$OVERLAY_TOKEN"
 [ "$(source_digest "$PROJECT_SOURCE_DIR")" = "$expected_source_digest" ] ||
 	die 'final installed DKMS source checksum verification failed'
 cmp "$overlay_output" "$overlay_destination" || die 'final installed DTBO checksum verification failed'
+cmp -s "$PROJECT_SOURCE_DIR/scripts/map-touchscreen.sh" "$TOUCH_MAPPER_DESTINATION" ||
+	die 'final installed touch mapper checksum verification failed'
+[ "$(stat -c '%a' "$TOUCH_MAPPER_DESTINATION")" = 755 ] ||
+	die 'final installed touch mapper mode verification failed'
+cmp -s "$PROJECT_SOURCE_DIR/assets/rockpi-rpi-touchscreen-touch-map.desktop" \
+	"$TOUCH_AUTOSTART_DESTINATION" ||
+	die 'final installed touch autostart checksum verification failed'
+[ "$(stat -c '%a' "$TOUCH_AUTOSTART_DESTINATION")" = 644 ] ||
+	die 'final installed touch autostart mode verification failed'
 if [ "$old_registered" -eq 1 ]; then
 	old_retirement_attempted=1
 	dkms remove -m "$PROJECT_NAME" -v "$old_version" --all ||

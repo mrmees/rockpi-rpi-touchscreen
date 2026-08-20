@@ -1,10 +1,10 @@
 #!/bin/sh
 
 PROJECT_NAME=rockpi-rpi-touchscreen
-PROJECT_VERSION=0.2.4
+PROJECT_VERSION=0.2.5
 PROJECT_SOURCE_DIR=${DKMS_TREE:-/usr/src}/${PROJECT_NAME}-${PROJECT_VERSION}
 MODULE_NAMES='rockpi_rk3399_display_compat panel_rockpi_rpi_touchscreen raspits_ft5426'
-OLD_MODULE_NAMES='panel_rockpi_rpi_touchscreen raspits_ft5426'
+OLD_MODULE_NAMES=$MODULE_NAMES
 OVERLAY_NAME=rockpi-4b-plus-rpi-touchscreen
 OVERLAY_TOKEN=$OVERLAY_NAME
 BOOT_DIRECTORY=${BOOT_DIR:-/boot}
@@ -14,6 +14,10 @@ DTB_DIRECTORY=${DTB_ROOT:-$BOOT_DIRECTORY/dtb}
 KERNEL_RELEASE=${KERNEL_RELEASE:-$(uname -r)}
 ARCH=${ARCH:-$(uname -m)}
 KERNEL_BUILD=${MODULES_DIR:-/lib/modules}/$KERNEL_RELEASE/build
+LIBEXEC_DIRECTORY=${LIBEXEC_DIR:-/usr/libexec}
+XDG_AUTOSTART_DIRECTORY=${XDG_AUTOSTART_DIR:-/etc/xdg/autostart}
+TOUCH_MAPPER_DESTINATION=$LIBEXEC_DIRECTORY/rockpi-rpi-touchscreen-map-touch
+TOUCH_AUTOSTART_DESTINATION=$XDG_AUTOSTART_DIRECTORY/rockpi-rpi-touchscreen-touch-map.desktop
 
 die()
 {
@@ -67,6 +71,7 @@ try_atomic_install_file()
 {
 	source_file=$1
 	destination_file=$2
+	destination_mode=${3:-0644}
 	destination_dir=$(dirname -- "$destination_file")
 	mkdir -p "$destination_dir" || return 1
 	temporary_file=$(mktemp "$destination_dir/.${PROJECT_NAME}.XXXXXX") || return 1
@@ -74,7 +79,7 @@ try_atomic_install_file()
 		rm -f "$temporary_file"
 		return 1
 	fi
-	if ! chmod 0644 "$temporary_file"; then
+	if ! chmod "$destination_mode" "$temporary_file"; then
 		rm -f "$temporary_file"
 		return 1
 	fi
