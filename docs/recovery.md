@@ -6,6 +6,14 @@ use SSH or a serial console and inspect the boot checks documented in the
 
 ## Online rollback
 
+Keep an SSH session open while testing DSI. From another machine, connect and
+enter this repository checkout on the Rock Pi:
+
+```sh
+ssh USER@ROCK_PI
+cd /path/to/rockpi-rpi-touchscreen
+```
+
 Preview the change first:
 
 ```sh
@@ -17,6 +25,12 @@ Then remove only this project's DTBO, DKMS source, and `user_overlays` token:
 ```sh
 sudo sh scripts/uninstall.sh
 ```
+
+Rollback removes only the project overlay token, DTBO, and DKMS package; it
+does not remove unrelated overlays or alter the HDMI Xorg configuration. The
+single `rockpi-rpi-touchscreen/0.2.0` package owns both `raspits_ft5426` and
+`panel_rockpi_rpi_touchscreen`. Uninstalling it does not edit
+`/etc/X11/xorg.conf.d/20-dfrobot-display.conf`.
 
 The original `armbianEnv.txt` backup created by the installer is kept beside
 the configuration with a timestamp and `.sha256` checksum.

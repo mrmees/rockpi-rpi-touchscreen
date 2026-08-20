@@ -10,9 +10,24 @@ Touch Display 2 is not supported. Hardware validation remains pending until the 
 ## What is installed
 
 - The Rock Pi MIPI DSI graph and Raspberry Pi panel controller at I2C `0x45`.
-- A GPL-2.0 polling driver for the FT5426 touch controller at I2C `0x38`.
+- A GPL-2.0 polling driver for the FT5426 touch controller at I2C `0x38` and
+  a board-specific DRM panel driver for the TC358762 bridge.
 - A DKMS package named `rockpi-rpi-touchscreen` and a user overlay named
   `rockpi-4b-plus-rpi-touchscreen`.
+
+DKMS release `0.2.0` installs two modules: `raspits_ft5426` owns touch input,
+and `panel_rockpi_rpi_touchscreen` owns the original panel compatibility path.
+The compatibility driver moves TC358762 initialization to panel enable, when
+the RK3399 DesignWare DSI host can accept bridge commands; the upstream driver
+sent those commands during panel prepare. On the previously tested boot, the
+controller, backlight, touch, and 800x480 connector were detected, but the
+screen remained lit black and the kernel logged eleven `failed to write
+command FIFO` errors. Desktop layout changes reproduced the errors because
+they could not correct this driver-lifecycle ordering.
+
+DSI0 stays disabled; the overlay routes the little VOP only to DSI1 and leaves
+HDMI enabled. The project-specific panel compatible prevents the generic
+Raspberry Pi panel module from owning this RK3399-only path.
 
 The touch driver is derived from [Radxa's exact GPL-2.0-only source at commit
 `c681d6a31c2289dbaca2e1f822bab41530fc0f68`](https://github.com/radxa/kernel/blob/c681d6a31c2289dbaca2e1f822bab41530fc0f68/drivers/input/touchscreen/raspits_ft5426.c).
@@ -46,12 +61,14 @@ sudo sh scripts/install.sh
 It validates the module and merged device tree before registering DKMS,
 installs the DTBO in `/boot/overlay-user/`, backs up `/boot/armbianEnv.txt`,
 and appends one overlay token without removing unrelated user overlays.
-Release `0.1.1` treats `/usr/src/rockpi-rpi-touchscreen-0.1.1` as immutable:
-a same-version content mismatch fails instead of silently replacing registered
-source. The installer checksum-compares the source, DKMS-built/installed module,
-and DTBO, and transactionally refreshes a changed installed DTBO. A successful
-0.1.0-to-0.1.1 migration removes the owned old release only after 0.1.1 is
-installed; a failed migration retains the old release and reports recovery.
+Release `0.2.0` treats `/usr/src/rockpi-rpi-touchscreen-0.2.0` as immutable: a
+same-version content mismatch fails instead of silently replacing registered
+source. The installer checksum-compares the source, both DKMS-built/installed
+modules, and DTBO. A `0.1.1` installation owned by this project is removed only
+after `0.2.0`, both modules, the source, boot backup, single overlay token, and
+DTBO all verify. A failed migration retains or restores the old release and
+reports any recovery paths. The installer never changes
+`/etc/X11/xorg.conf.d/20-dfrobot-display.conf`.
 
 Preview removal with:
 
@@ -85,11 +102,32 @@ libinput list-devices
 ```
 
 Expect panel `0x45`, touch `0x38`, an active 800x480 DSI mode, and a
-five-slot `Raspberry Pi 7-inch Touchscreen` input device. Recheck that HDMI
-still works when attached. Brightness is exposed by the panel backlight under
-`/sys/class/backlight/`; use a suitable desktop or `brightnessctl` to adjust
-it. Rotation is a userspace display/input configuration concern, not a
-device-tree or driver setting.
+five-slot `Raspberry Pi 7-inch Touchscreen` input device. A successful project
+panel probe should log `registered RK3399-safe Raspberry Pi touchscreen panel`;
+the touch probe should log an `FT5426 firmware` line. Treat any `failed to
+initialize TC358762`, `TC358762 write failed`, or `failed to write command
+FIFO` line as a failed checkpoint. Recheck that HDMI still works when attached.
+
+Brightness is exposed as 0 through 255 by the project backlight. After the
+hardware checkpoint finds the device, a direct test is:
+
+```sh
+backlight=/sys/class/backlight/rockpi-rpi-touchscreen
+cat "$backlight/max_brightness"
+printf '%s\n' 128 | sudo tee "$backlight/brightness"
+```
+
+Display rotation and touch mapping are userspace concerns, not device-tree or
+driver settings. Under an X11 session, map the touch device to DSI1 with:
+
+```sh
+touch_id=$(xinput list --id-only 'Raspberry Pi 7-inch Touchscreen')
+xinput map-to-output "$touch_id" DSI-1
+```
+
+Use the desktop's display/input settings instead under Wayland. Hardware
+validation remains pending until video, brightness, touch mapping, HDMI, a
+reboot, and a shutdown/cold-start have all passed.
 
 ## Limitations
 
