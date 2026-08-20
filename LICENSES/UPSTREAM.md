@@ -32,6 +32,6 @@ The panel source preserves the relevant notices from both files:
 - Copyright (c) 2022 Radxa Computer Co., Ltd.
 
 The compatibility driver remains GPL-2.0-only. It was substantially modified
-in 2026 by the Rock Pi RPi Touchscreen contributors to defer TC358762 commands
-until panel enable on RK3399, use current kernel APIs, and propagate I2C and DSI
-errors.
+in 2026 by the Rock Pi RPi Touchscreen contributors to send TC358762 commands
+during panel prepare after the DesignWare host enters command mode, use current
+kernel APIs, and propagate I2C and DSI errors.

@@ -31,7 +31,7 @@ sudo sh scripts/uninstall.sh
 
 Rollback removes only the project overlay token, DTBO, and DKMS package; it
 does not remove unrelated overlays or alter the HDMI Xorg configuration. The
-single `rockpi-rpi-touchscreen/0.2.1` package owns both `raspits_ft5426` and
+single `rockpi-rpi-touchscreen/0.2.2` package owns both `raspits_ft5426` and
 `panel_rockpi_rpi_touchscreen`. Uninstalling it does not edit
 `/etc/X11/xorg.conf.d/20-dfrobot-display.conf`.
 
@@ -41,25 +41,25 @@ the configuration with a timestamp and `.sha256` checksum.
 ## Multiple DKMS kernel tuples
 
 The transactional online uninstaller supports either no registered
-`rockpi-rpi-touchscreen/0.2.1` package or exactly one `added`, `built`, or
+`rockpi-rpi-touchscreen/0.2.2` package or exactly one `added`, `built`, or
 `installed` lifecycle tuple for the running kernel and architecture. If this
 command lists more than one line, or a tuple for another kernel or
 architecture, the uninstaller stops before changing the boot configuration,
 DTBO, source, or modules:
 
 ```sh
-dkms status -m rockpi-rpi-touchscreen -v 0.2.1
+dkms status -m rockpi-rpi-touchscreen -v 0.2.2
 ```
 
 To complete an intentional uninstall, remove each non-running-kernel tuple
 explicitly, substituting the `KERNEL` and `ARCH` printed by `dkms status`:
 
 ```sh
-sudo dkms remove -m rockpi-rpi-touchscreen -v 0.2.1 -k KERNEL -a ARCH
+sudo dkms remove -m rockpi-rpi-touchscreen -v 0.2.2 -k KERNEL -a ARCH
 ```
 
 Stop if any removal fails and retain
-`/usr/src/rockpi-rpi-touchscreen-0.2.1`; use `dkms status` to reconcile that
+`/usr/src/rockpi-rpi-touchscreen-0.2.2`; use `dkms status` to reconcile that
 tuple before continuing. Once status shows only the running kernel's exact
 tuple, rerun `sudo sh scripts/uninstall.sh`. If display recovery is urgent,
 remove only the overlay token with the offline procedure instead and leave all

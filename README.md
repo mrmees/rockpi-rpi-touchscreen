@@ -17,11 +17,11 @@ touch operation remain pending after the corrective driver reboot.
 - A DKMS package named `rockpi-rpi-touchscreen` and a user overlay named
   `rockpi-4b-plus-rpi-touchscreen`.
 
-DKMS release `0.2.1` installs two modules: `raspits_ft5426` owns touch input,
+DKMS release `0.2.2` installs two modules: `raspits_ft5426` owns touch input,
 and `panel_rockpi_rpi_touchscreen` owns the original panel compatibility path.
-The compatibility driver moves TC358762 initialization to panel enable, when
-the RK3399 DesignWare DSI host can accept bridge commands; the upstream driver
-sent those commands during panel prepare. On the previously tested boot, the
+The compatibility driver initializes TC358762 during panel prepare, after the
+Linux 6.18 DesignWare bridge has powered the host in command mode and after the
+panel-controller power wait. On the previously tested boot, the
 controller, backlight, touch, and 800x480 connector were detected, but the
 screen remained lit black and the kernel logged eleven `failed to write
 command FIFO` errors. Desktop layout changes reproduced the errors because
@@ -63,11 +63,11 @@ sudo sh scripts/install.sh
 It validates the module and merged device tree before registering DKMS,
 installs the DTBO in `/boot/overlay-user/`, backs up `/boot/armbianEnv.txt`,
 and appends one overlay token without removing unrelated user overlays.
-Release `0.2.1` treats `/usr/src/rockpi-rpi-touchscreen-0.2.1` as immutable: a
+Release `0.2.2` treats `/usr/src/rockpi-rpi-touchscreen-0.2.2` as immutable: a
 same-version content mismatch fails instead of silently replacing registered
 source. The installer checksum-compares the source, both DKMS-built/installed
-modules, and DTBO. A `0.2.0` installation owned by this project is removed only
-after `0.2.1`, both modules, the source, boot backup, single overlay token, and
+modules, and DTBO. A `0.2.1` installation owned by this project is removed only
+after `0.2.2`, both modules, the source, boot backup, single overlay token, and
 DTBO all verify. A failed migration retains or restores the old release and
 reports any recovery paths. The installer never changes
 `/etc/X11/xorg.conf.d/20-dfrobot-display.conf`.

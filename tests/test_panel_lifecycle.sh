@@ -160,9 +160,6 @@ printf '%s\n' "$prepare_body" |
 printf '%s\n' "$prepare_body" |
 	grep -Fq 'rockpi_mcu_write(ctx, REG_POWERON, 1)' ||
 	fail 'prepare must power the panel through the MCU'
-if printf '%s\n' "$prepare_body" | grep -Fq 'mipi_dsi_generic_write'; then
-	fail 'prepare must not issue DSI bridge writes'
-fi
 printf '%s\n' "$prepare_body" | grep -Fq 'failed to power on panel:' ||
 	fail 'prepare must log MCU power-on failures'
 printf '%s\n' "$prepare_body" | grep -Fq 'failed to read panel ready state:' ||
@@ -187,6 +184,20 @@ exhaustion_warning=$(printf '%s\n' "$prepare_body" |
 prepared_line=$(printf '%s\n' "$prepare_body" |
 	body_line 'WRITE_ONCE(ctx->prepared, true)') ||
 	fail 'prepare must mark the panel prepared after the advisory wait'
+init_line=$(printf '%s\n' "$prepare_body" |
+	body_line 'rockpi_tc358762_init(ctx)') ||
+	fail 'prepare must initialize TC358762 while the DSI host is in command mode'
+init_log=$(printf '%s\n' "$prepare_body" |
+	body_line 'failed to initialize TC358762:') ||
+	fail 'prepare must log TC358762 initialization failures'
+[ "$exhaustion_warning" -lt "$init_line" ] &&
+	[ "$init_line" -lt "$init_log" ] &&
+	[ "$init_log" -lt "$prepared_line" ] ||
+	fail 'prepare must initialize TC358762 after power wait and before prepared state'
+printf '%s\n' "$prepare_body" |
+	sed -n '/rockpi_tc358762_init(ctx)/,/^[[:space:]]*}/p' |
+	grep -Fq 'goto power_off;' ||
+	fail 'TC358762 initialization failure must power the panel back off'
 [ "$read_error" -lt "$read_error_power_off" ] &&
 	[ "$read_error_power_off" -lt "$ready_break" ] &&
 	[ "$ready_break" -lt "$exhaustion_warning" ] &&
@@ -206,29 +217,17 @@ printf '%s\n' "$prepare_body" |
 	fail 'the advisory warning must be guarded by retry exhaustion'
 
 enable_body=$(function_body rockpi_panel_enable)
-init_line=$(printf '%s\n' "$enable_body" |
-	body_line 'rockpi_tc358762_init(ctx)') ||
-	fail 'enable must call the TC358762 initialization helper'
-init_check=$(printf '%s\n' "$enable_body" |
-	body_line 'if (ret)') ||
-	fail 'enable must check the TC358762 initialization result'
-init_log=$(printf '%s\n' "$enable_body" |
-	body_line 'failed to initialize TC358762:') ||
-	fail 'enable must log the TC358762 initialization error'
-init_return=$(printf '%s\n' "$enable_body" |
-	body_line 'return ret;') ||
-	fail 'enable must return the TC358762 initialization error'
-[ "$init_check" -eq $((init_line + 1)) ] &&
-	[ "$init_log" -eq $((init_check + 1)) ] &&
-	[ "$init_return" -eq $((init_log + 1)) ] ||
-	fail 'enable must check, log, and return the TC358762 initialization error'
+if printf '%s\n' "$enable_body" | grep -Fq 'rockpi_tc358762_init(ctx)'; then
+	fail 'enable must not send bridge commands after the DSI host enters video mode'
+fi
+if printf '%s\n' "$enable_body" | grep -Fq 'mipi_dsi_generic_write'; then
+	fail 'enable must not contain direct DSI writes in video mode'
+fi
+[ "$(grep -Fc 'rockpi_tc358762_init(ctx)' "$panel")" -eq 1 ] ||
+	fail 'prepare must be the only call site for the TC358762 initializer'
 backlight_line=$(printf '%s\n' "$enable_body" |
 	body_line 'backlight_enable(ctx->backlight)') ||
 	fail 'enable must use the serialized backlight core helper'
-[ "$init_line" -lt "$backlight_line" ] ||
-	fail 'enable must initialize TC358762 before enabling backlight'
-printf '%s\n' "$enable_body" | grep -Fq 'failed to initialize TC358762:' ||
-	fail 'enable must log TC358762 initialization failures'
 printf '%s\n' "$enable_body" | grep -Fq 'failed to enable backlight:' ||
 	fail 'enable must log backlight failures'
 printf '%s\n' "$enable_body" | grep -Fq 'failed to set panel orientation:' ||

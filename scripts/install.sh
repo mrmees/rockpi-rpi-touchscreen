@@ -17,7 +17,7 @@ overlay_destination=$OVERLAY_DIRECTORY/$OVERLAY_NAME.dtbo
 [ -f "$overlay_output" ] || die "validated overlay not found: $overlay_output"
 [ -f "$ARMBIAN_ENV" ] || die "boot configuration not found: $ARMBIAN_ENV"
 
-old_version=0.2.0
+old_version=0.2.1
 old_source=${DKMS_TREE:-/usr/src}/${PROJECT_NAME}-${old_version}
 if ! old_status=$(dkms status -m "$PROJECT_NAME" -v "$old_version" 2>&1); then
 	printf 'ERROR: cannot verify old DKMS state; retained %s/%s registration and source %s: %s\n' \

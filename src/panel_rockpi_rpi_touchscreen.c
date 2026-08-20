@@ -236,6 +236,12 @@ static int rockpi_panel_prepare(struct drm_panel *panel)
 		dev_warn(panel->dev,
 			 "panel ready bit did not assert; continuing after bounded wait\n");
 
+	ret = rockpi_tc358762_init(ctx);
+	if (ret) {
+		dev_err(panel->dev, "failed to initialize TC358762: %d\n", ret);
+		goto power_off;
+	}
+
 	WRITE_ONCE(ctx->prepared, true);
 	return 0;
 
@@ -260,12 +266,6 @@ static int rockpi_panel_enable(struct drm_panel *panel)
 	if (!READ_ONCE(ctx->prepared)) {
 		dev_err(panel->dev, "cannot enable an unprepared panel\n");
 		return -EPERM;
-	}
-
-	ret = rockpi_tc358762_init(ctx);
-	if (ret) {
-		dev_err(panel->dev, "failed to initialize TC358762: %d\n", ret);
-		return ret;
 	}
 
 	WRITE_ONCE(ctx->enabled, true);
