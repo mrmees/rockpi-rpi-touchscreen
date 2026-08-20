@@ -5,7 +5,9 @@ Display on a Radxa Rock Pi 4B+ running Armbian
 `6.18.43-current-rockchip64`. It installs a board-specific device-tree overlay
 and a DKMS touchscreen driver while retaining HDMI as a recovery display.
 
-Touch Display 2 is not supported. Hardware validation remains pending until the physical display is connected and checked.
+Touch Display 2 is not supported. Hardware validation has been attempted on
+the connected original display, but successful panel video, brightness, and
+touch operation remain pending after the corrective driver reboot.
 
 ## What is installed
 
@@ -15,7 +17,7 @@ Touch Display 2 is not supported. Hardware validation remains pending until the 
 - A DKMS package named `rockpi-rpi-touchscreen` and a user overlay named
   `rockpi-4b-plus-rpi-touchscreen`.
 
-DKMS release `0.2.0` installs two modules: `raspits_ft5426` owns touch input,
+DKMS release `0.2.1` installs two modules: `raspits_ft5426` owns touch input,
 and `panel_rockpi_rpi_touchscreen` owns the original panel compatibility path.
 The compatibility driver moves TC358762 initialization to panel enable, when
 the RK3399 DesignWare DSI host can accept bridge commands; the upstream driver
@@ -61,11 +63,11 @@ sudo sh scripts/install.sh
 It validates the module and merged device tree before registering DKMS,
 installs the DTBO in `/boot/overlay-user/`, backs up `/boot/armbianEnv.txt`,
 and appends one overlay token without removing unrelated user overlays.
-Release `0.2.0` treats `/usr/src/rockpi-rpi-touchscreen-0.2.0` as immutable: a
+Release `0.2.1` treats `/usr/src/rockpi-rpi-touchscreen-0.2.1` as immutable: a
 same-version content mismatch fails instead of silently replacing registered
 source. The installer checksum-compares the source, both DKMS-built/installed
-modules, and DTBO. A `0.1.1` installation owned by this project is removed only
-after `0.2.0`, both modules, the source, boot backup, single overlay token, and
+modules, and DTBO. A `0.2.0` installation owned by this project is removed only
+after `0.2.1`, both modules, the source, boot backup, single overlay token, and
 DTBO all verify. A failed migration retains or restores the old release and
 reports any recovery paths. The installer never changes
 `/etc/X11/xorg.conf.d/20-dfrobot-display.conf`.
@@ -107,6 +109,8 @@ panel probe should log `registered RK3399-safe Raspberry Pi touchscreen panel`;
 the touch probe should log an `FT5426 firmware` line. Treat any `failed to
 initialize TC358762`, `TC358762 write failed`, or `failed to write command
 FIFO` line as a failed checkpoint. Recheck that HDMI still works when attached.
+The warning `panel ready bit did not assert; continuing after bounded wait` is advisory
+on the tested original panel; actual I2C read failures remain fatal.
 
 Brightness is exposed as 0 through 255 by the project backlight. After the
 hardware checkpoint finds the device, a direct test is:

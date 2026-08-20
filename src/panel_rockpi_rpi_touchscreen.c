@@ -227,14 +227,17 @@ static int rockpi_panel_prepare(struct drm_panel *panel)
 			goto power_off;
 		}
 		if (ret & BIT(0)) {
-			WRITE_ONCE(ctx->prepared, true);
-			return 0;
+			break;
 		}
 		usleep_range(1000, 2000);
 	}
 
-	ret = -ETIMEDOUT;
-	dev_err(panel->dev, "timed out waiting for panel ready state\n");
+	if (i == ROCKPI_PANEL_READY_RETRIES)
+		dev_warn(panel->dev,
+			 "panel ready bit did not assert; continuing after bounded wait\n");
+
+	WRITE_ONCE(ctx->prepared, true);
+	return 0;
 
 power_off:
 	power_off_ret = rockpi_mcu_write(ctx, REG_POWERON, 0);

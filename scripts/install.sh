@@ -17,7 +17,7 @@ overlay_destination=$OVERLAY_DIRECTORY/$OVERLAY_NAME.dtbo
 [ -f "$overlay_output" ] || die "validated overlay not found: $overlay_output"
 [ -f "$ARMBIAN_ENV" ] || die "boot configuration not found: $ARMBIAN_ENV"
 
-old_version=0.1.1
+old_version=0.2.0
 old_source=${DKMS_TREE:-/usr/src}/${PROJECT_NAME}-${old_version}
 if ! old_status=$(dkms status -m "$PROJECT_NAME" -v "$old_version" 2>&1); then
 	printf 'ERROR: cannot verify old DKMS state; retained %s/%s registration and source %s: %s\n' \
@@ -36,19 +36,21 @@ fi
 old_source_owned=0
 if [ -f "$old_source/dkms.conf" ] &&
 	grep -Fq 'PACKAGE_NAME="rockpi-rpi-touchscreen"' "$old_source/dkms.conf" &&
-	grep -Fq 'PACKAGE_VERSION="0.1.1"' "$old_source/dkms.conf"; then
+	grep -Fq "PACKAGE_VERSION=\"$old_version\"" "$old_source/dkms.conf"; then
 	old_source_owned=1
 fi
 dkms_state_root=${DKMS_STATE_DIR:-/var/lib/dkms}
 if [ "$old_was_installed" -eq 1 ]; then
 	[ "$old_source_owned" -eq 1 ] ||
 		die "installed old DKMS source is missing or unowned: $old_source"
-	old_built_baseline=$(find "$dkms_state_root/$PROJECT_NAME/$old_version/$KERNEL_RELEASE" \
-		-type f -name raspits_ft5426.ko -print 2>/dev/null | head -n 1)
-	old_installed_baseline=$(modinfo -k "$KERNEL_RELEASE" -n raspits_ft5426 2>/dev/null || true)
-	[ -n "$old_built_baseline" ] && [ -f "$old_installed_baseline" ] &&
-		cmp -s "$old_built_baseline" "$old_installed_baseline" ||
-		die 'old installed module does not match its DKMS build; refusing migration'
+	for module_name in $MODULE_NAMES; do
+		old_built_baseline=$(find "$dkms_state_root/$PROJECT_NAME/$old_version/$KERNEL_RELEASE" \
+			-type f -name "$module_name.ko" -print 2>/dev/null | head -n 1)
+		old_installed_baseline=$(modinfo -k "$KERNEL_RELEASE" -n "$module_name" 2>/dev/null || true)
+		[ -n "$old_built_baseline" ] && [ -f "$old_installed_baseline" ] &&
+			cmp -s "$old_built_baseline" "$old_installed_baseline" ||
+			die "old installed $module_name module does not match its DKMS build; refusing migration"
+	done
 fi
 if ! new_status_before=$(dkms status -m "$PROJECT_NAME" -v "$PROJECT_VERSION" 2>&1); then
 	printf 'ERROR: cannot capture DKMS registration baseline for %s/%s: %s\n' \
@@ -170,14 +172,16 @@ rollback()
 				rollback_failed=1
 				rollback_note="$rollback_note old DKMS lifecycle restoration failed (expected: ${old_status:-absent}; got: ${restored_old_status:-unavailable});"
 			elif [ "$old_was_installed" -eq 1 ]; then
-				old_built_module=$(find "${DKMS_STATE_DIR:-/var/lib/dkms}/$PROJECT_NAME/$old_version/$KERNEL_RELEASE" \
-					-type f -name raspits_ft5426.ko -print 2>/dev/null | head -n 1)
-				old_installed_module=$(modinfo -k "$KERNEL_RELEASE" -n raspits_ft5426 2>/dev/null || true)
-				if [ -z "$old_built_module" ] || [ ! -f "$old_installed_module" ] ||
-					! cmp -s "$old_built_module" "$old_installed_module"; then
-					rollback_failed=1
-					rollback_note="$rollback_note old installed module checksum restoration failed;"
-				fi
+				for module_name in $MODULE_NAMES; do
+					old_built_module=$(find "${DKMS_STATE_DIR:-/var/lib/dkms}/$PROJECT_NAME/$old_version/$KERNEL_RELEASE" \
+						-type f -name "$module_name.ko" -print 2>/dev/null | head -n 1)
+					old_installed_module=$(modinfo -k "$KERNEL_RELEASE" -n "$module_name" 2>/dev/null || true)
+					if [ -z "$old_built_module" ] || [ ! -f "$old_installed_module" ] ||
+						! cmp -s "$old_built_module" "$old_installed_module"; then
+						rollback_failed=1
+						rollback_note="$rollback_note old installed $module_name checksum restoration failed;"
+					fi
+				done
 			fi
 		fi
 		if [ "$source_created" -eq 1 ] && [ "$new_source_retained" -eq 0 ] &&

@@ -151,6 +151,12 @@ tc_return=$(printf '%s\n' "$tc_init_body" |
 	fail 'TC358762 write assignment must be immediately checked and returned'
 
 prepare_body=$(function_body rockpi_panel_prepare)
+grep -Fq '#define ROCKPI_PANEL_READY_RETRIES' "$panel" &&
+	grep -Eq '#define ROCKPI_PANEL_READY_RETRIES[[:space:]]+100' "$panel" ||
+	fail 'the advisory ready-bit wait must remain bounded at 100 attempts'
+printf '%s\n' "$prepare_body" |
+	grep -Fq 'for (i = 0; i < ROCKPI_PANEL_READY_RETRIES; i++)' ||
+	fail 'prepare must use the bounded ready-retry constant in its poll loop'
 printf '%s\n' "$prepare_body" |
 	grep -Fq 'rockpi_mcu_write(ctx, REG_POWERON, 1)' ||
 	fail 'prepare must power the panel through the MCU'
@@ -161,6 +167,43 @@ printf '%s\n' "$prepare_body" | grep -Fq 'failed to power on panel:' ||
 	fail 'prepare must log MCU power-on failures'
 printf '%s\n' "$prepare_body" | grep -Fq 'failed to read panel ready state:' ||
 	fail 'prepare must log MCU ready-read failures'
+if printf '%s\n' "$prepare_body" | grep -Fq 'ret = -ETIMEDOUT'; then
+	fail 'an advisory MCU ready bit must not make panel prepare fail'
+fi
+printf '%s\n' "$prepare_body" |
+	grep -Fq 'panel ready bit did not assert; continuing after bounded wait' ||
+	fail 'prepare must warn when the advisory MCU ready bit does not assert'
+printf '%s\n' "$prepare_body" | grep -Fq 'WRITE_ONCE(ctx->prepared, true)' ||
+	fail 'prepare must continue after the bounded advisory ready-bit wait'
+read_error=$(printf '%s\n' "$prepare_body" | body_line 'if (ret < 0)') ||
+	fail 'MCU ready-state read errors must be checked'
+read_error_power_off=$(printf '%s\n' "$prepare_body" | body_line 'goto power_off;') ||
+	fail 'MCU ready-state read errors must use the power-off error path'
+ready_break=$(printf '%s\n' "$prepare_body" | body_line 'if (ret & BIT(0))') ||
+	fail 'prepare must retain the upstream ready-bit early exit'
+exhaustion_warning=$(printf '%s\n' "$prepare_body" |
+	body_line 'panel ready bit did not assert; continuing after bounded wait') ||
+	fail 'prepare must warn only after the bounded wait is exhausted'
+prepared_line=$(printf '%s\n' "$prepare_body" |
+	body_line 'WRITE_ONCE(ctx->prepared, true)') ||
+	fail 'prepare must mark the panel prepared after the advisory wait'
+[ "$read_error" -lt "$read_error_power_off" ] &&
+	[ "$read_error_power_off" -lt "$ready_break" ] &&
+	[ "$ready_break" -lt "$exhaustion_warning" ] &&
+	[ "$exhaustion_warning" -lt "$prepared_line" ] ||
+	fail 'prepare must keep I2C errors fatal and ready-bit exhaustion advisory'
+printf '%s\n' "$prepare_body" |
+	sed -n '/if (ret < 0)/,/^[[:space:]]*}/p' |
+	grep -Fq 'goto power_off;' ||
+	fail 'negative MCU reads must conditionally enter the power-off error path'
+printf '%s\n' "$prepare_body" |
+	sed -n '/if (ret & BIT(0))/,/^[[:space:]]*}/p' |
+	grep -Fq 'break;' ||
+	fail 'an asserted upstream ready bit must exit the bounded poll early'
+printf '%s\n' "$prepare_body" |
+	sed -n '/if (i == ROCKPI_PANEL_READY_RETRIES)/,/continuing after bounded wait/p' |
+	grep -Fq 'panel ready bit did not assert; continuing after bounded wait' ||
+	fail 'the advisory warning must be guarded by retry exhaustion'
 
 enable_body=$(function_body rockpi_panel_enable)
 init_line=$(printf '%s\n' "$enable_body" |
