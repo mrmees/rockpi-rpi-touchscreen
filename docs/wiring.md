@@ -20,10 +20,21 @@ is fully seated and aligned.
    FFC to the Rock Pi MIPI DSI connector using the orientation above.
 2. Connect display power from the 40-pin header. GPIO pin 2 or 4 provides 5 V; GPIO pin 6 is ground. Use one 5 V pin and one ground pin only.
 3. Check polarity and connector seating again before applying power.
-4. Leave HDMI connected for the first boot so it remains a known-good recovery
-   display.
+4. Keep HDMI available as the recovery display, but begin the authorized
+   production acceptance boot with it disconnected; reconnect it only in the
+   documented hot-plug sequence after DSI and touch checks pass.
 
 The device-tree overlay supplies the panel controller at I2C address `0x45`
 and the touch controller at `0x38`; no separate touch interrupt wire is used.
+Install DKMS `0.2.4` before the authorized production boot: it supplies
+`rockpi_rk3399_display_compat`, `panel_rockpi_rpi_touchscreen`, and
+`raspits_ft5426`. The overlay keeps DSI0 disabled as a DRM output while the
+compatibility provider uses it only as the DSI1 PLL supplier.
 
-After wiring, follow the [first-boot checks in the README](../README.md#first-boot-hardware-checkpoint).
+Do not unplug the temporary diagnostic setup, change its X transform, or reboot
+without fresh authorization. On the later production boot, use the README's
+identity-matrix touch check, persistent crash-log checks, and HDMI hot-plug
+sequence. Keep an SSH or serial recovery path available; the exact scoped SSH
+and offline rollback procedures are in [the recovery guide](recovery.md).
+
+After wiring, follow the [first-boot checks in the README](../README.md#first-authorized-production-boot-hardware-checkpoint).

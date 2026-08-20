@@ -37,11 +37,29 @@ during panel prepare after the DesignWare host enters command mode, use current
 kernel APIs, and propagate I2C and DSI errors.
 
 `src/display_compat_core.c` and `src/display_compat_main.c` implement the RK3399
-DSI PHY sequence and live DSI1 VOP selection described by the upstream Rockchip
-DesignWare DSI driver at Linux v6.18 commit
-`7d0a66e4bb9081d75c82ec4957c50034cb0ea449`:
+DSI PHY sequence and live DSI1 VOP selection. The immutable Linux v6.18 source
+snapshot is commit `7d0a66e4bb9081d75c82ec4957c50034cb0ea449` (the peeled v6.18
+tag). Its Rockchip DesignWare DSI driver documents the internal D-PHY test
+interface, PHY configuration registers, and RK3399 DSI1 GRF LCD-select bit:
 
 https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/gpu/drm/rockchip/dw-mipi-dsi-rockchip.c
 
-The project implementation is GPL-2.0-only and uses a separately tested,
-reversible compatibility core so the provider accesses only the live VOP.
+The corresponding immutable Radxa Rockchip DSI source is the project-pinned
+commit `c681d6a31c2289dbaca2e1f822bab41530fc0f68`:
+
+https://github.com/radxa/kernel/blob/c681d6a31c2289dbaca2e1f822bab41530fc0f68/drivers/gpu/drm/rockchip/dw-mipi-dsi-rockchip.c
+
+The Linux v6.18 Rockchip VOP register table identifies `SYS_CTRL.data01_swap`
+and the `DSP_CTRL0` blue/green, red/blue, and red/green output fields:
+
+https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/gpu/drm/rockchip/rockchip_vop_reg.c
+
+The same VOP field definitions are present in Radxa's immutable RK3399 source:
+
+https://github.com/radxa/kernel/blob/c681d6a31c2289dbaca2e1f822bab41530fc0f68/drivers/gpu/drm/rockchip/rockchip_vop_reg.c
+
+The mainline panel source above is also the attribution for DRM panel prepare
+ordering; the project retains the required `prepare_prev_first` ordering before
+the TC358762 prepare sequence. The project implementation is GPL-2.0-only and
+uses a separately tested, reversible compatibility core so the provider accesses
+only the GRF-selected live VOP.

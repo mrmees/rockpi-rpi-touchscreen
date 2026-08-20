@@ -3,23 +3,31 @@
 This project enables the **original** Raspberry Pi 7-inch 800x480 Touch
 Display on a Radxa Rock Pi 4B+ running Armbian
 `6.18.43-current-rockchip64`. It installs a board-specific device-tree overlay
-and a DKMS touchscreen driver while retaining HDMI as a recovery display.
+and DKMS display stack while retaining HDMI as a recovery display.
 
-Touch Display 2 is not supported. Hardware validation has been attempted on
-the connected original display, but successful panel video, brightness, and
-touch operation remain pending after the corrective driver reboot.
+Touch Display 2 is not supported. The current live diagnostic session has
+user-confirmed correct RGB desktop video and physically correct touch, but that
+session still uses temporary helpers and a temporary 180-degree X transform.
+The production cold-start and reboot acceptance remains pending for DKMS 0.2.4;
+do not describe this release as production-hardware-validated yet.
 
 ## What is installed
 
 - The Rock Pi MIPI DSI graph and Raspberry Pi panel controller at I2C `0x45`.
-- A GPL-2.0 polling driver for the FT5426 touch controller at I2C `0x38` and
-  a board-specific DRM panel driver for the TC358762 bridge.
+- A GPL-2.0 polling driver for the FT5426 touch controller at I2C `0x38`, a
+  board-specific DRM panel driver for the TC358762 bridge, and an RK3399
+  display compatibility provider.
 - A DKMS package named `rockpi-rpi-touchscreen` and a user overlay named
   `rockpi-4b-plus-rpi-touchscreen`.
 
-DKMS release `0.2.3` installs two modules: `raspits_ft5426` owns touch input,
-and `panel_rockpi_rpi_touchscreen` owns the original panel compatibility path.
-The compatibility driver initializes TC358762 during panel prepare, after the
+DKMS `0.2.4` installs all three production modules:
+`rockpi_rk3399_display_compat`, `panel_rockpi_rpi_touchscreen`, and `raspits_ft5426`.
+`rockpi_rk3399_display_compat` owns the disabled-DSI0 PLL supplier and the
+reversible VOP correction; `panel_rockpi_rpi_touchscreen` consumes that provider
+and owns the original panel compatibility path; `raspits_ft5426` owns touch
+input. The panel has a hard module dependency on the provider and defers until
+the provider is ready, so the panel cannot bind with an unprepared PLL source.
+The panel driver initializes TC358762 during panel prepare, after the
 Linux 6.18 DesignWare bridge has powered the host in command mode and after the
 panel-controller power wait. It sets the DRM panel's `prepare_prev_first` flag
 before publishing the panel, which makes the host enter LP-11 before those
@@ -28,9 +36,14 @@ screen remained black and the command FIFO timed out before the host PHY was
 ready. The touch probe defers on `-ENXIO` while panel power is unavailable and
 retries through the driver core instead of permanently losing touch input.
 
-DSI0 stays disabled; the overlay routes the little VOP only to DSI1 and leaves
-HDMI enabled. The project-specific panel compatible prevents the generic
-Raspberry Pi panel module from owning this RK3399-only path.
+DSI0 is disabled in the DRM graph but supplies the DSI1 PLL through the compatibility provider.
+It is not registered as a DRM output. The overlay prefers the little VOP for
+DSI1, but the provider reads the live GRF DSI1 route only after the CRTC is
+active, so it operates on exactly the GRF-selected active VOP. It applies a
+reversible `data01_swap` and blue/green plus red/blue correction, then restores
+only those fields during panel disable. The provider never uses `/dev/mem` and never reads or writes the inactive VOP.
+HDMI remains enabled, and the project-specific panel compatible prevents the
+generic Raspberry Pi panel module from owning this RK3399-only path.
 
 The touch driver is derived from [Radxa's exact GPL-2.0-only source at commit
 `c681d6a31c2289dbaca2e1f822bab41530fc0f68`](https://github.com/radxa/kernel/blob/c681d6a31c2289dbaca2e1f822bab41530fc0f68/drivers/input/touchscreen/raspits_ft5426.c).
@@ -50,7 +63,13 @@ check uses the compiler recorded by the kernel; on this image that is the
 Debian `aarch64-linux-gnu-gcc` 14.2.0 toolchain.
 
 The working HDMI configuration is intentionally outside this project's scope:
-the installer does not change `/etc/X11/xorg.conf.d/20-dfrobot-display.conf`.
+`/etc/X11/xorg.conf.d/20-dfrobot-display.conf is protected` and the installer
+does not change it. Record its checksum before installation and compare it
+afterward:
+
+```sh
+sha256sum /etc/X11/xorg.conf.d/20-dfrobot-display.conf
+```
 
 ## Install and remove
 
@@ -61,17 +80,16 @@ run the tested entry point from the repository root:
 sudo sh scripts/install.sh
 ```
 
-It validates the module and merged device tree before registering DKMS,
+It validates the modules and merged device tree before registering DKMS,
 installs the DTBO in `/boot/overlay-user/`, backs up `/boot/armbianEnv.txt`,
 and appends one overlay token without removing unrelated user overlays.
-Release `0.2.3` treats `/usr/src/rockpi-rpi-touchscreen-0.2.3` as immutable: a
+Release `0.2.4` treats `/usr/src/rockpi-rpi-touchscreen-0.2.4` as immutable: a
 same-version content mismatch fails instead of silently replacing registered
-source. The installer checksum-compares the source, both DKMS-built/installed
-modules, and DTBO. A `0.2.2` installation owned by this project is removed only
-after `0.2.3`, both modules, the source, boot backup, single overlay token, and
-DTBO all verify. A failed migration retains or restores the old release and
-reports any recovery paths. The installer never changes
-`/etc/X11/xorg.conf.d/20-dfrobot-display.conf`.
+source. The installer checksum-compares the source, all three DKMS-built and
+installed modules, and DTBO. A `0.2.3` installation owned by this project is
+removed only after `0.2.4`, all three modules, the source, boot backup, single
+overlay token, and DTBO all verify. A failed migration retains or restores the
+old release and reports any recovery paths. The installer does not reboot or shut down automatically, does not unload the live diagnostic helpers, and never changes `/etc/X11/xorg.conf.d/20-dfrobot-display.conf`.
 
 Preview removal with:
 
@@ -89,14 +107,19 @@ Read [the wiring guide](docs/wiring.md) before powering down, and keep
 [the recovery guide](docs/recovery.md) available over SSH or on another
 machine.
 
-## First boot: hardware checkpoint
+## First authorized production boot: hardware checkpoint
 
-Do not claim hardware support from an offline validation alone. Power down,
-wire the panel, then boot with HDMI available. Check the current boot's panel
-and touch probes, a DSI connector/mode, both I2C addresses, and the input
-device:
+Do not alter the currently live helpers or temporary X transform. After source
+review, installation, and fresh authorization for a reboot, the new overlay and
+all three production modules first bind on that new boot. Do not claim hardware
+support from offline validation or the earlier temporary-helper evidence alone.
+
+Start the authorized boot with the Raspberry Pi display connected and HDMI
+disconnected. Check the current boot's modules, panel and touch probes, a DSI
+connector/mode, both I2C addresses, and the input device:
 
 ```sh
+lsmod | grep -E '^(rockpi_rk3399_display_compat|panel_rockpi_rpi_touchscreen|raspits_ft5426)'
 sudo journalctl -b -k | grep -Ei 'raspberrypi|raspits|ft5426|dsi|panel'
 cat /sys/class/drm/*/status
 cat /sys/class/drm/*/modes
@@ -104,14 +127,12 @@ sudo i2cdetect -y 1
 libinput list-devices
 ```
 
-Expect panel `0x45`, touch `0x38`, an active 800x480 DSI mode, and a
-five-slot `Raspberry Pi 7-inch Touchscreen` input device. A successful project
-panel probe should log `registered RK3399-safe Raspberry Pi touchscreen panel`;
-the touch probe should log an `FT5426 firmware` line. Treat any `failed to
+Expect panel `0x45`, touch `0x38`, an active 800x480 DSI mode, and a five-slot
+`Raspberry Pi 7-inch Touchscreen` input device. A successful project panel
+probe should log `registered RK3399-safe Raspberry Pi touchscreen panel`; the
+touch probe should log an `FT5426 firmware` line. Treat any `failed to
 initialize TC358762`, `TC358762 write failed`, or `failed to write command
-FIFO` line as a failed checkpoint. Recheck that HDMI still works when attached.
-The warning `panel ready bit did not assert; continuing after bounded wait` is advisory
-on the tested original panel; actual I2C read failures remain fatal.
+FIFO` line as a failed checkpoint. The warning `panel ready bit did not assert; continuing after bounded wait` is advisory on the tested original panel; actual I2C read failures remain fatal.
 
 Brightness is exposed as 0 through 255 by the project backlight. After the
 hardware checkpoint finds the device, a direct test is:
@@ -122,17 +143,47 @@ cat "$backlight/max_brightness"
 printf '%s\n' 128 | sudo tee "$backlight/brightness"
 ```
 
-Display rotation and touch mapping are userspace concerns, not device-tree or
-driver settings. Under an X11 session, map the touch device to DSI1 with:
+The overlay sets both `touchscreen-inverted-x` and `touchscreen-inverted-y`, so
+the production boot must use kernel touch orientation and no longer apply the
+temporary userspace 180-degree correction. Do not change the current live X
+session. On the production boot, verify the X Coordinate Transformation Matrix must be identity:
 
 ```sh
-touch_id=$(xinput list --id-only 'Raspberry Pi 7-inch Touchscreen')
-xinput map-to-output "$touch_id" DSI-1
+sudo -u lightdm env DISPLAY=:0 XAUTHORITY=/var/lib/lightdm/.Xauthority \
+  xinput list-props 'Raspberry Pi 7-inch Touchscreen'
 ```
 
-Use the desktop's display/input settings instead under Wayland. Hardware
-validation remains pending until video, brightness, touch mapping, HDMI, a
-reboot, and a shutdown/cold-start have all passed.
+The matrix must be `1 0 0 0 1 0 0 0 1`; a 180-degree matrix would invert the
+already inverted axes a second time. Confirm physically correct touch and RGB
+panels before proceeding.
+
+Then follow this HDMI hot-plug sequence: keep HDMI disconnected until DSI-1 is
+800x480 with correct RGB and physical touch; attach HDMI; run `xrandr --current`
+again; confirm both connectors retain independent modes, correct RGB, and usable
+touch; finally recheck the protected HDMI checksum. HDMI hot-plug sequence
+success is required before describing dual-display support as accepted.
+
+```sh
+sudo -u lightdm env DISPLAY=:0 XAUTHORITY=/var/lib/lightdm/.Xauthority xrandr --current
+sudo -u lightdm env DISPLAY=:0 XAUTHORITY=/var/lib/lightdm/.Xauthority \
+  xinput list-props 'Raspberry Pi 7-inch Touchscreen'
+sha256sum /etc/X11/xorg.conf.d/20-dfrobot-display.conf
+```
+
+Keep persistent crash collection enabled throughout the checkpoint. Inspect
+`/var/log.hdd/kernel-live.log` and `/var/log.hdd/crash-watch.log` after the
+first boot and after HDMI hot-plug; neither may contain a new Oops, lockup, or
+display-transfer failure:
+
+```sh
+sudo tail -n 200 /var/log.hdd/kernel-live.log
+sudo tail -n 40 /var/log.hdd/crash-watch.log
+```
+
+Production cold-start and reboot acceptance remains pending until video,
+brightness, identity-matrix touch, HDMI hot-plug, persistent logs, and an
+explicitly authorized shutdown/cold-start have all passed. This project never
+reboots or shuts down automatically.
 
 ## Limitations
 
