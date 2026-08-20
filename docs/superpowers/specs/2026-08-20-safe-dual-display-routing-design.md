@@ -59,15 +59,16 @@ advertises both CRTCs for DSI and may choose the unsafe reversed pairing.
 
 ### Device-tree route filter
 
-The overlay will keep the real DSI1-to-VOPL graph unchanged. The DSI input
-endpoint whose endpoint ID selects VOPB will instead point to a project-owned
-inert graph endpoint. That inert endpoint belongs to a plain port under the
-existing `rockpi-display-compat` node and is not the port of any registered DRM
-CRTC.
+The overlay will keep the real DSI1-to-VOPL graph unchanged. It will add one
+disabled, project-owned route-filter node with two ports. The DSI input endpoint
+whose endpoint ID selects VOPB will connect reciprocally to the first filter
+port. The VOPB output endpoint that previously connected to that DSI input will
+connect reciprocally to the second filter port. Neither filter port belongs to
+a registered DRM CRTC.
 
 For the DSI encoder, `drm_of_find_possible_crtcs()` will then observe:
 
-1. the VOPB-selecting DSI endpoint, whose remote inert port maps to no CRTC;
+1. the VOPB-selecting DSI endpoint, whose remote filter port maps to no CRTC;
 2. the VOPL-selecting DSI endpoint, whose remote port maps to VOPL.
 
 The resulting encoder mask contains VOPL only. When the encoder is active,
@@ -76,12 +77,12 @@ VOPL endpoint ID, so the Rockchip DSI glue writes the little-VOP mux value.
 The correction provider continues reading the live GRF mux after the CRTC is
 active and therefore applies its reversible lane/color correction to VOPL.
 
-The VOPB output endpoint remains pointed at the DSI component. This deliberate
-one-way graph asymmetry preserves Rockchip DRM component discovery while
-preventing the DSI encoder's reverse graph walk from treating VOPB as an
-eligible CRTC. Redirecting the VOPB output itself to the inert node is forbidden:
-the DRM master could then wait for the compatibility provider as though it were
-a DRM component.
+Both route-filter connections are reciprocal, so the merged tree introduces no
+device-tree graph warning. The route-filter node is disabled, so Rockchip DRM
+component discovery ignores it when scanning the VOPB output. Component
+discovery still reaches the enabled DSI component through the unchanged VOPL
+output connection. This prevents the DRM master from waiting for the route
+filter as though it were a display component.
 
 No literal CRTC index is stored in the overlay or driver. The constraint is
 expressed by device-tree graph identity, so registration-order changes do not
@@ -195,18 +196,20 @@ active Rock Pi DTB, and verifies the merged tree. It requires:
 - DSI0 remains disabled as a DRM output;
 - DSI1 and the project panel path remain enabled;
 - the VOPL DSI1 endpoint and DSI VOPL input remain reciprocal and enabled;
-- the DSI VOPB input points to the project inert endpoint;
-- the inert endpoint's port is not either VOP output port and is not listed in
+- the disabled route-filter node has exactly two numbered ports;
+- the DSI VOPB input and filter port 0 are reciprocal;
+- the VOPB DSI output and filter port 1 are reciprocal and disabled;
+- neither filter port is a VOP output port or listed in
   `display-subsystem/ports`;
-- the VOPB output still points to the DSI component for component discovery;
+- the unchanged VOPL graph still provides DRM component discovery for DSI;
 - both HDMI VOP routes and HDMI status are unchanged;
 - the provider resources, panel, touch properties, and touch orientation remain
   valid.
 
 The strict validator repeats these requirements against the active merged DTB
-and rejects missing, duplicated, self-referential, or wrongly placed inert
-endpoints. A route that still lets the DSI VOPB input resolve to either VOP port
-fails validation before boot mutation.
+and rejects missing, duplicated, self-referential, asymmetric, enabled, or
+wrongly placed filter endpoints. A route that still lets the DSI VOPB input
+resolve to either VOP port fails validation before boot mutation.
 
 ### Touch mapper tests
 
