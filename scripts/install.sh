@@ -7,6 +7,68 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 require_root
 require_command awk cat chmod cmp cp date diff dirname dkms find grep head install mkdir mktemp modinfo mv rm sed sha256sum tail
 
+module_content_checksum()
+{
+	module_file=$1
+	checksum_input=$module_file
+	checksum_temporary=
+	case $module_file in
+	*.ko.xz)
+		require_command xz
+		checksum_temporary=$(mktemp)
+		if ! xz -dc "$module_file" > "$checksum_temporary"; then
+			rm -f "$checksum_temporary"
+			die "cannot decompress DKMS module artifact: $module_file"
+		fi
+		checksum_input=$checksum_temporary
+		;;
+	*.ko.gz)
+		require_command gzip
+		checksum_temporary=$(mktemp)
+		if ! gzip -dc "$module_file" > "$checksum_temporary"; then
+			rm -f "$checksum_temporary"
+			die "cannot decompress DKMS module artifact: $module_file"
+		fi
+		checksum_input=$checksum_temporary
+		;;
+	*.ko.zst)
+		require_command zstd
+		checksum_temporary=$(mktemp)
+		if ! zstd -q -dc "$module_file" > "$checksum_temporary"; then
+			rm -f "$checksum_temporary"
+			die "cannot decompress DKMS module artifact: $module_file"
+		fi
+		checksum_input=$checksum_temporary
+		;;
+	esac
+	checksum=$(sha256sum "$checksum_input" | awk '{print $1}')
+	[ -z "$checksum_temporary" ] || rm -f "$checksum_temporary"
+	printf '%s\n' "$checksum"
+}
+
+dkms_lifecycle_phase()
+{
+	lifecycle_status=$1
+	lifecycle_version=$2
+	case $lifecycle_status in
+	'') printf '%s\n' absent ;;
+	"$PROJECT_NAME/$lifecycle_version: added") printf '%s\n' added ;;
+	"$PROJECT_NAME/$lifecycle_version, $KERNEL_RELEASE, $ARCH: built") printf '%s\n' built ;;
+	"$PROJECT_NAME/$lifecycle_version, $KERNEL_RELEASE, $ARCH: installed") printf '%s\n' installed ;;
+	*) printf '%s\n' unsupported ;;
+	esac
+}
+
+find_dkms_module_artifact()
+{
+	artifact_root=$1
+	artifact_module=$2
+	find "$artifact_root" -type f \
+		\( -name "$artifact_module.ko" -o -name "$artifact_module.ko.xz" \
+		-o -name "$artifact_module.ko.gz" -o -name "$artifact_module.ko.zst" \) \
+		-print 2>/dev/null | head -n 1
+}
+
 validator=${VALIDATE_SCRIPT:-$script_dir/validate.sh}
 [ -x "$validator" ] || [ -f "$validator" ] || die "validation script not found: $validator"
 sh "$validator" --offline
@@ -33,6 +95,9 @@ old_was_installed=0
 if printf '%s\n' "$old_status" | grep -Fxq "$old_expected_installed"; then
 	old_was_installed=1
 fi
+old_lifecycle_phase=$(dkms_lifecycle_phase "$old_status" "$old_version")
+[ "$old_lifecycle_phase" != unsupported ] ||
+	die "old DKMS lifecycle is not a single restorable target-kernel state: ${old_status:-absent}"
 old_source_owned=0
 if [ -f "$old_source/dkms.conf" ] &&
 	grep -Fq 'PACKAGE_NAME="rockpi-rpi-touchscreen"' "$old_source/dkms.conf" &&
@@ -47,9 +112,9 @@ if [ "$old_source_owned" -eq 1 ] &&
 	grep -Fxq 'BUILT_MODULE_NAME[1]="panel_rockpi_rpi_touchscreen"' "$old_source/dkms.conf" &&
 	grep -Fxq 'BUILT_MODULE_LOCATION[1]="."' "$old_source/dkms.conf" &&
 	grep -Fxq 'DEST_MODULE_LOCATION[1]="/updates/dkms"' "$old_source/dkms.conf" &&
-	[ "$(grep -Ec '^BUILT_MODULE_NAME\[[0-9]+\]=' "$old_source/dkms.conf")" -eq 2 ] &&
-	[ "$(grep -Ec '^BUILT_MODULE_LOCATION\[[0-9]+\]=' "$old_source/dkms.conf")" -eq 2 ] &&
-	[ "$(grep -Ec '^DEST_MODULE_LOCATION\[[0-9]+\]=' "$old_source/dkms.conf")" -eq 2 ]; then
+	[ "$(grep -Ec '^[[:space:]]*BUILT_MODULE_NAME\[[0-9]+\][[:space:]]*=' "$old_source/dkms.conf")" -eq 2 ] &&
+	[ "$(grep -Ec '^[[:space:]]*BUILT_MODULE_LOCATION\[[0-9]+\][[:space:]]*=' "$old_source/dkms.conf")" -eq 2 ] &&
+	[ "$(grep -Ec '^[[:space:]]*DEST_MODULE_LOCATION\[[0-9]+\][[:space:]]*=' "$old_source/dkms.conf")" -eq 2 ]; then
 	old_source_faithful=1
 fi
 if [ "$old_registered" -eq 1 ]; then
@@ -61,11 +126,13 @@ if [ "$old_was_installed" -eq 1 ]; then
 	[ "$old_source_owned" -eq 1 ] ||
 		die "installed old DKMS source is missing or unowned: $old_source"
 	for module_name in $OLD_MODULE_NAMES; do
-		old_built_baseline=$(find "$dkms_state_root/$PROJECT_NAME/$old_version/$KERNEL_RELEASE" \
-			-type f -name "$module_name.ko" -print 2>/dev/null | head -n 1)
+		old_built_baseline=$(find_dkms_module_artifact \
+			"$dkms_state_root/$PROJECT_NAME/$old_version/$KERNEL_RELEASE" "$module_name")
 		old_installed_baseline=$(modinfo -k "$KERNEL_RELEASE" -n "$module_name" 2>/dev/null || true)
-		[ -n "$old_built_baseline" ] && [ -f "$old_installed_baseline" ] &&
-			cmp -s "$old_built_baseline" "$old_installed_baseline" ||
+		[ -n "$old_built_baseline" ] && [ -f "$old_installed_baseline" ] ||
+			die "old installed $module_name module does not match its DKMS build; refusing migration"
+		[ "$(module_content_checksum "$old_built_baseline")" = \
+			"$(module_content_checksum "$old_installed_baseline")" ] ||
 			die "old installed $module_name module does not match its DKMS build; refusing migration"
 	done
 fi
@@ -78,19 +145,81 @@ new_was_registered=0
 if printf '%s\n' "$new_status_before" | dkms_status_has_version "$PROJECT_VERSION"; then
 	new_was_registered=1
 fi
+new_lifecycle_phase=$(dkms_lifecycle_phase "$new_status_before" "$PROJECT_VERSION")
+[ "$new_lifecycle_phase" != unsupported ] ||
+	die "new DKMS lifecycle is not a single restorable target-kernel state: ${new_status_before:-absent}"
 
 source_created=0
 overlay_created=0
 overlay_backup_created=0
 overlay_replaced=0
 previous_overlay_file=
-dkms_add_attempted=0
+new_dkms_mutation_attempted=0
 dkms_install_attempted=0
+old_retirement_attempted=0
+old_source_snapshot_complete=0
+new_dkms_state_snapshot_complete=0
+old_dkms_state_snapshot_complete=0
 backup_created=0
 completed=0
 stage_directory=
 recovery_directory=
 backup_file=${BACKUP_PATH:-$ARMBIAN_ENV.$PROJECT_NAME.$(date -u +%Y%m%dT%H%M%SZ).bak}
+
+restore_dkms_lifecycle()
+{
+	restore_version=$1
+	restore_phase=$2
+	restore_expected=$3
+	if ! restore_current=$(dkms status -m "$PROJECT_NAME" -v "$restore_version" 2>/dev/null); then
+		return 1
+	fi
+	if [ "$restore_current" != "$restore_expected" ]; then
+		if [ -n "$restore_current" ] &&
+			! dkms remove -m "$PROJECT_NAME" -v "$restore_version" --all >/dev/null 2>&1; then
+			return 1
+		fi
+		if ! restore_absent=$(dkms status -m "$PROJECT_NAME" -v "$restore_version" 2>/dev/null) ||
+			[ -n "$restore_absent" ]; then
+			return 1
+		fi
+		case $restore_phase in
+		absent) ;;
+		added)
+			dkms add -m "$PROJECT_NAME" -v "$restore_version" >/dev/null 2>&1 || return 1
+			;;
+		built)
+			dkms add -m "$PROJECT_NAME" -v "$restore_version" >/dev/null 2>&1 || return 1
+			dkms build -m "$PROJECT_NAME" -v "$restore_version" -k "$KERNEL_RELEASE" >/dev/null 2>&1 || return 1
+			;;
+		installed)
+			dkms add -m "$PROJECT_NAME" -v "$restore_version" >/dev/null 2>&1 || return 1
+			dkms build -m "$PROJECT_NAME" -v "$restore_version" -k "$KERNEL_RELEASE" >/dev/null 2>&1 || return 1
+			dkms install -m "$PROJECT_NAME" -v "$restore_version" -k "$KERNEL_RELEASE" >/dev/null 2>&1 || return 1
+			;;
+		*) return 1 ;;
+		esac
+	fi
+	restore_final=$(dkms status -m "$PROJECT_NAME" -v "$restore_version" 2>/dev/null) &&
+		[ "$restore_final" = "$restore_expected" ]
+}
+
+restore_dkms_state_tree()
+{
+	restore_state_version=$1
+	restore_state_snapshot=$2
+	restore_state_complete=$3
+	restore_state_destination=$dkms_state_root/$PROJECT_NAME/$restore_state_version
+	[ "$restore_state_complete" -eq 1 ] || return 0
+	rm -rf "$restore_state_destination" || return 1
+	if [ -d "$restore_state_snapshot" ]; then
+		mkdir -p "$(dirname -- "$restore_state_destination")" || return 1
+		cp -a "$restore_state_snapshot" "$restore_state_destination" || return 1
+		diff -qr "$restore_state_snapshot" "$restore_state_destination" >/dev/null || return 1
+	else
+		[ ! -e "$restore_state_destination" ] || return 1
+	fi
+}
 
 rollback()
 {
@@ -104,6 +233,9 @@ rollback()
 			if ! try_atomic_install_file "$backup_file" "$ARMBIAN_ENV"; then
 				rollback_failed=1
 				rollback_note="$rollback_note boot configuration backup retained at $backup_file;"
+			elif ! rm -f "$backup_file" "$backup_file.sha256"; then
+				rollback_failed=1
+				rollback_note="$rollback_note restored boot configuration but could not remove transaction backup $backup_file;"
 			fi
 		fi
 		if [ "$overlay_created" -eq 1 ] && ! rm -f "$overlay_destination"; then
@@ -125,23 +257,40 @@ rollback()
 				rollback_note="$rollback_note overlay backup cleanup failed: $previous_overlay_file;"
 			fi
 		fi
-		if [ "$dkms_add_attempted" -eq 1 ]; then
-			if ! new_status_after=$(dkms status -m "$PROJECT_NAME" -v "$PROJECT_VERSION" 2>/dev/null); then
+		if [ "$new_dkms_mutation_attempted" -eq 1 ]; then
+			if ! restore_dkms_lifecycle "$PROJECT_VERSION" "$new_lifecycle_phase" "$new_status_before" ||
+				! restore_dkms_state_tree "$PROJECT_VERSION" \
+					"$recovery_directory/new-dkms-state" "$new_dkms_state_snapshot_complete" ||
+				! new_status_restored=$(dkms status -m "$PROJECT_NAME" -v "$PROJECT_VERSION" 2>/dev/null) ||
+				[ "$new_status_restored" != "$new_status_before" ]; then
 				rollback_failed=1
 				new_source_retained=1
-				rollback_note="$rollback_note DKMS registration baseline inspection failed; new source retained at $PROJECT_SOURCE_DIR;"
-			elif [ "$new_status_after" != "$new_status_before" ]; then
-				dkms remove -m "$PROJECT_NAME" -v "$PROJECT_VERSION" --all >/dev/null 2>&1 || true
-				if ! new_status_restored=$(dkms status -m "$PROJECT_NAME" -v "$PROJECT_VERSION" 2>/dev/null) ||
-					[ "$new_status_restored" != "$new_status_before" ]; then
-					rollback_failed=1
-					new_source_retained=1
-					rollback_note="$rollback_note DKMS registration baseline restoration failed; new source retained at $PROJECT_SOURCE_DIR;"
-				fi
+				rollback_note="$rollback_note DKMS registration baseline restoration failed; new source retained at $PROJECT_SOURCE_DIR;"
 			fi
 		fi
-		if [ "$dkms_install_attempted" -eq 1 ] && [ "$old_was_installed" -eq 1 ]; then
-			if ! dkms install -m "$PROJECT_NAME" -v "$old_version" -k "$KERNEL_RELEASE" >/dev/null 2>&1; then
+		if [ "$old_retirement_attempted" -eq 1 ] && [ "$old_source_owned" -eq 1 ] &&
+			[ "$old_source_snapshot_complete" -eq 1 ]; then
+			if ! rm -rf "$old_source" ||
+				! cp -a "$recovery_directory/old-source" "$old_source" ||
+				! diff -qr "$recovery_directory/old-source" "$old_source" >/dev/null; then
+				rollback_failed=1
+				rollback_note="$rollback_note old source restoration failed; snapshot retained at $recovery_directory/old-source;"
+			fi
+		fi
+		if [ "$dkms_install_attempted" -eq 1 ] || [ "$old_retirement_attempted" -eq 1 ]; then
+			old_reinstall_failed=0
+			if [ "$dkms_install_attempted" -eq 1 ] && [ "$old_was_installed" -eq 1 ] &&
+				old_current_before_restore=$(dkms status -m "$PROJECT_NAME" -v "$old_version" 2>/dev/null) &&
+				[ "$old_current_before_restore" = "$old_status" ] &&
+				! dkms install -m "$PROJECT_NAME" -v "$old_version" -k "$KERNEL_RELEASE" >/dev/null 2>&1; then
+				old_reinstall_failed=1
+			fi
+			if [ "$old_reinstall_failed" -eq 1 ] ||
+				! restore_dkms_lifecycle "$old_version" "$old_lifecycle_phase" "$old_status" ||
+				! restore_dkms_state_tree "$old_version" \
+					"$recovery_directory/old-dkms-state" "$old_dkms_state_snapshot_complete" ||
+				! old_status_restored=$(dkms status -m "$PROJECT_NAME" -v "$old_version" 2>/dev/null) ||
+				[ "$old_status_restored" != "$old_status" ]; then
 				rollback_failed=1
 				rollback_note="$rollback_note old DKMS reinstall failed; retained old source at $old_source;"
 			fi
@@ -183,18 +332,19 @@ rollback()
 				}
 			done
 		fi
-		if [ "$dkms_install_attempted" -eq 1 ]; then
+		if [ "$dkms_install_attempted" -eq 1 ] || [ "$old_retirement_attempted" -eq 1 ]; then
 			if ! restored_old_status=$(dkms status -m "$PROJECT_NAME" -v "$old_version" 2>&1) ||
 				[ "$restored_old_status" != "$old_status" ]; then
 				rollback_failed=1
 				rollback_note="$rollback_note old DKMS lifecycle restoration failed (expected: ${old_status:-absent}; got: ${restored_old_status:-unavailable});"
 			elif [ "$old_was_installed" -eq 1 ]; then
 				for module_name in $OLD_MODULE_NAMES; do
-					old_built_module=$(find "${DKMS_STATE_DIR:-/var/lib/dkms}/$PROJECT_NAME/$old_version/$KERNEL_RELEASE" \
-						-type f -name "$module_name.ko" -print 2>/dev/null | head -n 1)
+					old_built_module=$(find_dkms_module_artifact \
+						"$dkms_state_root/$PROJECT_NAME/$old_version/$KERNEL_RELEASE" "$module_name")
 					old_installed_module=$(modinfo -k "$KERNEL_RELEASE" -n "$module_name" 2>/dev/null || true)
 					if [ -z "$old_built_module" ] || [ ! -f "$old_installed_module" ] ||
-						! cmp -s "$old_built_module" "$old_installed_module"; then
+						[ "$(module_content_checksum "$old_built_module")" != \
+						"$(module_content_checksum "$old_installed_module")" ]; then
 						rollback_failed=1
 						rollback_note="$rollback_note old installed $module_name checksum restoration failed;"
 					fi
@@ -233,6 +383,28 @@ source_parent=$(dirname -- "$PROJECT_SOURCE_DIR")
 mkdir -p "$source_parent"
 recovery_directory=$(mktemp -d "$source_parent/.${PROJECT_NAME}.transaction.XXXXXX")
 stage_directory=$(mktemp -d "$source_parent/.${PROJECT_NAME}.stage.XXXXXX")
+if [ "$old_source_owned" -eq 1 ]; then
+	cp -a "$old_source" "$recovery_directory/old-source"
+	diff -qr "$old_source" "$recovery_directory/old-source" >/dev/null ||
+		die 'old DKMS source recovery snapshot verification failed'
+	old_source_snapshot_complete=1
+fi
+if [ -d "$dkms_state_root/$PROJECT_NAME/$PROJECT_VERSION" ]; then
+	cp -a "$dkms_state_root/$PROJECT_NAME/$PROJECT_VERSION" \
+		"$recovery_directory/new-dkms-state"
+	diff -qr "$dkms_state_root/$PROJECT_NAME/$PROJECT_VERSION" \
+		"$recovery_directory/new-dkms-state" >/dev/null ||
+		die 'new DKMS state recovery snapshot verification failed'
+fi
+new_dkms_state_snapshot_complete=1
+if [ -d "$dkms_state_root/$PROJECT_NAME/$old_version" ]; then
+	cp -a "$dkms_state_root/$PROJECT_NAME/$old_version" \
+		"$recovery_directory/old-dkms-state"
+	diff -qr "$dkms_state_root/$PROJECT_NAME/$old_version" \
+		"$recovery_directory/old-dkms-state" >/dev/null ||
+		die 'old DKMS state recovery snapshot verification failed'
+fi
+old_dkms_state_snapshot_complete=1
 mkdir -p "$stage_directory/src" "$stage_directory/scripts" "$stage_directory/LICENSES"
 chmod 0755 "$stage_directory" "$stage_directory/src" "$stage_directory/scripts" "$stage_directory/LICENSES"
 install -m 0644 "$repo_root/Makefile" "$repo_root/dkms.conf" "$repo_root/LICENSE" "$stage_directory/"
@@ -272,10 +444,11 @@ fi
 	die 'installed DKMS source checksum verification failed'
 
 if [ "$new_was_registered" -eq 0 ]; then
-	dkms_add_attempted=1
+	new_dkms_mutation_attempted=1
 	dkms add -m "$PROJECT_NAME" -v "$PROJECT_VERSION" ||
 		die 'DKMS package could not be added'
 fi
+new_dkms_mutation_attempted=1
 dkms build -m "$PROJECT_NAME" -v "$PROJECT_VERSION" -k "$KERNEL_RELEASE"
 
 mkdir -p "$recovery_directory/prior-modules"
@@ -305,13 +478,13 @@ dkms_status=$(dkms status -m "$PROJECT_NAME" -v "$PROJECT_VERSION") ||
 printf '%s\n' "$dkms_status" | grep -Fxq "$expected_dkms_status" ||
 	die "DKMS did not report exact installed state: $expected_dkms_status"
 for module_name in $MODULE_NAMES; do
-	built_module=$(find "$dkms_state_root/$PROJECT_NAME/$PROJECT_VERSION/$KERNEL_RELEASE" \
-		-type f -name "$module_name.ko" -print 2>/dev/null | head -n 1)
+	built_module=$(find_dkms_module_artifact \
+		"$dkms_state_root/$PROJECT_NAME/$PROJECT_VERSION/$KERNEL_RELEASE" "$module_name")
 	[ -n "$built_module" ] || die "cannot locate the DKMS-built $module_name module"
 	installed_module=$(modinfo -k "$KERNEL_RELEASE" -n "$module_name")
 	[ -f "$installed_module" ] || die "installed module not found: $installed_module"
-	built_checksum=$(sha256sum "$built_module" | awk '{print $1}')
-	installed_checksum=$(sha256sum "$installed_module" | awk '{print $1}')
+	built_checksum=$(module_content_checksum "$built_module")
+	installed_checksum=$(module_content_checksum "$installed_module")
 	[ "$built_checksum" = "$installed_checksum" ] ||
 		die "installed $module_name checksum does not match the DKMS build"
 	[ "$(modinfo -F license "$built_module")" = 'GPL v2' ] &&
@@ -369,6 +542,23 @@ add_overlay_token "$ARMBIAN_ENV" "$OVERLAY_TOKEN"
 [ "$(source_digest "$PROJECT_SOURCE_DIR")" = "$expected_source_digest" ] ||
 	die 'final installed DKMS source checksum verification failed'
 cmp "$overlay_output" "$overlay_destination" || die 'final installed DTBO checksum verification failed'
+if [ "$old_registered" -eq 1 ]; then
+	old_retirement_attempted=1
+	dkms remove -m "$PROJECT_NAME" -v "$old_version" --all ||
+		die "old DKMS $old_version retirement failed"
+	retired_old_status=$(dkms status -m "$PROJECT_NAME" -v "$old_version") ||
+		die "cannot verify retired old DKMS $old_version lifecycle"
+	[ -z "$retired_old_status" ] ||
+		die "old DKMS $old_version lifecycle remained after retirement: $retired_old_status"
+	if [ "$old_source_owned" -eq 1 ]; then
+		rm -rf "$old_source" || die "old DKMS source retirement failed: $old_source"
+		[ ! -e "$old_source" ] || die "old DKMS source remained after retirement: $old_source"
+	fi
+elif [ "$old_source_owned" -eq 1 ]; then
+	old_retirement_attempted=1
+	rm -rf "$old_source" || die "old DKMS source retirement failed: $old_source"
+	[ ! -e "$old_source" ] || die "old DKMS source remained after retirement: $old_source"
+fi
 completed=1
 if [ "$overlay_replaced" -eq 1 ]; then
 	rm -f "$previous_overlay_file"
@@ -379,19 +569,6 @@ fi
 rm -rf "$recovery_directory"
 recovery_directory=
 trap - EXIT HUP INT TERM
-
-if [ "$old_registered" -eq 1 ]; then
-	if dkms remove -m "$PROJECT_NAME" -v "$old_version" --all; then
-		if [ "$old_source_owned" -eq 1 ]; then
-			rm -rf "$old_source"
-		fi
-	else
-		printf 'WARNING: installed %s/%s; retained old DKMS %s and source %s because removal failed\n' \
-			"$PROJECT_NAME" "$PROJECT_VERSION" "$old_version" "$old_source" >&2
-	fi
-elif [ "$old_source_owned" -eq 1 ]; then
-	rm -rf "$old_source"
-fi
 
 printf 'PASS: installed %s/%s and verified all three modules, source, backup, boot token, and DTBO checksums\n' \
 	"$PROJECT_NAME" "$PROJECT_VERSION"

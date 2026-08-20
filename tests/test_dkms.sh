@@ -16,23 +16,48 @@ fail()
 	exit 1
 }
 
-test_three_module_package_metadata()
-{
-	metadata=$(bash -c '. "$1"; printf "%s\n" "$PACKAGE_NAME" "$PACKAGE_VERSION" "${BUILT_MODULE_NAME[0]-}" "${BUILT_MODULE_NAME[1]-}" "${BUILT_MODULE_NAME[2]-}" "${BUILT_MODULE_NAME[3]-}" "${BUILT_MODULE_LOCATION[0]-}" "${BUILT_MODULE_LOCATION[1]-}" "${BUILT_MODULE_LOCATION[2]-}" "${DEST_MODULE_LOCATION[0]-}" "${DEST_MODULE_LOCATION[1]-}" "${DEST_MODULE_LOCATION[2]-}"' sh "$repo_root/dkms.conf")
-	expected='rockpi-rpi-touchscreen
+expected_metadata='rockpi-rpi-touchscreen
 0.2.4
 rockpi_rk3399_display_compat
 panel_rockpi_rpi_touchscreen
 raspits_ft5426
-
 .
 .
 .
 /updates/dkms
 /updates/dkms
 /updates/dkms'
-	[ "$metadata" = "$expected" ] || fail 'DKMS metadata does not describe the ordered three-module 0.2.4 package'
+
+metadata_is_exact_three_module_package()
+{
+	config=$1
+	for declaration in BUILT_MODULE_NAME BUILT_MODULE_LOCATION DEST_MODULE_LOCATION; do
+		[ "$(grep -Ec "^[[:space:]]*${declaration}\\[[0-9]+\\][[:space:]]*=" "$config")" -eq 3 ] || return 1
+	done
+	metadata=$(bash -c '. "$1"; printf "%s\n" "$PACKAGE_NAME" "$PACKAGE_VERSION" "${BUILT_MODULE_NAME[0]-}" "${BUILT_MODULE_NAME[1]-}" "${BUILT_MODULE_NAME[2]-}" "${BUILT_MODULE_LOCATION[0]-}" "${BUILT_MODULE_LOCATION[1]-}" "${BUILT_MODULE_LOCATION[2]-}" "${DEST_MODULE_LOCATION[0]-}" "${DEST_MODULE_LOCATION[1]-}" "${DEST_MODULE_LOCATION[2]-}"' sh "$config")
+	[ "$metadata" = "$expected_metadata" ]
+}
+
+test_three_module_package_metadata()
+{
+	metadata_is_exact_three_module_package "$repo_root/dkms.conf" ||
+		fail 'DKMS metadata does not describe exactly the ordered three-module 0.2.4 package'
 	printf 'PASS: DKMS metadata owns provider, panel, and touch modules at version 0.2.4\n'
+}
+
+test_sparse_fourth_module_metadata_is_rejected()
+{
+	config=$workdir/dkms-sparse.conf
+	cp "$repo_root/dkms.conf" "$config"
+	cat >> "$config" <<'EOF'
+BUILT_MODULE_NAME[10]="unexpected_fourth_module"
+BUILT_MODULE_LOCATION[10]="."
+DEST_MODULE_LOCATION[10]="/updates/dkms"
+EOF
+	if metadata_is_exact_three_module_package "$config"; then
+		fail 'DKMS metadata check accepted a sparse fourth module at index 10'
+	fi
+	printf 'PASS: DKMS metadata rejects a sparse fourth module declaration\n'
 }
 
 test_makefile_owns_three_module_targets()
@@ -126,6 +151,7 @@ EOF
 }
 
 test_three_module_package_metadata
+test_sparse_fourth_module_metadata_is_rejected
 test_makefile_owns_three_module_targets
 test_autonomous_dkms_make_uses_target_kernel_compiler
 test_autonomous_dkms_make_rejects_unmatched_compiler

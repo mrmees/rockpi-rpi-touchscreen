@@ -67,6 +67,63 @@ append_unique()
 	[ -f "$file" ] && grep -Fxq "$line" "$file" || printf '%s\n' "$line" >> "$file"
 }
 
+write_build_artifact()
+{
+	artifact_module=$1
+	artifact_payload=$2
+	directory=${DKMS_STATE_DIR:?}/rockpi-rpi-touchscreen/$version/$kernel/$arch/module
+	raw=$directory/$artifact_module.ko
+	printf '%s\n' "$artifact_payload-module-$version-$kernel" > "$raw"
+	case ${DKMS_BUILD_COMPRESSION:-none} in
+	none) ;;
+	xz) xz -c "$raw" > "$raw.xz"; rm -f "$raw" ;;
+	gz) gzip -c "$raw" > "$raw.gz"; rm -f "$raw" ;;
+	*) exit 43 ;;
+	esac
+}
+
+find_build_artifact()
+{
+	artifact_module=$1
+	find "${DKMS_STATE_DIR:?}/rockpi-rpi-touchscreen/$version/$kernel/$arch/module" -type f \
+		\( -name "$artifact_module.ko" -o -name "$artifact_module.ko.xz" -o -name "$artifact_module.ko.gz" \
+		-o -name "$artifact_module.ko.zst" \) -print | head -n 1
+}
+
+install_build_artifact()
+{
+	artifact_module=$1
+	built=$(find_build_artifact "$artifact_module")
+	[ -n "$built" ] || exit 44
+	destination=${MODULES_DIR:?}/$kernel/updates/dkms/$artifact_module.ko
+	case ${DKMS_INSTALL_COMPRESSION:-same} in
+	same) cp "$built" "$destination${built#*"$artifact_module.ko"}" ;;
+	none)
+		case $built in
+		*.xz) xz -dc "$built" > "$destination" ;;
+		*.gz) gzip -dc "$built" > "$destination" ;;
+		*) cp "$built" "$destination" ;;
+		esac
+		;;
+	gz)
+		case $built in
+		*.xz) xz -dc "$built" | gzip -c > "$destination.gz" ;;
+		*.gz) cp "$built" "$destination.gz" ;;
+		*) gzip -c "$built" > "$destination.gz" ;;
+		esac
+		;;
+	*) exit 45 ;;
+	esac
+}
+
+installed_artifact_exists()
+{
+	artifact_module=$1
+	find "${MODULES_DIR:?}/$kernel/updates/dkms" -type f \
+		\( -name "$artifact_module.ko" -o -name "$artifact_module.ko.xz" -o -name "$artifact_module.ko.gz" \
+		-o -name "$artifact_module.ko.zst" \) -print -quit | grep -q .
+}
+
 remove_version_records()
 {
 	file=$1
@@ -87,8 +144,8 @@ remove_version_records()
 		mkdir -p "${DKMS_STATE_DIR:?}/rockpi-rpi-touchscreen/$version/$kernel/$arch/module"
 		case $version in
 		0.2.3)
-			printf '%s\n' "panel-module-$version-$kernel" > "${DKMS_STATE_DIR:?}/rockpi-rpi-touchscreen/$version/$kernel/$arch/module/panel_rockpi_rpi_touchscreen.ko"
-			printf '%s\n' "touch-module-$version-$kernel" > "${DKMS_STATE_DIR:?}/rockpi-rpi-touchscreen/$version/$kernel/$arch/module/raspits_ft5426.ko"
+			write_build_artifact panel_rockpi_rpi_touchscreen panel
+			write_build_artifact raspits_ft5426 touch
 			;;
 		0.2.4)
 			for module in rockpi_rk3399_display_compat panel_rockpi_rpi_touchscreen raspits_ft5426; do
@@ -98,8 +155,7 @@ remove_version_records()
 				panel_rockpi_rpi_touchscreen) payload=panel ;;
 				raspits_ft5426) payload=touch ;;
 				esac
-				printf '%s\n' "$payload-module-$version-$kernel" > \
-					"${DKMS_STATE_DIR:?}/rockpi-rpi-touchscreen/$version/$kernel/$arch/module/$module.ko"
+				write_build_artifact "$module" "$payload"
 				if [ "${DKMS_FAIL_BUILD_MODULE:-}" = "$module" ]; then
 					exit 22
 				fi
@@ -125,16 +181,15 @@ remove_version_records()
 				printf 'install %s %s\n' "$version" "$module" >> "${DKMS_MODULE_LOG:?}"
 				case $module in
 				panel_rockpi_rpi_touchscreen)
-					[ -f "${MODULES_DIR:?}/$kernel/updates/dkms/rockpi_rk3399_display_compat.ko" ] || exit 40
+					installed_artifact_exists rockpi_rk3399_display_compat || exit 40
 					;;
 				raspits_ft5426)
-					[ -f "${MODULES_DIR:?}/$kernel/updates/dkms/rockpi_rk3399_display_compat.ko" ] || exit 41
-					[ -f "${MODULES_DIR:?}/$kernel/updates/dkms/panel_rockpi_rpi_touchscreen.ko" ] || exit 42
+					installed_artifact_exists rockpi_rk3399_display_compat || exit 41
+					installed_artifact_exists panel_rockpi_rpi_touchscreen || exit 42
 					;;
 				esac
 			fi
-			cp "${DKMS_STATE_DIR:?}/rockpi-rpi-touchscreen/$version/$kernel/$arch/module/$module.ko" \
-				"${MODULES_DIR:?}/$kernel/updates/dkms/$module.ko"
+			install_build_artifact "$module"
 			if [ "$version" = 0.2.4 ] && [ "${DKMS_FAIL_INSTALL_MODULE:-}" = "$module" ]; then
 				exit 25
 			fi
@@ -229,7 +284,10 @@ status)
 					*) remove_modules= ;;
 					esac
 					for module in $remove_modules; do
-						rm -f "${MODULES_DIR:?}/$active_kernel/updates/dkms/$module.ko"
+						rm -f "${MODULES_DIR:?}/$active_kernel/updates/dkms/$module.ko" \
+							"${MODULES_DIR:?}/$active_kernel/updates/dkms/$module.ko.xz" \
+							"${MODULES_DIR:?}/$active_kernel/updates/dkms/$module.ko.gz" \
+							"${MODULES_DIR:?}/$active_kernel/updates/dkms/$module.ko.zst"
 						if [ "$version" = 0.2.4 ] && [ "${DKMS_FAIL_REMOVE_MODULE:-}" = "$module" ]; then
 							exit 27
 						fi
@@ -246,7 +304,13 @@ status)
 	fi
 	remove_version_records "${DKMS_BUILT_STATE:?}"
 	remove_version_records "${DKMS_INSTALLED_STATE:?}"
+	rm -rf "${DKMS_STATE_DIR:?}/rockpi-rpi-touchscreen/$version"
 	[ -z "${DKMS_REMOVE_MARKER:-}" ] || : > "$DKMS_REMOVE_MARKER"
+	if [ "$version" = 0.2.3 ] && [ "${DKMS_FAIL_OLD_REMOVE_AFTER_MUTATION:-0}" -eq 1 ] &&
+		[ ! -e "${DKMS_OLD_REMOVE_FAILED_MARKER:?}" ]; then
+		: > "$DKMS_OLD_REMOVE_FAILED_MARKER"
+		exit 46
+	fi
 	;;
 esac
 if [ "$version" = 0.2.4 ] && [ "${DKMS_FAIL_ON:-}" = "$1" ]; then
@@ -269,8 +333,10 @@ while [ "$#" -gt 0 ]; do
 	esac
 done
 if [ -z "$field" ]; then
-	module_path=${MODULES_DIR:?}/$kernel/updates/dkms/${module}.ko
-	[ -f "$module_path" ] || exit 1
+	module_path=$(find "${MODULES_DIR:?}/$kernel/updates/dkms" -type f \
+		\( -name "$module.ko" -o -name "$module.ko.xz" -o -name "$module.ko.gz" \
+		-o -name "$module.ko.zst" \) -print | head -n 1)
+	[ -n "$module_path" ] && [ -f "$module_path" ] || exit 1
 	printf '%s\n' "$module_path"
 	exit 0
 fi
@@ -278,7 +344,11 @@ fi
 	license) printf '%s\n' 'GPL v2' ;;
 	vermagic) printf '%s\n' 'test-kernel SMP mod_unload aarch64' ;;
 	alias)
-		case ${module##*/} in
+		module_base=${module##*/}
+		module_base=${module_base%.xz}
+		module_base=${module_base%.gz}
+		module_base=${module_base%.zst}
+		case $module_base in
 		rockpi_rk3399_display_compat.ko) printf '%s\n' "${MODINFO_PROVIDER_ALIAS:-of:N*T*Crockpi,rk3399-dsi1-rpi-touchscreen-compat}" ;;
 		raspits_ft5426.ko) printf '%s\n' 'of:N*T*Craspits_ft5426' ;;
 	panel_rockpi_rpi_touchscreen.ko) printf '%s\n' "${MODINFO_PANEL_ALIAS:-of:N*T*Crockpi,rpi-7inch-touchscreen-panel}" ;;
@@ -352,19 +422,30 @@ chmod +x "$sandbox/bin/mv"
 set -eu
 source_file=
 destination_file=
+old_state_restore=0
 for argument do
-	[ -n "$source_file" ] || source_file=$argument
+	case $argument in
+	-*) ;;
+	*) [ -n "$source_file" ] || source_file=$argument ;;
+	esac
 	destination_file=$argument
 	if [ "${CP_FAIL_ARCHIVE:-}" = 1 ] && [ "$argument" = '-a' ]; then
 		exit 1
 	fi
 done
+case $source_file in
+*"/.rockpi-rpi-touchscreen.transaction."*"/old-dkms-state") old_state_restore=1 ;;
+esac
 if [ -n "${CP_FAIL_SNAPSHOT_MODULE:-}" ]; then
 	case $source_file:$destination_file in
 	*"/modules/test-kernel/"*"/$CP_FAIL_SNAPSHOT_MODULE.ko:"*"/.rockpi-rpi-touchscreen.transaction."*"/prior-modules/"*) exit 29 ;;
 	esac
 fi
-exec /bin/cp "$@"
+/bin/cp "$@"
+if [ "$old_state_restore" -eq 1 ] && [ -n "${DKMS_CORRUPT_OLD_REINSTALL_MODULE:-}" ]; then
+	printf '%s\n' corrupt-old-state-restore > \
+		"$destination_file/test-kernel/aarch64/module/${DKMS_CORRUPT_OLD_REINSTALL_MODULE}.ko"
+fi
 EOF
 	chmod +x "$sandbox/bin/cp"
 	cat > "$sandbox/bin/rm" <<'EOF'
@@ -419,6 +500,7 @@ run_install()
 	DKMS_ADDED_STATE="$sandbox/dkms-added.state" DKMS_BUILT_STATE="$sandbox/dkms-built.state" \
 	DKMS_INSTALLED_STATE="$sandbox/dkms-installed.state" DKMS_ACTIVE_STATE="$sandbox/dkms-active.state" \
 		DKMS_REMOVE_MARKER="$sandbox/dkms-remove.marker" DKMS_STATUS_FAILED_MARKER="$sandbox/dkms-status-failed.marker" \
+		DKMS_OLD_REMOVE_FAILED_MARKER="$sandbox/dkms-old-remove-failed.marker" \
 		DKMS_NEW_ACTIVE_VERIFIED_MARKER="$sandbox/dkms-new-active-verified.marker" \
 		DKMS_MODULE_LOG="$sandbox/dkms-module.log" SHA256_LOG="$sandbox/sha256.log" \
 		DKMS_STATE_DIR="$sandbox/var-lib-dkms" \
@@ -435,11 +517,27 @@ assert_module_matches_build()
 	sandbox=$1
 	version=$2
 	module=$3
-	built=$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/$version/test-kernel/aarch64/module/$module.ko
-	installed=$sandbox/modules/test-kernel/updates/dkms/$module.ko
-	[ -f "$built" ] || fail "missing built module: $module"
-	[ -f "$installed" ] || fail "missing installed module: $module"
-	cmp "$built" "$installed" || fail "installed module differs from DKMS build: $module"
+	built=$(find "$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/$version/test-kernel/aarch64/module" \
+		-type f \( -name "$module.ko" -o -name "$module.ko.xz" -o -name "$module.ko.gz" \
+		-o -name "$module.ko.zst" \) -print | head -n 1)
+	installed=$(find "$sandbox/modules/test-kernel/updates/dkms" \
+		-type f \( -name "$module.ko" -o -name "$module.ko.xz" -o -name "$module.ko.gz" \
+		-o -name "$module.ko.zst" \) -print | head -n 1)
+	[ -n "$built" ] && [ -f "$built" ] || fail "missing built module: $module"
+	[ -n "$installed" ] && [ -f "$installed" ] || fail "missing installed module: $module"
+	assert_equal "$(module_content_checksum "$built")" "$(module_content_checksum "$installed")" \
+		"installed module differs from DKMS build: $module"
+}
+
+module_content_checksum()
+{
+	module_file=$1
+	case $module_file in
+	*.ko.xz) xz -dc "$module_file" | /usr/bin/sha256sum | awk '{print $1}' ;;
+	*.ko.gz) gzip -dc "$module_file" | /usr/bin/sha256sum | awk '{print $1}' ;;
+	*.ko.zst) zstd -q -dc "$module_file" | /usr/bin/sha256sum | awk '{print $1}' ;;
+	*) /usr/bin/sha256sum "$module_file" | awk '{print $1}' ;;
+	esac
 }
 
 sandbox_dkms_status()
@@ -450,6 +548,7 @@ sandbox_dkms_status()
 	DKMS_BUILT_STATE="$sandbox/dkms-built.state" DKMS_INSTALLED_STATE="$sandbox/dkms-installed.state" \
 	DKMS_ACTIVE_STATE="$sandbox/dkms-active.state" DKMS_STATE_DIR="$sandbox/var-lib-dkms" \
 	DKMS_REMOVE_MARKER="$sandbox/dkms-remove.marker" DKMS_STATUS_FAILED_MARKER="$sandbox/dkms-status-failed.marker" \
+	DKMS_OLD_REMOVE_FAILED_MARKER="$sandbox/dkms-old-remove-failed.marker" \
 	DKMS_NEW_ACTIVE_VERIFIED_MARKER="$sandbox/dkms-new-active-verified.marker" \
 	MODULES_DIR="$sandbox/modules" ARCH=aarch64 \
 		"$sandbox/bin/dkms" status -m rockpi-rpi-touchscreen -v "$version"
@@ -468,6 +567,7 @@ run_uninstall()
 	DKMS_ADDED_STATE="$sandbox/dkms-added.state" DKMS_BUILT_STATE="$sandbox/dkms-built.state" \
 	DKMS_INSTALLED_STATE="$sandbox/dkms-installed.state" DKMS_ACTIVE_STATE="$sandbox/dkms-active.state" \
 		DKMS_REMOVE_MARKER="$sandbox/dkms-remove.marker" DKMS_STATUS_FAILED_MARKER="$sandbox/dkms-status-failed.marker" \
+		DKMS_OLD_REMOVE_FAILED_MARKER="$sandbox/dkms-old-remove-failed.marker" \
 		DKMS_NEW_ACTIVE_VERIFIED_MARKER="$sandbox/dkms-new-active-verified.marker" \
 		DKMS_MODULE_LOG="$sandbox/dkms-module.log" SHA256_LOG="$sandbox/sha256.log" \
 		DKMS_STATE_DIR="$sandbox/var-lib-dkms" \
@@ -816,6 +916,9 @@ assert_failed_uninstall_restored()
 	config_checksum=$2
 	dtbo_checksum=$3
 	dtbo=$sandbox/boot/overlay-user/rockpi-4b-plus-rpi-touchscreen.dtbo
+	if grep -Eq 'rollback also failed|recovery artifacts retained' "$sandbox/output"; then
+		fail 'ordinary uninstall failure did not complete a clean rollback'
+	fi
 	assert_equal "$(sha256sum "$sandbox/boot/armbianEnv.txt" | awk '{print $1}')" "$config_checksum" \
 		'post-removal uninstall failure did not restore boot configuration'
 	assert_equal "$(sha256sum "$dtbo" | awk '{print $1}')" "$dtbo_checksum" \
@@ -913,6 +1016,20 @@ test_uninstall_source_failure_restores_transaction()
 	fi
 	assert_failed_uninstall_restored "$sandbox" "$UNINSTALL_CONFIG_CHECKSUM" "$UNINSTALL_DTBO_CHECKSUM"
 	printf 'PASS: source failure restores uninstall transaction\n'
+}
+
+test_shared_uninstall_assertion_rejects_rollback_failure_output()
+{
+	sandbox=$workdir/uninstall-assertion-output-probe
+	prepare_uninstall_failure "$sandbox"
+	printf '%s\n' 'ERROR: transaction failed; rollback also failed: injected probe' > "$sandbox/output"
+	if (assert_failed_uninstall_restored "$sandbox" "$UNINSTALL_CONFIG_CHECKSUM" \
+		"$UNINSTALL_DTBO_CHECKSUM" > "$sandbox/assertion-output" 2>&1); then
+		fail 'shared uninstall assertion accepted rollback-failure output'
+	fi
+	grep -Fq 'ordinary uninstall failure did not complete a clean rollback' \
+		"$sandbox/assertion-output" || fail 'shared uninstall assertion did not reject rollback-failure output'
+	printf 'PASS: shared uninstall assertion rejects rollback-failure output\n'
 }
 
 test_uninstall_accepts_unregistered_dkms()
@@ -1034,11 +1151,104 @@ assert_clean_failed_migration_restored()
 	assert_equal "$(/usr/bin/sha256sum "$sandbox/boot/overlay-user/rockpi-4b-plus-rpi-touchscreen.dtbo" | awk '{print $1}')" \
 		"$MIGRATION_DTBO_CHECKSUM" 'failure changed the prior DTBO'
 	assert_file_absent "$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.4"
+	assert_file_absent "$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.4"
 	assert_file_absent "$sandbox/boot/armbianEnv.txt.rockpi-rpi-touchscreen.bak"
 	assert_file_absent "$sandbox/boot/armbianEnv.txt.rockpi-rpi-touchscreen.bak.sha256"
 	[ -z "$(find "$sandbox/usr-src" -mindepth 1 -maxdepth 1 -type d \
 		\( -name '.rockpi-rpi-touchscreen.transaction.*' -o -name '.rockpi-rpi-touchscreen.stage.*' \) \
 		-print -quit)" ] || fail 'clean rollback retained private transaction state'
+}
+
+prepare_current_release_lifecycle()
+{
+	sandbox=$1
+	phase=$2
+	make_sandbox "$sandbox"
+	run_install "$sandbox" "$sandbox/validate-pass.sh"
+	rm -f "$sandbox/dkms-installed.state" "$sandbox/dkms-active.state"
+	find "$sandbox/modules/test-kernel" -type f \
+		\( -name 'rockpi_rk3399_display_compat.ko*' \
+		-o -name 'panel_rockpi_rpi_touchscreen.ko*' \
+		-o -name 'raspits_ft5426.ko*' \) -delete
+	case $phase in
+	added)
+		rm -f "$sandbox/dkms-built.state"
+		rm -rf "$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.4"
+		;;
+	built) ;;
+	*) fail "unknown current-release lifecycle fixture: $phase" ;;
+	esac
+}
+
+test_preexisting_current_added_and_built_lifecycles_are_restored()
+{
+	for phase in added built; do
+		sandbox=$workdir/current-baseline-$phase
+		prepare_current_release_lifecycle "$sandbox" "$phase"
+		status_before=$(sandbox_dkms_status "$sandbox" 0.2.4)
+		source_before=$(source_tree_digest "$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.4")
+		if [ "$phase" = built ]; then
+			build_before=$(source_tree_digest "$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.4")
+		fi
+		if MODINFO_PANEL_ALIAS='of:N*T*Craspits_ft5426' \
+			run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+			fail "installer accepted a late failure from a pre-existing $phase baseline"
+		fi
+		assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.4)" "$status_before" \
+			"failure did not restore exact pre-existing $phase lifecycle"
+		assert_equal "$(source_tree_digest "$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.4")" \
+			"$source_before" "failure changed pre-existing $phase source"
+		case $phase in
+		added)
+			assert_file_absent "$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.4"
+			;;
+		built)
+			assert_equal "$(source_tree_digest "$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.4")" \
+				"$build_before" 'failure changed pre-existing built artifacts'
+			;;
+		esac
+		grep -Eq 'rollback also failed|recovery artifacts retained' "$sandbox/output" &&
+			fail "pre-existing $phase baseline did not roll back cleanly"
+	done
+	printf 'PASS: pre-existing added and built 0.2.4 lifecycles restore exactly\n'
+}
+
+test_old_retirement_mutate_then_fail_restores_transaction()
+{
+	sandbox=$workdir/old-retirement-mutate-failure
+	make_sandbox "$sandbox"
+	seed_old_release "$sandbox"
+	capture_migration_baseline "$sandbox"
+	if DKMS_FAIL_OLD_REMOVE_AFTER_MUTATION=1 \
+		run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+		fail 'installer accepted old-release retirement that mutated state before failing'
+	fi
+	assert_clean_failed_migration_restored "$sandbox" "$sandbox/output"
+	! grep -Fq 'PASS: installed' "$sandbox/output" ||
+		fail 'failed old retirement printed install success'
+	printf 'PASS: mutate-then-fail old retirement restores the full migration transaction\n'
+}
+
+test_compressed_only_old_and_new_artifacts_migrate_successfully()
+{
+	sandbox=$workdir/compressed-only-migration
+	make_sandbox "$sandbox"
+	seed_old_release "$sandbox"
+	for module in panel_rockpi_rpi_touchscreen raspits_ft5426; do
+		built=$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.3/test-kernel/aarch64/module/$module.ko
+		installed=$sandbox/modules/test-kernel/updates/dkms/$module.ko
+		xz -c "$built" > "$built.xz"
+		gzip -c "$installed" > "$installed.gz"
+		rm -f "$built" "$installed"
+	done
+	DKMS_BUILD_COMPRESSION=xz DKMS_INSTALL_COMPRESSION=gz \
+		run_install "$sandbox" "$sandbox/validate-pass.sh"
+	assert_module_matches_build "$sandbox" 0.2.4 rockpi_rk3399_display_compat
+	assert_module_matches_build "$sandbox" 0.2.4 panel_rockpi_rpi_touchscreen
+	assert_module_matches_build "$sandbox" 0.2.4 raspits_ft5426
+	assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.3)" '' \
+		'compressed old release remained after migration'
+	printf 'PASS: compressed-only old and new DKMS artifacts migrate with content verification\n'
 }
 
 test_migration_removes_old_release_only_after_success_and_ordered_verification()
@@ -1325,6 +1535,11 @@ test_late_failure_after_dtbo_replacement_restores_previous_dtbo()
 	printf 'PASS: late failure after DTBO replacement restores prior artifact\n'
 }
 
+if [ -n "${TEST_FILTER:-}" ]; then
+	"$TEST_FILTER"
+	exit 0
+fi
+
 test_install_is_idempotent_and_preserves_unrelated_boot_text
 test_dkms_make_command_suppresses_automatic_kernelrelease
 test_uninstall_removes_only_project_token_and_dry_run_is_scoped
@@ -1347,8 +1562,12 @@ test_uninstall_each_module_remove_failure_restores_transaction
 test_uninstall_boot_config_failure_restores_transaction
 test_uninstall_dtbo_failure_restores_transaction
 test_uninstall_source_failure_restores_transaction
+test_shared_uninstall_assertion_rejects_rollback_failure_output
 test_uninstall_accepts_unregistered_dkms
 test_uninstall_refuses_unowned_unregistered_source
+test_preexisting_current_added_and_built_lifecycles_are_restored
+test_old_retirement_mutate_then_fail_restores_transaction
+test_compressed_only_old_and_new_artifacts_migrate_successfully
 test_migration_removes_old_release_only_after_success_and_ordered_verification
 test_each_new_module_build_install_and_checksum_failure_restores_old_release
 test_install_add_mutate_then_fail_restores_absent_baseline
