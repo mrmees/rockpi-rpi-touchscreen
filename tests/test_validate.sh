@@ -86,15 +86,48 @@ case $input in
 	else
 		dsi0_status='status = "disabled";'
 	fi
+	if [ "${MERGED_VARIANT:-valid}" = 'dsi0-output-graph' ]; then
+		dsi0_output_graph='ports {
+		port@1 {
+			endpoint {
+				remote-endpoint = <0x11>;
+			};
+		};
+	};'
+	else
+		dsi0_output_graph=
+	fi
+	if [ "${MERGED_VARIANT:-valid}" = 'missing-provider' ]; then
+		provider=
+	else
+		provider="rockpi-display-compat {
+		compatible = \"rockpi,rk3399-dsi1-rpi-touchscreen-compat\";
+		status = \"${PROVIDER_STATUS:-okay}\";
+		rockchip,dsi0 = <${PROVIDER_DSI0:-0x40}>;
+		rockchip,dsi1 = <${PROVIDER_DSI1:-0x41}>;
+		rockchip,grf = <${PROVIDER_GRF:-0x42}>;
+		rockchip,vopb = <${PROVIDER_VOPB:-0x43}>;
+		rockchip,vopl = <${PROVIDER_VOPL:-0x44}>;
+		phandle = <0x50>;
+	};"
+	fi
+	if [ "${MERGED_VARIANT:-valid}" = 'duplicate-provider' ]; then
+		duplicate_provider='duplicate-display-compat { compatible = "rockpi,rk3399-dsi1-rpi-touchscreen-compat"; status = "okay"; };'
+	else
+		duplicate_provider=
+	fi
 	cat > "$output" <<EOF_DTS
 dsi@ff960000 {
 	$dsi0_status
+	$dsi0_output_graph
 	child {
 		status = "okay";
 	};
+	phandle = <0x40>;
 };
 dsi@ff968000 {
 	status = "okay";
+	phandle = <0x41>;
 	port@1 {
 		endpoint {
 			phandle = <0x30>;
@@ -114,6 +147,7 @@ i2c@ff110000 {
 	panel@45 {
 		compatible = "${PANEL_COMPATIBLE:-rockpi,rpi-7inch-touchscreen-panel}";
 		reg = <0x45>;
+		rockpi,display-compat = <${PANEL_PROVIDER:-0x50}>;
 		port {
 			endpoint {
 				phandle = <0x11>;
@@ -126,9 +160,18 @@ i2c@ff110000 {
 		reg = <0x38>;
 		touchscreen-size-x = <0x320>;
 		touchscreen-size-y = <0x1e0>;
+		${TOUCH_INVERTED_X-touchscreen-inverted-x;}
+		${TOUCH_INVERTED_Y-touchscreen-inverted-y;}
 	};
 };
+syscon@ff770000 {
+	phandle = <0x42>;
+};
+vop@ff900000 {
+	phandle = <0x43>;
+};
 vop@ff8f0000 {
+	phandle = <0x44>;
 	endpoint@3 {
 		phandle = <0x10>;
 		remote-endpoint = <0x20>;
@@ -137,6 +180,8 @@ vop@ff8f0000 {
 hdmi@ff940000 {
 	status = "okay";
 };
+$provider
+$duplicate_provider
 EOF_DTS
 	[ -z "${DTC_MERGED_DIAGNOSTIC:-}" ] || printf '%s\n' "$DTC_MERGED_DIAGNOSTIC" >&2
 	;;
@@ -149,6 +194,9 @@ __symbols__ {
 	mipi1_in_vopb = "/dsi@ff968000/endpoint@0";
 	vopl_out_mipi1 = "/vop@ff8f0000/endpoint@3";
 	i2c1 = "/i2c@ff110000";
+	grf = "/syscon@ff770000";
+	vopb = "/vop@ff900000";
+	vopl = "/vop@ff8f0000";
 };
 EOF_DTS
 	[ -z "${DTC_BASE_DIAGNOSTIC:-}" ] || printf '%s\n' "$DTC_BASE_DIAGNOSTIC" >&2
@@ -263,6 +311,72 @@ test_nested_status_cannot_satisfy_direct_parent_check()
 	printf 'PASS: status checks require the direct parent\n'
 }
 
+test_provider_resources_and_touch_orientation_are_strict()
+{
+	for variant in missing-provider duplicate-provider; do
+		sandbox=$workdir/$variant
+		make_validate_sandbox "$sandbox"
+		if MERGED_VARIANT=$variant run_validate "$sandbox"; then
+			fail "validator accepted merged variant: $variant"
+		fi
+	done
+
+	for resource in dsi0 dsi1 grf vopb vopl; do
+		sandbox=$workdir/wrong-provider-$resource
+		make_validate_sandbox "$sandbox"
+		case $resource in
+		dsi0) accepted=PROVIDER_DSI0=0x99 ;;
+		dsi1) accepted=PROVIDER_DSI1=0x99 ;;
+		grf) accepted=PROVIDER_GRF=0x99 ;;
+		vopb) accepted=PROVIDER_VOPB=0x99 ;;
+		vopl) accepted=PROVIDER_VOPL=0x99 ;;
+		esac
+		if env "$accepted" BOOT_DIR="$sandbox/boot" MODULES_DIR="$sandbox/modules" \
+			KERNEL_RELEASE=test-kernel COMPATIBLE_FILE="$sandbox/compatible" \
+			BUILD_DIR="$sandbox/build" MAKE_LOG="$sandbox/make.log" \
+			MAKE_CC_LOG="$sandbox/make-cc.log" PATH="$sandbox/bin:$PATH" \
+			REPO_ROOT="$repo_root" sh "$repo_root/scripts/validate.sh" --offline; then
+			fail "validator accepted the wrong provider $resource phandle"
+		fi
+	done
+
+	sandbox=$workdir/disabled-provider
+	make_validate_sandbox "$sandbox"
+	if PROVIDER_STATUS=disabled run_validate "$sandbox"; then
+		fail 'validator accepted a disabled display compatibility provider'
+	fi
+
+	sandbox=$workdir/wrong-panel-provider
+	make_validate_sandbox "$sandbox"
+	if PANEL_PROVIDER=0x99 run_validate "$sandbox"; then
+		fail 'validator accepted the wrong panel provider back-reference'
+	fi
+
+	for axis in x y; do
+		sandbox=$workdir/missing-touch-inverted-$axis
+		make_validate_sandbox "$sandbox"
+		case $axis in
+		x)
+			if TOUCH_INVERTED_X= run_validate "$sandbox"; then
+				fail 'validator accepted missing touchscreen-inverted-x'
+			fi
+			;;
+		y)
+			if TOUCH_INVERTED_Y= run_validate "$sandbox"; then
+				fail 'validator accepted missing touchscreen-inverted-y'
+			fi
+			;;
+		esac
+	done
+
+	sandbox=$workdir/dsi0-output-graph
+	make_validate_sandbox "$sandbox"
+	if MERGED_VARIANT=dsi0-output-graph run_validate "$sandbox"; then
+		fail 'validator accepted a DSI0 output graph'
+	fi
+	printf 'PASS: provider resources, panel link, touch orientation, and DSI0 graph are strict\n'
+}
+
 test_validator_atomically_replaces_read_only_dtbo()
 {
 	sandbox=$workdir/read-only-dtbo
@@ -346,6 +460,7 @@ test_unexpected_base_dtb_warning_fails_validation
 test_documented_base_dtb_diagnostics_are_filtered
 test_validate_uses_kernel_build_for_clean_and_scoped_merged_tree_checks
 test_nested_status_cannot_satisfy_direct_parent_check
+test_provider_resources_and_touch_orientation_are_strict
 test_validator_atomically_replaces_read_only_dtbo
 test_validate_uses_the_kernel_recorded_compiler
 test_versioned_compiler_is_shimmed_to_the_kernel_recorded_name

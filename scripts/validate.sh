@@ -127,6 +127,24 @@ require_direct_property()
 	[ "$actual" = "$expected" ] || die "$message (got ${actual:-missing}, expected $expected)"
 }
 
+require_direct_boolean()
+{
+	text=$1
+	property=$2
+	message=$3
+	printf '%s\n' "$text" | awk -v property="$property" '
+		{
+			line = $0
+			if (depth == 1 && line ~ "^[[:space:]]*" property "[[:space:]]*;[[:space:]]*$")
+				found = 1
+			opens = gsub(/\{/, "{", line)
+			closes = gsub(/\}/, "}", line)
+			depth += opens - closes
+		}
+		END { exit found ? 0 : 1 }
+	' || die "$message"
+}
+
 property_phandle()
 {
 	property=$1
@@ -167,7 +185,7 @@ printf 'PASS: both module builds and metadata\n'
 dtb=$(active_dtb)
 [ -f "$dtb" ] || die "active DTB not found: $dtb"
 run_dtb_decompile base-dtb "$dtb" "$workdir/base.dts"
-for symbol in mipi_dsi1 mipi1_in_vopl mipi1_in_vopb vopl_out_mipi1 i2c1; do
+for symbol in mipi_dsi mipi_dsi1 mipi1_in_vopl mipi1_in_vopb vopl_out_mipi1 i2c1 grf vopb vopl; do
 	grep -Eq "^[[:space:]]*$symbol[[:space:]]*=" "$workdir/base.dts" || die "active DTB is missing symbol: $symbol"
 done
 printf 'PASS: active DTB symbols\n'
@@ -187,23 +205,48 @@ printf 'PASS: overlay apply\n'
 dsi0=$(node_from_file "$workdir/merged.dts" 'dsi@ff960000')
 dsi1=$(node_from_file "$workdir/merged.dts" 'dsi@ff968000')
 i2c1=$(node_from_file "$workdir/merged.dts" 'i2c@ff110000')
+grf=$(node_from_file "$workdir/merged.dts" 'syscon@ff770000')
+vopb=$(node_from_file "$workdir/merged.dts" 'vop@ff900000')
 vopl=$(node_from_file "$workdir/merged.dts" 'vop@ff8f0000')
 hdmi=$(node_from_file "$workdir/merged.dts" 'hdmi@ff940000')
+provider_count=$(grep -Fc 'compatible = "rockpi,rk3399-dsi1-rpi-touchscreen-compat";' "$workdir/merged.dts" || true)
+[ "$provider_count" -eq 1 ] || die "merged tree has $provider_count display compatibility providers, expected 1"
+provider=$(node_from_file "$workdir/merged.dts" 'rockpi-display-compat')
 panel=$(printf '%s\n' "$i2c1" | extract_named_node 'panel@45')
 touch=$(printf '%s\n' "$i2c1" | extract_named_node 'touchscreen@38')
 
 require_direct_property "$dsi0" status '"disabled"' 'unused merged DSI0 is not disabled'
 require_direct_property "$dsi1" status '"okay"' 'merged DSI1 is not enabled'
-printf 'PASS: unused DSI0 disabled and DSI1 enabled\n'
+# The stock tree retains DSI0 input endpoints; reject an output endpoint that
+# would attach a panel while allowing those disabled-host input descriptions.
+if dsi0_output_port=$(printf '%s\n' "$dsi0" | extract_named_node 'port@1' 2>/dev/null); then
+	if printf '%s\n' "$dsi0_output_port" | grep -Eq '^[[:space:]]*endpoint(@[^[:space:]{]+)?[[:space:]]*\{'; then
+		die 'unused merged DSI0 has an output graph'
+	fi
+fi
+printf 'PASS: unused DSI0 disabled without an output graph and DSI1 enabled\n'
+
+require_direct_property "$provider" compatible '"rockpi,rk3399-dsi1-rpi-touchscreen-compat"' 'merged display compatibility provider is missing its compatible'
+require_direct_property "$provider" status '"okay"' 'merged display compatibility provider is not enabled'
+require_equal "$(printf '%s\n' "$provider" | property_phandle rockchip,dsi0)" "$(printf '%s\n' "$dsi0" | property_phandle phandle)" 'display compatibility provider DSI0 phandle is wrong'
+require_equal "$(printf '%s\n' "$provider" | property_phandle rockchip,dsi1)" "$(printf '%s\n' "$dsi1" | property_phandle phandle)" 'display compatibility provider DSI1 phandle is wrong'
+require_equal "$(printf '%s\n' "$provider" | property_phandle rockchip,grf)" "$(printf '%s\n' "$grf" | property_phandle phandle)" 'display compatibility provider GRF phandle is wrong'
+require_equal "$(printf '%s\n' "$provider" | property_phandle rockchip,vopb)" "$(printf '%s\n' "$vopb" | property_phandle phandle)" 'display compatibility provider big-VOP phandle is wrong'
+require_equal "$(printf '%s\n' "$provider" | property_phandle rockchip,vopl)" "$(printf '%s\n' "$vopl" | property_phandle phandle)" 'display compatibility provider little-VOP phandle is wrong'
+printf 'PASS: display compatibility provider resources\n'
+
 require_text "$panel" 'compatible = "rockpi,rpi-7inch-touchscreen-panel";' 'merged project panel compatible is missing'
 if printf '%s\n' "$panel" | grep -Fq 'compatible = "raspberrypi,7inch-touchscreen-panel";'; then
 	die 'merged tree retains the upstream panel compatible'
 fi
 require_text "$panel" 'reg = <0x45>;' 'merged panel address is missing'
+require_equal "$(printf '%s\n' "$panel" | property_phandle rockpi,display-compat)" "$(printf '%s\n' "$provider" | property_phandle phandle)" 'merged panel display compatibility provider link is wrong'
 require_text "$touch" 'compatible = "raspits_ft5426";' 'merged touch compatible is missing'
 require_text "$touch" 'reg = <0x38>;' 'merged touch address is missing'
 require_text "$touch" 'touchscreen-size-x = <0x320>;' 'merged touch X size is missing'
 require_text "$touch" 'touchscreen-size-y = <0x1e0>;' 'merged touch Y size is missing'
+require_direct_boolean "$touch" touchscreen-inverted-x 'merged touch X inversion is missing'
+require_direct_boolean "$touch" touchscreen-inverted-y 'merged touch Y inversion is missing'
 printf 'PASS: I2C1 panel and touch nodes\n'
 
 vopl_endpoint=$(printf '%s\n' "$vopl" | extract_named_node 'endpoint@3')
@@ -219,7 +262,7 @@ panel_port=$(printf '%s\n' "$panel" | extract_named_node 'port')
 panel_input=$(printf '%s\n' "$panel_port" | extract_named_node 'endpoint')
 require_equal "$(printf '%s\n' "$dsi1_output" | property_phandle remote-endpoint)" "$(printf '%s\n' "$panel_input" | property_phandle phandle)" 'DSI1 output does not connect to panel input'
 require_equal "$(printf '%s\n' "$panel_input" | property_phandle remote-endpoint)" "$(printf '%s\n' "$dsi1_output" | property_phandle phandle)" 'panel input does not connect back to DSI1 output'
-printf 'PASS: little-VOP to DSI1 to panel graph\n'
+printf 'PASS: DSI1 graph prefers little VOP and connects to panel\n'
 
 require_direct_property "$hdmi" status '"okay"' 'merged tree does not preserve HDMI'
 printf 'PASS: HDMI unchanged\n'

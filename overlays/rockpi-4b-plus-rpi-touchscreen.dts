@@ -3,10 +3,27 @@
 
 /*
  * Rock Pi 4B+ support for the original Raspberry Pi 7-inch Touch Display.
- * Video is routed through the little VOP to DSI1; the unused DSI0 host must
- * remain disabled so it does not block the shared Rockchip DRM component.
- * The panel and touch controllers share I2C1.
+ * The graph endpoint statuses prefer the little VOP for DSI1; the display
+ * compatibility provider follows the live DSI1 GRF route. The unused DSI0
+ * host remains disabled and supplies only clocks/PHY resources to the
+ * provider. The panel and touch controllers share I2C1.
  */
+
+&{/} {
+	rockpi_display_compat: rockpi-display-compat {
+		compatible = "rockpi,rk3399-dsi1-rpi-touchscreen-compat";
+		rockchip,dsi0 = <&mipi_dsi>;
+		rockchip,dsi1 = <&mipi_dsi1>;
+		rockchip,grf = <&grf>;
+		rockchip,vopb = <&vopb>;
+		rockchip,vopl = <&vopl>;
+		status = "okay";
+	};
+};
+
+&mipi_dsi {
+	status = "disabled";
+};
 
 &mipi_dsi1 {
 	status = "okay";
@@ -44,6 +61,7 @@
 	panel@45 {
 		compatible = "rockpi,rpi-7inch-touchscreen-panel";
 		reg = <0x45>;
+		rockpi,display-compat = <&rockpi_display_compat>;
 
 		port {
 			panel_in_dsi: endpoint {
@@ -57,5 +75,7 @@
 		reg = <0x38>;
 		touchscreen-size-x = <800>;
 		touchscreen-size-y = <480>;
+		touchscreen-inverted-x;
+		touchscreen-inverted-y;
 	};
 };

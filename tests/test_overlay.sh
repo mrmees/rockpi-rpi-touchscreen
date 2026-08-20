@@ -126,20 +126,62 @@ assert_active_dtb_resolution
 }
 
 dtc -@ -I dts -O dtb -o "$output" "$overlay"
+dtc -I dtb -O dts -o "$workdir/compiled.dts" "$output"
 fdtoverlay -i "$dtb" -o "$workdir/merged.dtb" "$output"
 dtc -I dtb -O dts -o "$workdir/merged.dts" "$workdir/merged.dtb"
+
+compiled_provider=$(node_from_file "$workdir/compiled.dts" 'rockpi-display-compat') || {
+	printf 'FAIL: compiled overlay is missing the display compatibility provider\n' >&2
+	exit 1
+}
+compiled_panel=$(node_from_file "$workdir/compiled.dts" 'panel@45')
+compiled_touch=$(node_from_file "$workdir/compiled.dts" 'touchscreen@38')
+require_text "$compiled_provider" 'compatible = "rockpi,rk3399-dsi1-rpi-touchscreen-compat";' 'compiled provider compatible'
+require_equal "$(grep -Fc 'compatible = "rockpi,rk3399-dsi1-rpi-touchscreen-compat";' "$workdir/compiled.dts")" \
+	'1' 'compiled overlay has exactly one display compatibility provider'
+require_text "$compiled_provider" 'status = "okay";' 'compiled provider is enabled'
+for property in rockchip,dsi0 rockchip,dsi1 rockchip,grf rockchip,vopb rockchip,vopl; do
+	require_text "$compiled_provider" "$property = <" "compiled provider property $property"
+done
+require_text "$compiled_panel" 'rockpi,display-compat = <' 'compiled panel provider link'
+require_text "$compiled_touch" 'touchscreen-inverted-x;' 'compiled touch X inversion'
+require_text "$compiled_touch" 'touchscreen-inverted-y;' 'compiled touch Y inversion'
+printf 'PASS: compiled provider and consumer properties\n'
 
 dsi0=$(node_from_file "$workdir/merged.dts" 'dsi@ff960000')
 dsi1=$(node_from_file "$workdir/merged.dts" 'dsi@ff968000')
 i2c1=$(node_from_file "$workdir/merged.dts" 'i2c@ff110000')
+grf=$(node_from_file "$workdir/merged.dts" 'syscon@ff770000')
+vopb=$(node_from_file "$workdir/merged.dts" 'vop@ff900000')
 vopl=$(node_from_file "$workdir/merged.dts" 'vop@ff8f0000')
 hdmi=$(node_from_file "$workdir/merged.dts" 'hdmi@ff940000')
+provider=$(node_from_file "$workdir/merged.dts" 'rockpi-display-compat')
 panel=$(printf '%s\n' "$i2c1" | extract_named_node 'panel@45')
 touch=$(printf '%s\n' "$i2c1" | extract_named_node 'touchscreen@38')
 
 require_text "$dsi0" 'status = "disabled";' 'unused DSI0 remains disabled'
 require_text "$dsi1" 'status = "okay";' 'DSI1 is enabled'
-printf 'PASS: unused DSI0 disabled and DSI1 enabled\n'
+dsi0_output_port=$(printf '%s\n' "$dsi0" | extract_named_node 'port@1')
+if printf '%s\n' "$dsi0_output_port" | grep -Eq '^[[:space:]]*endpoint(@[^[:space:]{]+)?[[:space:]]*\{'; then
+	printf 'FAIL: unused DSI0 has an output endpoint\n' >&2
+	exit 1
+fi
+printf 'PASS: unused DSI0 disabled without an output graph and DSI1 enabled\n'
+
+require_equal "$(grep -Fc 'compatible = "rockpi,rk3399-dsi1-rpi-touchscreen-compat";' "$workdir/merged.dts")" \
+	'1' 'merged tree has exactly one display compatibility provider'
+require_text "$provider" 'status = "okay";' 'display compatibility provider is enabled'
+require_equal "$(printf '%s\n' "$provider" | property_phandle rockchip,dsi0)" \
+	"$(printf '%s\n' "$dsi0" | property_phandle phandle)" 'provider DSI0 resource'
+require_equal "$(printf '%s\n' "$provider" | property_phandle rockchip,dsi1)" \
+	"$(printf '%s\n' "$dsi1" | property_phandle phandle)" 'provider DSI1 resource'
+require_equal "$(printf '%s\n' "$provider" | property_phandle rockchip,grf)" \
+	"$(printf '%s\n' "$grf" | property_phandle phandle)" 'provider GRF resource'
+require_equal "$(printf '%s\n' "$provider" | property_phandle rockchip,vopb)" \
+	"$(printf '%s\n' "$vopb" | property_phandle phandle)" 'provider big-VOP resource'
+require_equal "$(printf '%s\n' "$provider" | property_phandle rockchip,vopl)" \
+	"$(printf '%s\n' "$vopl" | property_phandle phandle)" 'provider little-VOP resource'
+printf 'PASS: enabled display compatibility provider resources\n'
 
 require_text "$panel" 'compatible = "rockpi,rpi-7inch-touchscreen-panel";' 'project panel compatible'
 if printf '%s\n' "$panel" | grep -Fq 'compatible = "raspberrypi,7inch-touchscreen-panel";'; then
@@ -147,13 +189,17 @@ if printf '%s\n' "$panel" | grep -Fq 'compatible = "raspberrypi,7inch-touchscree
 	exit 1
 fi
 require_text "$panel" 'reg = <0x45>;' 'panel address 0x45'
+require_equal "$(printf '%s\n' "$panel" | property_phandle rockpi,display-compat)" \
+	"$(printf '%s\n' "$provider" | property_phandle phandle)" 'panel display compatibility provider link'
 printf 'PASS: panel at 0x45\n'
 
 require_text "$touch" 'compatible = "raspits_ft5426";' 'touch compatible'
 require_text "$touch" 'reg = <0x38>;' 'touch address 0x38'
 require_text "$touch" 'touchscreen-size-x = <0x320>;' 'touch X size'
 require_text "$touch" 'touchscreen-size-y = <0x1e0>;' 'touch Y size'
-printf 'PASS: touch at 0x38\n'
+require_text "$touch" 'touchscreen-inverted-x;' 'touch X inversion'
+require_text "$touch" 'touchscreen-inverted-y;' 'touch Y inversion'
+printf 'PASS: inverted touch at 0x38\n'
 
 vopl_endpoint=$(printf '%s\n' "$vopl" | extract_named_node 'endpoint@3')
 dsi1_vopb_input=$(printf '%s\n' "$dsi1" | extract_named_node 'endpoint@0')
