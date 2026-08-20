@@ -78,6 +78,10 @@ write_build_artifact()
 	none) ;;
 	xz) xz -c "$raw" > "$raw.xz"; rm -f "$raw" ;;
 	gz) gzip -c "$raw" > "$raw.gz"; rm -f "$raw" ;;
+	zst)
+		{ printf '%s\n' 'FAKE-ZSTD'; cat "$raw"; } > "$raw.zst"
+		rm -f "$raw"
+		;;
 	*) exit 43 ;;
 	esac
 }
@@ -194,6 +198,9 @@ remove_version_records()
 				exit 25
 			fi
 		done
+		if [ "$version" = 0.2.3 ]; then
+			: > "${DKMS_OLD_REINSTALL_MARKER:?}"
+		fi
 		if [ "$version" = 0.2.3 ] && [ -n "${DKMS_CORRUPT_OLD_REINSTALL_MODULE:-}" ]; then
 			printf '%s\n' corrupt-old-reinstall > \
 				"${DKMS_STATE_DIR:?}/rockpi-rpi-touchscreen/$version/$kernel/$arch/module/${DKMS_CORRUPT_OLD_REINSTALL_MODULE}.ko"
@@ -337,6 +344,11 @@ if [ -z "$field" ]; then
 		\( -name "$module.ko" -o -name "$module.ko.xz" -o -name "$module.ko.gz" \
 		-o -name "$module.ko.zst" \) -print | head -n 1)
 	[ -n "$module_path" ] && [ -f "$module_path" ] || exit 1
+	if [ -n "${DKMS_CORRUPT_COMPRESSED_OLD_ROLLBACK_MODULE:-}" ] &&
+		[ "$module" = "$DKMS_CORRUPT_COMPRESSED_OLD_ROLLBACK_MODULE" ] &&
+		[ -f "${DKMS_OLD_REINSTALL_MARKER:?}" ]; then
+		printf '%s\n' corrupt-compressed-old-installed > "$module_path"
+	fi
 	printf '%s\n' "$module_path"
 	exit 0
 fi
@@ -359,6 +371,21 @@ fi
 esac
 EOF
 	chmod +x "$sandbox/bin/modinfo"
+	cat > "$sandbox/bin/zstd" <<'EOF'
+#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "${ZSTD_LOG:?}"
+input=
+for argument do
+	case $argument in
+	-*) ;;
+	*) input=$argument ;;
+	esac
+done
+[ -n "$input" ] && [ "$(sed -n '1p' "$input")" = 'FAKE-ZSTD' ] || exit 47
+sed -n '2,$p' "$input"
+EOF
+	chmod +x "$sandbox/bin/zstd"
 	cat > "$sandbox/bin/id" <<'EOF'
 #!/bin/sh
 if [ "$#" -eq 1 ] && [ "$1" = '-u' ]; then
@@ -446,6 +473,11 @@ if [ "$old_state_restore" -eq 1 ] && [ -n "${DKMS_CORRUPT_OLD_REINSTALL_MODULE:-
 	printf '%s\n' corrupt-old-state-restore > \
 		"$destination_file/test-kernel/aarch64/module/${DKMS_CORRUPT_OLD_REINSTALL_MODULE}.ko"
 fi
+if [ "$old_state_restore" -eq 1 ] &&
+	[ -n "${DKMS_CORRUPT_COMPRESSED_OLD_ROLLBACK_MODULE:-}" ]; then
+	printf '%s\n' corrupt-compressed-old-build > \
+		"$destination_file/test-kernel/aarch64/module/${DKMS_CORRUPT_COMPRESSED_OLD_ROLLBACK_MODULE}.ko.xz"
+fi
 EOF
 	chmod +x "$sandbox/bin/cp"
 	cat > "$sandbox/bin/rm" <<'EOF'
@@ -501,8 +533,10 @@ run_install()
 	DKMS_INSTALLED_STATE="$sandbox/dkms-installed.state" DKMS_ACTIVE_STATE="$sandbox/dkms-active.state" \
 		DKMS_REMOVE_MARKER="$sandbox/dkms-remove.marker" DKMS_STATUS_FAILED_MARKER="$sandbox/dkms-status-failed.marker" \
 		DKMS_OLD_REMOVE_FAILED_MARKER="$sandbox/dkms-old-remove-failed.marker" \
+		DKMS_OLD_REINSTALL_MARKER="$sandbox/dkms-old-reinstall.marker" \
 		DKMS_NEW_ACTIVE_VERIFIED_MARKER="$sandbox/dkms-new-active-verified.marker" \
 		DKMS_MODULE_LOG="$sandbox/dkms-module.log" SHA256_LOG="$sandbox/sha256.log" \
+		ZSTD_LOG="$sandbox/zstd.log" \
 		DKMS_STATE_DIR="$sandbox/var-lib-dkms" \
 		ARCH=aarch64 MV_LOG="$sandbox/mv.log" PATH="$sandbox/bin:$PATH" \
 		sh "$repo_root/scripts/install.sh" "$@" || status=$?
@@ -525,19 +559,55 @@ assert_module_matches_build()
 		-o -name "$module.ko.zst" \) -print | head -n 1)
 	[ -n "$built" ] && [ -f "$built" ] || fail "missing built module: $module"
 	[ -n "$installed" ] && [ -f "$installed" ] || fail "missing installed module: $module"
-	assert_equal "$(module_content_checksum "$built")" "$(module_content_checksum "$installed")" \
+	if ! built_checksum=$(module_content_checksum "$built"); then
+		fail "cannot checksum built module: $module"
+	fi
+	if ! installed_checksum=$(module_content_checksum "$installed"); then
+		fail "cannot checksum installed module: $module"
+	fi
+	assert_equal "$built_checksum" "$installed_checksum" \
 		"installed module differs from DKMS build: $module"
 }
 
 module_content_checksum()
 {
 	module_file=$1
+	checksum_input=$module_file
+	checksum_temporary=
 	case $module_file in
-	*.ko.xz) xz -dc "$module_file" | /usr/bin/sha256sum | awk '{print $1}' ;;
-	*.ko.gz) gzip -dc "$module_file" | /usr/bin/sha256sum | awk '{print $1}' ;;
-	*.ko.zst) zstd -q -dc "$module_file" | /usr/bin/sha256sum | awk '{print $1}' ;;
-	*) /usr/bin/sha256sum "$module_file" | awk '{print $1}' ;;
+	*.ko.xz)
+		checksum_temporary=$(mktemp)
+		xz -dc "$module_file" > "$checksum_temporary" || {
+			rm -f "$checksum_temporary"
+			return 1
+		}
+		checksum_input=$checksum_temporary
+		;;
+	*.ko.gz)
+		checksum_temporary=$(mktemp)
+		gzip -dc "$module_file" > "$checksum_temporary" || {
+			rm -f "$checksum_temporary"
+			return 1
+		}
+		checksum_input=$checksum_temporary
+		;;
+	*.ko.zst)
+		checksum_temporary=$(mktemp)
+		zstd -q -dc "$module_file" > "$checksum_temporary" || {
+			rm -f "$checksum_temporary"
+			return 1
+		}
+		checksum_input=$checksum_temporary
+		;;
 	esac
+	if ! checksum_record=$(/usr/bin/sha256sum "$checksum_input"); then
+		[ -z "$checksum_temporary" ] || rm -f "$checksum_temporary"
+		return 1
+	fi
+	checksum=${checksum_record%% *}
+	[ -z "$checksum_temporary" ] || rm -f "$checksum_temporary"
+	[ -n "$checksum" ] || return 1
+	printf '%s\n' "$checksum"
 }
 
 sandbox_dkms_status()
@@ -1103,6 +1173,18 @@ EOF
 	printf '%s\n' 'prior-dtbo' > "$sandbox/boot/overlay-user/rockpi-4b-plus-rpi-touchscreen.dtbo"
 }
 
+compress_old_release_artifacts()
+{
+	sandbox=$1
+	for module in panel_rockpi_rpi_touchscreen raspits_ft5426; do
+		built=$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.3/test-kernel/aarch64/module/$module.ko
+		installed=$sandbox/modules/test-kernel/updates/dkms/$module.ko
+		xz -c "$built" > "$built.xz"
+		gzip -c "$installed" > "$installed.gz"
+		rm -f "$built" "$installed"
+	done
+}
+
 source_tree_digest()
 {
 	(
@@ -1234,13 +1316,7 @@ test_compressed_only_old_and_new_artifacts_migrate_successfully()
 	sandbox=$workdir/compressed-only-migration
 	make_sandbox "$sandbox"
 	seed_old_release "$sandbox"
-	for module in panel_rockpi_rpi_touchscreen raspits_ft5426; do
-		built=$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.3/test-kernel/aarch64/module/$module.ko
-		installed=$sandbox/modules/test-kernel/updates/dkms/$module.ko
-		xz -c "$built" > "$built.xz"
-		gzip -c "$installed" > "$installed.gz"
-		rm -f "$built" "$installed"
-	done
+	compress_old_release_artifacts "$sandbox"
 	DKMS_BUILD_COMPRESSION=xz DKMS_INSTALL_COMPRESSION=gz \
 		run_install "$sandbox" "$sandbox/validate-pass.sh"
 	assert_module_matches_build "$sandbox" 0.2.4 rockpi_rk3399_display_compat
@@ -1249,6 +1325,94 @@ test_compressed_only_old_and_new_artifacts_migrate_successfully()
 	assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.3)" '' \
 		'compressed old release remained after migration'
 	printf 'PASS: compressed-only old and new DKMS artifacts migrate with content verification\n'
+}
+
+test_corrupt_compressed_old_preflight_fails_closed()
+{
+	sandbox=$workdir/corrupt-compressed-old-preflight
+	make_sandbox "$sandbox"
+	seed_old_release "$sandbox"
+	compress_old_release_artifacts "$sandbox"
+	printf '%s\n' corrupt-xz > \
+		"$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.3/test-kernel/aarch64/module/panel_rockpi_rpi_touchscreen.ko.xz"
+	printf '%s\n' corrupt-gzip > \
+		"$sandbox/modules/test-kernel/updates/dkms/panel_rockpi_rpi_touchscreen.ko.gz"
+	if run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+		fail 'installer accepted two failed old compressed checksum operations as equal'
+	fi
+	grep -Fq 'cannot verify old DKMS-built panel_rockpi_rpi_touchscreen module content' \
+		"$sandbox/output" || fail 'installer did not report the corrupt compressed old build artifact'
+	assert_file_absent "$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.4"
+	assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.3)" \
+		'rockpi-rpi-touchscreen/0.2.3, test-kernel, aarch64: installed' \
+		'corrupt compressed preflight changed the old lifecycle'
+	printf 'PASS: corrupt compressed old preflight fails closed before mutation\n'
+}
+
+test_corrupt_compressed_old_rollback_verification_is_reported()
+{
+	sandbox=$workdir/corrupt-compressed-old-rollback
+	make_sandbox "$sandbox"
+	seed_old_release "$sandbox"
+	compress_old_release_artifacts "$sandbox"
+	if DKMS_FAIL_INSTALL_MODULE=raspits_ft5426 \
+		DKMS_CORRUPT_COMPRESSED_OLD_ROLLBACK_MODULE=panel_rockpi_rpi_touchscreen \
+		run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+		fail 'installer accepted a new install failure with corrupt compressed old rollback artifacts'
+	fi
+	grep -Fq 'old installed panel_rockpi_rpi_touchscreen checksum restoration failed' \
+		"$sandbox/output" || fail 'rollback swallowed corrupt compressed old checksum operations'
+	grep -Fq 'rollback also failed' "$sandbox/output" ||
+		fail 'corrupt compressed old rollback did not report incomplete restoration'
+	recovery=$(find "$sandbox/usr-src" -mindepth 1 -maxdepth 1 -type d \
+		-name '.rockpi-rpi-touchscreen.transaction.*' -print -quit)
+	[ -n "$recovery" ] || fail 'corrupt compressed rollback discarded recovery artifacts'
+	grep -Fq "recovery artifacts retained at $recovery" "$sandbox/output" ||
+		fail 'corrupt compressed rollback did not report its recovery directory'
+	[ -f "$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.3/dkms.conf" ] ||
+		fail 'corrupt compressed rollback removed the faithful old source'
+	printf 'PASS: corrupt compressed old rollback verification fails closed and retains recovery\n'
+}
+
+test_zstd_dispatch_and_checksum_failure_propagation()
+{
+	sandbox=$workdir/zstd-dispatch
+	make_sandbox "$sandbox"
+	for suffix in xz gz; do
+		corrupt=$sandbox/corrupt.ko.$suffix
+		printf '%s\n' "corrupt-$suffix" > "$corrupt"
+		if module_content_checksum "$corrupt" > "$sandbox/output" 2>&1; then
+			fail "test checksum helper masked a $suffix decompressor failure"
+		fi
+	done
+	corrupt=$sandbox/corrupt.ko.zst
+	printf '%s\n' corrupt-zstd > "$corrupt"
+	if PATH="$sandbox/bin:$PATH" ZSTD_LOG="$sandbox/zstd.log" \
+		module_content_checksum "$corrupt" > "$sandbox/output" 2>&1; then
+		fail 'test checksum helper masked a zstd decompressor failure'
+	fi
+	grep -Fq -- "-q -dc $corrupt" "$sandbox/zstd.log" ||
+		fail 'zstd suffix did not dispatch to the zstd decompressor'
+	printf 'PASS: zstd dispatch is deterministic and decompressor failures propagate\n'
+}
+
+test_zstd_only_new_artifacts_are_verified()
+{
+	sandbox=$workdir/zstd-only-new
+	make_sandbox "$sandbox"
+	DKMS_BUILD_COMPRESSION=zst DKMS_INSTALL_COMPRESSION=same \
+		run_install "$sandbox" "$sandbox/validate-pass.sh"
+	for module in rockpi_rk3399_display_compat panel_rockpi_rpi_touchscreen raspits_ft5426; do
+		[ -f "$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.4/test-kernel/aarch64/module/$module.ko.zst" ] ||
+			fail "missing zstd-only DKMS build artifact: $module"
+		[ -f "$sandbox/modules/test-kernel/updates/dkms/$module.ko.zst" ] ||
+			fail "missing zstd-only installed artifact: $module"
+		PATH="$sandbox/bin:$PATH" ZSTD_LOG="$sandbox/zstd.log" \
+			assert_module_matches_build "$sandbox" 0.2.4 "$module"
+	done
+	[ "$(wc -l < "$sandbox/zstd.log")" -ge 12 ] ||
+		fail 'zstd-only verification did not decompress every built and installed module'
+	printf 'PASS: zstd-only new artifacts dispatch and verify all three module contents\n'
 }
 
 test_migration_removes_old_release_only_after_success_and_ordered_verification()
@@ -1568,6 +1732,10 @@ test_uninstall_refuses_unowned_unregistered_source
 test_preexisting_current_added_and_built_lifecycles_are_restored
 test_old_retirement_mutate_then_fail_restores_transaction
 test_compressed_only_old_and_new_artifacts_migrate_successfully
+test_corrupt_compressed_old_preflight_fails_closed
+test_corrupt_compressed_old_rollback_verification_is_reported
+test_zstd_dispatch_and_checksum_failure_propagation
+test_zstd_only_new_artifacts_are_verified
 test_migration_removes_old_release_only_after_success_and_ordered_verification
 test_each_new_module_build_install_and_checksum_failure_restores_old_release
 test_install_add_mutate_then_fail_restores_absent_baseline

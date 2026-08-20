@@ -18,7 +18,7 @@ module_content_checksum()
 		checksum_temporary=$(mktemp)
 		if ! xz -dc "$module_file" > "$checksum_temporary"; then
 			rm -f "$checksum_temporary"
-			die "cannot decompress DKMS module artifact: $module_file"
+			return 1
 		fi
 		checksum_input=$checksum_temporary
 		;;
@@ -27,7 +27,7 @@ module_content_checksum()
 		checksum_temporary=$(mktemp)
 		if ! gzip -dc "$module_file" > "$checksum_temporary"; then
 			rm -f "$checksum_temporary"
-			die "cannot decompress DKMS module artifact: $module_file"
+			return 1
 		fi
 		checksum_input=$checksum_temporary
 		;;
@@ -36,13 +36,18 @@ module_content_checksum()
 		checksum_temporary=$(mktemp)
 		if ! zstd -q -dc "$module_file" > "$checksum_temporary"; then
 			rm -f "$checksum_temporary"
-			die "cannot decompress DKMS module artifact: $module_file"
+			return 1
 		fi
 		checksum_input=$checksum_temporary
 		;;
 	esac
-	checksum=$(sha256sum "$checksum_input" | awk '{print $1}')
+	if ! checksum_record=$(sha256sum "$checksum_input"); then
+		[ -z "$checksum_temporary" ] || rm -f "$checksum_temporary"
+		return 1
+	fi
+	checksum=${checksum_record%% *}
 	[ -z "$checksum_temporary" ] || rm -f "$checksum_temporary"
+	[ -n "$checksum" ] || return 1
 	printf '%s\n' "$checksum"
 }
 
@@ -131,8 +136,13 @@ if [ "$old_was_installed" -eq 1 ]; then
 		old_installed_baseline=$(modinfo -k "$KERNEL_RELEASE" -n "$module_name" 2>/dev/null || true)
 		[ -n "$old_built_baseline" ] && [ -f "$old_installed_baseline" ] ||
 			die "old installed $module_name module does not match its DKMS build; refusing migration"
-		[ "$(module_content_checksum "$old_built_baseline")" = \
-			"$(module_content_checksum "$old_installed_baseline")" ] ||
+		if ! old_built_checksum=$(module_content_checksum "$old_built_baseline"); then
+			die "cannot verify old DKMS-built $module_name module content"
+		fi
+		if ! old_installed_checksum=$(module_content_checksum "$old_installed_baseline"); then
+			die "cannot verify old installed $module_name module content"
+		fi
+		[ "$old_built_checksum" = "$old_installed_checksum" ] ||
 			die "old installed $module_name module does not match its DKMS build; refusing migration"
 	done
 fi
@@ -339,12 +349,20 @@ rollback()
 				rollback_note="$rollback_note old DKMS lifecycle restoration failed (expected: ${old_status:-absent}; got: ${restored_old_status:-unavailable});"
 			elif [ "$old_was_installed" -eq 1 ]; then
 				for module_name in $OLD_MODULE_NAMES; do
+					old_checksum_restoration_failed=0
 					old_built_module=$(find_dkms_module_artifact \
 						"$dkms_state_root/$PROJECT_NAME/$old_version/$KERNEL_RELEASE" "$module_name")
 					old_installed_module=$(modinfo -k "$KERNEL_RELEASE" -n "$module_name" 2>/dev/null || true)
-					if [ -z "$old_built_module" ] || [ ! -f "$old_installed_module" ] ||
-						[ "$(module_content_checksum "$old_built_module")" != \
-						"$(module_content_checksum "$old_installed_module")" ]; then
+					if [ -z "$old_built_module" ] || [ ! -f "$old_installed_module" ]; then
+						old_checksum_restoration_failed=1
+					elif ! old_built_checksum=$(module_content_checksum "$old_built_module"); then
+						old_checksum_restoration_failed=1
+					elif ! old_installed_checksum=$(module_content_checksum "$old_installed_module"); then
+						old_checksum_restoration_failed=1
+					elif [ "$old_built_checksum" != "$old_installed_checksum" ]; then
+						old_checksum_restoration_failed=1
+					fi
+					if [ "$old_checksum_restoration_failed" -eq 1 ]; then
 						rollback_failed=1
 						rollback_note="$rollback_note old installed $module_name checksum restoration failed;"
 					fi
@@ -483,8 +501,12 @@ for module_name in $MODULE_NAMES; do
 	[ -n "$built_module" ] || die "cannot locate the DKMS-built $module_name module"
 	installed_module=$(modinfo -k "$KERNEL_RELEASE" -n "$module_name")
 	[ -f "$installed_module" ] || die "installed module not found: $installed_module"
-	built_checksum=$(module_content_checksum "$built_module")
-	installed_checksum=$(module_content_checksum "$installed_module")
+	if ! built_checksum=$(module_content_checksum "$built_module"); then
+		die "cannot verify DKMS-built $module_name module content"
+	fi
+	if ! installed_checksum=$(module_content_checksum "$installed_module"); then
+		die "cannot verify installed $module_name module content"
+	fi
 	[ "$built_checksum" = "$installed_checksum" ] ||
 		die "installed $module_name checksum does not match the DKMS build"
 	[ "$(modinfo -F license "$built_module")" = 'GPL v2' ] &&
