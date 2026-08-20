@@ -62,6 +62,14 @@ property_phandle()
 	sed -n "s/^[[:space:]]*${property} = <\\(0x[0-9a-fA-F]*\\)>;.*/\\1/p" | head -n 1
 }
 
+property_cell()
+{
+	property=$1
+	cell=$2
+	sed -n "s/^[[:space:]]*${property} = <\\([^>]*\\)>;.*/\\1/p" |
+		awk -v cell="$cell" 'NR == 1 { print $cell; exit }'
+}
+
 require_equal()
 {
 	actual=$1
@@ -125,8 +133,8 @@ assert_active_dtb_resolution
 	exit 1
 }
 
-dtc -@ -I dts -O dtb -o "$output" "$overlay"
-dtc -I dtb -O dts -o "$workdir/compiled.dts" "$output"
+dtc -Wno-power_domains_property -@ -I dts -O dtb -o "$output" "$overlay"
+dtc -Wno-power_domains_property -I dtb -O dts -o "$workdir/compiled.dts" "$output"
 fdtoverlay -i "$dtb" -o "$workdir/merged.dtb" "$output"
 dtc -I dtb -O dts -o "$workdir/merged.dts" "$workdir/merged.dtb"
 
@@ -140,7 +148,7 @@ require_text "$compiled_provider" 'compatible = "rockpi,rk3399-dsi1-rpi-touchscr
 require_equal "$(grep -Fc 'compatible = "rockpi,rk3399-dsi1-rpi-touchscreen-compat";' "$workdir/compiled.dts")" \
 	'1' 'compiled overlay has exactly one display compatibility provider'
 require_text "$compiled_provider" 'status = "okay";' 'compiled provider is enabled'
-for property in rockchip,dsi0 rockchip,dsi1 rockchip,grf rockchip,vopb rockchip,vopl; do
+for property in power-domains rockchip,dsi0 rockchip,dsi1 rockchip,grf rockchip,vopb rockchip,vopl; do
 	require_text "$compiled_provider" "$property = <" "compiled provider property $property"
 done
 require_text "$compiled_panel" 'rockpi,display-compat = <' 'compiled panel provider link'
@@ -154,6 +162,7 @@ i2c1=$(node_from_file "$workdir/merged.dts" 'i2c@ff110000')
 grf=$(node_from_file "$workdir/merged.dts" 'syscon@ff770000')
 vopb=$(node_from_file "$workdir/merged.dts" 'vop@ff900000')
 vopl=$(node_from_file "$workdir/merged.dts" 'vop@ff8f0000')
+power=$(node_from_file "$workdir/merged.dts" 'power-controller')
 hdmi=$(node_from_file "$workdir/merged.dts" 'hdmi@ff940000')
 provider=$(node_from_file "$workdir/merged.dts" 'rockpi-display-compat')
 panel=$(printf '%s\n' "$i2c1" | extract_named_node 'panel@45')
@@ -181,6 +190,14 @@ require_equal "$(printf '%s\n' "$provider" | property_phandle rockchip,vopb)" \
 	"$(printf '%s\n' "$vopb" | property_phandle phandle)" 'provider big-VOP resource'
 require_equal "$(printf '%s\n' "$provider" | property_phandle rockchip,vopl)" \
 	"$(printf '%s\n' "$vopl" | property_phandle phandle)" 'provider little-VOP resource'
+require_equal "$(printf '%s\n' "$provider" | property_cell power-domains 1)" \
+	"$(printf '%s\n' "$power" | property_phandle phandle)" 'provider VIO power controller'
+require_equal "$(printf '%s\n' "$provider" | property_cell power-domains 2)" \
+	'0x0f' 'provider RK3399_PD_VIO domain ID'
+require_equal "$(printf '%s\n' "$provider" | property_cell power-domains 1)" \
+	"$(printf '%s\n' "$dsi0" | property_cell power-domains 1)" 'provider and DSI0 power controller'
+require_equal "$(printf '%s\n' "$provider" | property_cell power-domains 2)" \
+	"$(printf '%s\n' "$dsi0" | property_cell power-domains 2)" 'provider and DSI0 power-domain ID'
 printf 'PASS: enabled display compatibility provider resources\n'
 
 require_text "$panel" 'compatible = "rockpi,rpi-7inch-touchscreen-panel";' 'project panel compatible'

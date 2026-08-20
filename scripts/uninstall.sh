@@ -31,7 +31,7 @@ if [ -n "$offline_boot_root" ]; then
 	exit 0
 fi
 
-require_command awk chmod cmp cp diff dkms find grep mkdir mktemp mv rm
+require_command awk chmod cmp cp depmod diff dkms find grep mkdir mktemp mv rm
 overlay_destination=$OVERLAY_DIRECTORY/$OVERLAY_NAME.dtbo
 
 if [ "$dry_run" -eq 1 ]; then
@@ -86,6 +86,10 @@ completed=0
 dkms_remove_attempted=0
 rollback_failed=0
 rollback_note=
+dependency_index_restore_failed=0
+dkms_state_restore_failed=0
+dkms_state_root=${DKMS_STATE_DIR:-/var/lib/dkms}
+dkms_state_destination=$dkms_state_root/$PROJECT_NAME/$PROJECT_VERSION
 trap 'snapshot_status=$?; trap - EXIT HUP INT TERM; rm -rf "$transaction_directory"; exit "$snapshot_status"' \
 	EXIT HUP INT TERM
 
@@ -113,6 +117,7 @@ snapshot_module_paths()
 restore_module_paths()
 {
 	[ -f "$transaction_directory/modules.snapshot-complete" ] || return 1
+	module_paths_restore_failed=0
 	for module_name in $MODULE_NAMES; do
 		current=$transaction_directory/modules/$module_name.current
 		find "${MODULES_DIR:-/lib/modules}/$KERNEL_RELEASE" -type f \
@@ -120,17 +125,55 @@ restore_module_paths()
 			-o -name "$module_name.ko.gz" -o -name "$module_name.ko.zst" \) \
 			-print > "$current" 2>/dev/null || true
 		while IFS= read -r module_path; do
-			[ -z "$module_path" ] || rm -f "$module_path" || return 1
+			[ -z "$module_path" ] || rm -f "$module_path" || module_paths_restore_failed=1
 		done < "$current"
 		index=0
 		while IFS= read -r module_path; do
 			[ -n "$module_path" ] || continue
 			index=$((index + 1))
 			backup=$transaction_directory/modules/$module_name.$index.backup
-			try_atomic_install_file "$backup" "$module_path" || return 1
-			cmp -s "$backup" "$module_path" || return 1
+			if ! try_atomic_install_file "$backup" "$module_path" ||
+				! cmp -s "$backup" "$module_path"; then
+				module_paths_restore_failed=1
+			fi
 		done < "$transaction_directory/modules/$module_name.paths"
+		restored_count=$(find "${MODULES_DIR:-/lib/modules}/$KERNEL_RELEASE" -type f \
+			\( -name "$module_name.ko" -o -name "$module_name.ko.xz" \
+			-o -name "$module_name.ko.gz" -o -name "$module_name.ko.zst" \) \
+			-print 2>/dev/null | awk 'END { print NR + 0 }')
+		[ "$restored_count" -eq "$index" ] || module_paths_restore_failed=1
 	done
+	if ! depmod -a "$KERNEL_RELEASE"; then
+		dependency_index_restore_failed=1
+		module_paths_restore_failed=1
+	fi
+	[ "$module_paths_restore_failed" -eq 0 ]
+}
+
+snapshot_dkms_state_tree()
+{
+	if [ -e "$dkms_state_destination" ]; then
+		[ -d "$dkms_state_destination" ] ||
+			die "DKMS state path is not a directory: $dkms_state_destination"
+		cp -a "$dkms_state_destination" "$transaction_directory/dkms-state"
+		diff -qr "$dkms_state_destination" "$transaction_directory/dkms-state" >/dev/null ||
+			die 'cannot verify DKMS state-tree snapshot'
+		: > "$transaction_directory/dkms-state.present"
+	fi
+	: > "$transaction_directory/dkms-state.snapshot-complete"
+}
+
+restore_dkms_state_tree()
+{
+	[ -f "$transaction_directory/dkms-state.snapshot-complete" ] || return 1
+	rm -rf "$dkms_state_destination" || return 1
+	if [ -f "$transaction_directory/dkms-state.present" ]; then
+		mkdir -p "$(dirname -- "$dkms_state_destination")" || return 1
+		cp -a "$transaction_directory/dkms-state" "$dkms_state_destination" || return 1
+		diff -qr "$transaction_directory/dkms-state" "$dkms_state_destination" >/dev/null || return 1
+	else
+		[ ! -e "$dkms_state_destination" ] || return 1
+	fi
 }
 
 restore_source()
@@ -144,6 +187,9 @@ restore_source()
 restore_dkms()
 {
 	[ "$dkms_remove_attempted" -eq 1 ] || return 0
+	dkms_restore_failed=0
+	dependency_index_restore_failed=0
+	dkms_state_restore_failed=0
 	current_status=$(dkms status -m "$PROJECT_NAME" -v "$PROJECT_VERSION" 2>/dev/null) || return 1
 	if [ "$current_status" != "$dkms_status" ]; then
 		if printf '%s\n' "$current_status" | dkms_status_has_version "$PROJECT_VERSION"; then
@@ -165,9 +211,16 @@ restore_dkms()
 			dkms install -m "$PROJECT_NAME" -v "$PROJECT_VERSION" -k "$KERNEL_RELEASE" >/dev/null 2>&1 || return 1
 		fi
 	fi
-	restore_module_paths || return 1
+	if ! restore_dkms_state_tree; then
+		dkms_state_restore_failed=1
+		dkms_restore_failed=1
+	fi
+	if ! restore_module_paths; then
+		dkms_restore_failed=1
+	fi
 	restored_status=$(dkms status -m "$PROJECT_NAME" -v "$PROJECT_VERSION" 2>/dev/null || true)
-	[ "$restored_status" = "$dkms_status" ]
+	[ "$restored_status" = "$dkms_status" ] || dkms_restore_failed=1
+	[ "$dkms_restore_failed" -eq 0 ]
 }
 
 rollback_uninstall()
@@ -194,7 +247,16 @@ rollback_uninstall()
 	fi
 	if ! restore_dkms; then
 		rollback_failed=1
-		rollback_note="$rollback_note DKMS lifecycle restore failed;"
+		if [ "$dkms_state_restore_failed" -eq 1 ]; then
+			rollback_note="$rollback_note DKMS state-tree restore failed;"
+		fi
+		if [ "$dependency_index_restore_failed" -eq 1 ]; then
+			rollback_note="$rollback_note dependency index refresh failed for $KERNEL_RELEASE;"
+		fi
+		if [ "$dkms_state_restore_failed" -eq 0 ] &&
+			[ "$dependency_index_restore_failed" -eq 0 ]; then
+			rollback_note="$rollback_note DKMS lifecycle restore failed;"
+		fi
 	fi
 	if [ "$rollback_failed" -eq 0 ]; then
 		rm -rf "$transaction_directory"
@@ -217,6 +279,7 @@ if [ "$source_present" -eq 1 ]; then
 	cp -a "$PROJECT_SOURCE_DIR" "$transaction_directory/source"
 	diff -qr "$PROJECT_SOURCE_DIR" "$transaction_directory/source" >/dev/null || die 'cannot verify source snapshot'
 fi
+snapshot_dkms_state_tree
 snapshot_module_paths
 : > "$transaction_directory/snapshot-complete"
 trap rollback_uninstall EXIT HUP INT TERM

@@ -111,6 +111,7 @@ case $input in
 		rockchip,grf = <${PROVIDER_GRF:-0x42}>;
 		rockchip,vopb = <${PROVIDER_VOPB:-0x43}>;
 		rockchip,vopl = <${PROVIDER_VOPL:-0x44}>;
+		power-domains = <${PROVIDER_POWER_CONTROLLER:-0x45} ${PROVIDER_POWER_DOMAIN:-0x0f}>;
 		phandle = <0x50>;
 	};"
 	fi
@@ -123,6 +124,7 @@ case $input in
 dsi@ff960000 {
 	$dsi0_status
 	$dsi0_output_graph
+	power-domains = <0x45 0x0f>;
 	child {
 		status = "okay";
 	};
@@ -183,6 +185,10 @@ vop@ff8f0000 {
 hdmi@ff940000 {
 	status = "okay";
 };
+power-controller {
+	#power-domain-cells = <0x01>;
+	phandle = <0x45>;
+};
 $provider
 $duplicate_provider
 EOF_DTS
@@ -200,6 +206,7 @@ __symbols__ {
 	grf = "/syscon@ff770000";
 	vopb = "/vop@ff900000";
 	vopl = "/vop@ff8f0000";
+	power = "/power-controller";
 };
 EOF_DTS
 	[ -z "${DTC_BASE_DIAGNOSTIC:-}" ] || printf '%s\n' "$DTC_BASE_DIAGNOSTIC" >&2
@@ -354,6 +361,22 @@ test_provider_resources_and_touch_orientation_are_strict()
 			MAKE_CC_LOG="$sandbox/make-cc.log" PATH="$sandbox/bin:$PATH" \
 			REPO_ROOT="$repo_root" sh "$repo_root/scripts/validate.sh" --offline; then
 			fail "validator accepted the wrong provider $resource phandle"
+		fi
+	done
+
+	for power_part in controller domain; do
+		sandbox=$workdir/wrong-provider-power-$power_part
+		make_validate_sandbox "$sandbox"
+		case $power_part in
+		controller) accepted=PROVIDER_POWER_CONTROLLER=0x99 ;;
+		domain) accepted=PROVIDER_POWER_DOMAIN=0x99 ;;
+		esac
+		if env "$accepted" BOOT_DIR="$sandbox/boot" MODULES_DIR="$sandbox/modules" \
+			KERNEL_RELEASE=test-kernel COMPATIBLE_FILE="$sandbox/compatible" \
+			BUILD_DIR="$sandbox/build" MAKE_LOG="$sandbox/make.log" \
+			MAKE_CC_LOG="$sandbox/make-cc.log" PATH="$sandbox/bin:$PATH" \
+			REPO_ROOT="$repo_root" sh "$repo_root/scripts/validate.sh" --offline; then
+			fail "validator accepted the wrong provider VIO power $power_part"
 		fi
 	done
 

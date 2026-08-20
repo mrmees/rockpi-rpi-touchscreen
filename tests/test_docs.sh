@@ -96,7 +96,7 @@ require_text README.md 'reversible `data01_swap` and blue/green plus red/blue co
 require_text README.md '`touchscreen-inverted-x` and `touchscreen-inverted-y`'
 require_text README.md 'X Coordinate Transformation Matrix must be identity'
 require_text README.md 'never uses `/dev/mem` and never reads or writes the inactive VOP.'
-require_text README.md '/etc/X11/xorg.conf.d/20-dfrobot-display.conf is protected'
+require_text README.md '`/etc/X11/xorg.conf.d/20-dfrobot-display.conf` is protected, and the installer does not change it.'
 require_text README.md '/var/log.hdd/kernel-live.log'
 require_text README.md '/var/log.hdd/crash-watch.log'
 require_text docs/recovery.md 'exact scoped SSH rollback'

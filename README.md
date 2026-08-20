@@ -64,8 +64,8 @@ check uses the compiler recorded by the kernel; on this image that is the
 Debian `aarch64-linux-gnu-gcc` 14.2.0 toolchain.
 
 The working HDMI configuration is intentionally outside this project's scope:
-`/etc/X11/xorg.conf.d/20-dfrobot-display.conf is protected` and the installer
-does not change it. Record its checksum before installation and compare it
+`/etc/X11/xorg.conf.d/20-dfrobot-display.conf` is protected, and the installer does not change it.
+Record its checksum before installation and compare it
 afterward:
 
 ```sh

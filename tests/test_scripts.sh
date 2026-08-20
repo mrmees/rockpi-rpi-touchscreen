@@ -194,6 +194,7 @@ remove_version_records()
 				esac
 			fi
 			install_build_artifact "$module"
+			DEPMOD_INTERNAL=1 depmod -a "$kernel"
 			if [ "$version" = 0.2.4 ] && [ "${DKMS_FAIL_INSTALL_MODULE:-}" = "$module" ]; then
 				exit 25
 			fi
@@ -295,6 +296,7 @@ status)
 							"${MODULES_DIR:?}/$active_kernel/updates/dkms/$module.ko.xz" \
 							"${MODULES_DIR:?}/$active_kernel/updates/dkms/$module.ko.gz" \
 							"${MODULES_DIR:?}/$active_kernel/updates/dkms/$module.ko.zst"
+						DEPMOD_INTERNAL=1 depmod -a "$active_kernel"
 						if [ "$version" = 0.2.4 ] && [ "${DKMS_FAIL_REMOVE_MODULE:-}" = "$module" ]; then
 							exit 27
 						fi
@@ -325,6 +327,30 @@ if [ "$version" = 0.2.4 ] && [ "${DKMS_FAIL_ON:-}" = "$1" ]; then
 fi
 EOF
 	chmod +x "$sandbox/bin/dkms"
+	cat > "$sandbox/bin/depmod" <<'EOF'
+#!/bin/sh
+set -eu
+printf 'internal=%s args=%s\n' "${DEPMOD_INTERNAL:-0}" "$*" >> "${DEPMOD_LOG:?}"
+if [ "${DEPMOD_FAIL_EXTERNAL:-0}" -eq 1 ] && [ "${DEPMOD_INTERNAL:-0}" -ne 1 ]; then
+	exit 48
+fi
+kernel=
+for argument do
+	case $argument in
+	-*) ;;
+	*) kernel=$argument ;;
+	esac
+done
+[ -n "$kernel" ] || exit 49
+module_root=${MODULES_DIR:?}/$kernel
+mkdir -p "$module_root"
+find "$module_root" -type f \
+	\( -name '*.ko' -o -name '*.ko.xz' -o -name '*.ko.gz' -o -name '*.ko.zst' \) \
+	-print | LC_ALL=C sort | sed "s|^$module_root/||; s|$|:|" > "$module_root/modules.dep.tmp"
+/bin/mv "$module_root/modules.dep.tmp" "$module_root/modules.dep"
+sed 's/^/alias fake:/' "$module_root/modules.dep" > "$module_root/modules.alias"
+EOF
+	chmod +x "$sandbox/bin/depmod"
 	cat > "$sandbox/bin/modinfo" <<'EOF'
 #!/bin/sh
 set -eu
@@ -340,9 +366,21 @@ while [ "$#" -gt 0 ]; do
 	esac
 done
 if [ -z "$field" ]; then
-	module_path=$(find "${MODULES_DIR:?}/$kernel/updates/dkms" -type f \
-		\( -name "$module.ko" -o -name "$module.ko.xz" -o -name "$module.ko.gz" \
-		-o -name "$module.ko.zst" \) -print | head -n 1)
+	dependency_index=${MODULES_DIR:?}/$kernel/modules.dep
+	[ -f "$dependency_index" ] || exit 1
+	module_relative=$(awk -F: -v module="$module" '
+		{
+			n = split($1, components, "/")
+			base = components[n]
+			if (base == module ".ko" || base == module ".ko.xz" ||
+			    base == module ".ko.gz" || base == module ".ko.zst") {
+				print $1
+				exit
+			}
+		}
+	' "$dependency_index")
+	[ -n "$module_relative" ] || exit 1
+	module_path=${MODULES_DIR:?}/$kernel/$module_relative
 	[ -n "$module_path" ] && [ -f "$module_path" ] || exit 1
 	if [ -n "${DKMS_CORRUPT_COMPRESSED_OLD_ROLLBACK_MODULE:-}" ] &&
 		[ "$module" = "$DKMS_CORRUPT_COMPRESSED_OLD_ROLLBACK_MODULE" ] &&
@@ -463,12 +501,25 @@ done
 case $source_file in
 *"/.rockpi-rpi-touchscreen.transaction."*"/old-dkms-state") old_state_restore=1 ;;
 esac
+if [ "${CP_FAIL_PRIVATE_BOOT_RESTORE:-0}" -eq 1 ]; then
+	case $source_file in
+	*"/.rockpi-rpi-touchscreen.transaction."*"/current-armbianEnv.txt") exit 50 ;;
+	esac
+fi
 if [ -n "${CP_FAIL_SNAPSHOT_MODULE:-}" ]; then
 	case $source_file:$destination_file in
 	*"/modules/test-kernel/"*"/$CP_FAIL_SNAPSHOT_MODULE.ko:"*"/.rockpi-rpi-touchscreen.transaction."*"/prior-modules/"*) exit 29 ;;
 	esac
 fi
 /bin/cp "$@"
+if [ "${DKMS_CORRUPT_UNINSTALL_STATE_RESTORE:-0}" -eq 1 ]; then
+	case $source_file in
+	*"/.rockpi-rpi-touchscreen.uninstall."*"/dkms-state")
+		mkdir -p "$destination_file/transaction-metadata"
+		printf '%s\n' corrupt-uninstall-state > "$destination_file/transaction-metadata/baseline"
+		;;
+	esac
+fi
 if [ "$old_state_restore" -eq 1 ] && [ -n "${DKMS_CORRUPT_OLD_REINSTALL_MODULE:-}" ]; then
 	printf '%s\n' corrupt-old-state-restore > \
 		"$destination_file/test-kernel/aarch64/module/${DKMS_CORRUPT_OLD_REINSTALL_MODULE}.ko"
@@ -536,7 +587,7 @@ run_install()
 		DKMS_OLD_REINSTALL_MARKER="$sandbox/dkms-old-reinstall.marker" \
 		DKMS_NEW_ACTIVE_VERIFIED_MARKER="$sandbox/dkms-new-active-verified.marker" \
 		DKMS_MODULE_LOG="$sandbox/dkms-module.log" SHA256_LOG="$sandbox/sha256.log" \
-		ZSTD_LOG="$sandbox/zstd.log" \
+		ZSTD_LOG="$sandbox/zstd.log" DEPMOD_LOG="$sandbox/depmod.log" \
 		DKMS_STATE_DIR="$sandbox/var-lib-dkms" \
 		ARCH=aarch64 MV_LOG="$sandbox/mv.log" PATH="$sandbox/bin:$PATH" \
 		sh "$repo_root/scripts/install.sh" "$@" || status=$?
@@ -624,6 +675,20 @@ sandbox_dkms_status()
 		"$sandbox/bin/dkms" status -m rockpi-rpi-touchscreen -v "$version"
 }
 
+refresh_dependency_indexes()
+{
+	sandbox=$1
+	DEPMOD_LOG="$sandbox/depmod.log" MODULES_DIR="$sandbox/modules" DEPMOD_INTERNAL=1 \
+		PATH="$sandbox/bin:$PATH" "$sandbox/bin/depmod" -a test-kernel
+}
+
+indexed_module_path()
+{
+	sandbox=$1
+	module=$2
+	MODULES_DIR="$sandbox/modules" "$sandbox/bin/modinfo" -k test-kernel -n "$module"
+}
+
 run_uninstall()
 {
 	sandbox=$1
@@ -640,7 +705,7 @@ run_uninstall()
 		DKMS_OLD_REMOVE_FAILED_MARKER="$sandbox/dkms-old-remove-failed.marker" \
 		DKMS_NEW_ACTIVE_VERIFIED_MARKER="$sandbox/dkms-new-active-verified.marker" \
 		DKMS_MODULE_LOG="$sandbox/dkms-module.log" SHA256_LOG="$sandbox/sha256.log" \
-		DKMS_STATE_DIR="$sandbox/var-lib-dkms" \
+		DEPMOD_LOG="$sandbox/depmod.log" DKMS_STATE_DIR="$sandbox/var-lib-dkms" \
 		ARCH=aarch64 MV_LOG="$sandbox/mv.log" PATH="$sandbox/bin:$PATH" \
 		sh "$repo_root/scripts/uninstall.sh" "$@" || status=$?
 	protected_after=$(/usr/bin/sha256sum "$protected" | awk '{print $1}')
@@ -1186,6 +1251,7 @@ EOF
 	cp "$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.3/test-kernel/aarch64/module/raspits_ft5426.ko" \
 		"$sandbox/modules/test-kernel/updates/dkms/raspits_ft5426.ko"
 	printf '%s\n' 'prior-dtbo' > "$sandbox/boot/overlay-user/rockpi-4b-plus-rpi-touchscreen.dtbo"
+	refresh_dependency_indexes "$sandbox"
 }
 
 compress_old_release_artifacts()
@@ -1198,6 +1264,7 @@ compress_old_release_artifacts()
 		gzip -c "$installed" > "$installed.gz"
 		rm -f "$built" "$installed"
 	done
+	refresh_dependency_indexes "$sandbox"
 }
 
 source_tree_digest()
@@ -1267,6 +1334,7 @@ prepare_current_release_lifecycle()
 		\( -name 'rockpi_rk3399_display_compat.ko*' \
 		-o -name 'panel_rockpi_rpi_touchscreen.ko*' \
 		-o -name 'raspits_ft5426.ko*' \) -delete
+	refresh_dependency_indexes "$sandbox"
 	case $phase in
 	added)
 		rm -f "$sandbox/dkms-built.state"
@@ -1714,6 +1782,229 @@ test_late_failure_after_dtbo_replacement_restores_previous_dtbo()
 	printf 'PASS: late failure after DTBO replacement restores prior artifact\n'
 }
 
+test_install_rollback_refreshes_dependency_indexes_after_path_suffix_restore()
+{
+	sandbox=$workdir/install-depmod-path-restore
+	make_sandbox "$sandbox"
+	seed_old_release "$sandbox"
+	installed=$sandbox/modules/test-kernel/updates/dkms/raspits_ft5426.ko
+	restored=$sandbox/modules/test-kernel/weak-updates/raspits_ft5426.ko.xz
+	mkdir -p "$(dirname -- "$restored")"
+	xz -c "$installed" > "$restored"
+	rm -f "$installed"
+	refresh_dependency_indexes "$sandbox"
+	if DKMS_FAIL_INSTALL_MODULE=raspits_ft5426 \
+		run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+		fail 'installer accepted the injected third-module installation failure'
+	fi
+	if grep -Fq 'rollback also failed' "$sandbox/output"; then
+		fail 'install rollback did not refresh dependency indexes after restoring a compressed weak-updates path'
+	fi
+	assert_equal "$(indexed_module_path "$sandbox" raspits_ft5426)" "$restored" \
+		'install rollback dependency index does not resolve the restored compressed touch module'
+	grep -Fqx 'weak-updates/raspits_ft5426.ko.xz:' "$sandbox/modules/test-kernel/modules.dep" ||
+		fail 'install rollback modules.dep does not contain the exact restored suffix and path'
+	grep -Fqx 'alias fake:weak-updates/raspits_ft5426.ko.xz:' \
+		"$sandbox/modules/test-kernel/modules.alias" ||
+		fail 'install rollback modules.alias was not regenerated for the restored touch path'
+	grep -Fqx 'internal=0 args=-a test-kernel' "$sandbox/depmod.log" ||
+		fail 'install rollback did not invoke depmod -a for the target kernel'
+	printf 'PASS: install rollback refreshes dependency indexes after exact raw path restore\n'
+}
+
+test_uninstall_rollback_refreshes_dependency_indexes_after_path_suffix_restore()
+{
+	sandbox=$workdir/uninstall-depmod-path-restore
+	prepare_uninstall_failure "$sandbox"
+	installed=$sandbox/modules/test-kernel/updates/dkms/rockpi_rk3399_display_compat.ko
+	restored=$sandbox/modules/test-kernel/weak-updates/rockpi_rk3399_display_compat.ko.gz
+	mkdir -p "$(dirname -- "$restored")"
+	gzip -c "$installed" > "$restored"
+	rm -f "$installed"
+	refresh_dependency_indexes "$sandbox"
+	if DKMS_STATUS_FAIL_AFTER_REMOVE=1 run_uninstall "$sandbox" > "$sandbox/output" 2>&1; then
+		fail 'uninstall accepted the injected post-removal status failure'
+	fi
+	if grep -Fq 'rollback also failed' "$sandbox/output"; then
+		fail 'uninstall rollback did not cleanly restore the compressed weak-updates baseline'
+	fi
+	assert_equal "$(indexed_module_path "$sandbox" rockpi_rk3399_display_compat)" "$restored" \
+		'uninstall rollback dependency index does not resolve the restored compressed provider'
+	grep -Fqx 'weak-updates/rockpi_rk3399_display_compat.ko.gz:' \
+		"$sandbox/modules/test-kernel/modules.dep" ||
+		fail 'uninstall rollback modules.dep does not contain the exact restored suffix and path'
+	grep -Fqx 'alias fake:weak-updates/rockpi_rk3399_display_compat.ko.gz:' \
+		"$sandbox/modules/test-kernel/modules.alias" ||
+		fail 'uninstall rollback modules.alias was not regenerated for the restored provider path'
+	grep -Fqx 'internal=0 args=-a test-kernel' "$sandbox/depmod.log" ||
+		fail 'uninstall rollback did not invoke depmod -a for the target kernel'
+	printf 'PASS: uninstall rollback refreshes dependency indexes after exact raw path restore\n'
+}
+
+test_depmod_rollback_failures_retain_and_report_recovery()
+{
+	for operation in install uninstall; do
+		sandbox=$workdir/$operation-depmod-failure
+		case $operation in
+		install)
+			make_sandbox "$sandbox"
+			seed_old_release "$sandbox"
+			if DEPMOD_FAIL_EXTERNAL=1 DKMS_FAIL_INSTALL_MODULE=raspits_ft5426 \
+				run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+				fail 'installer accepted the injected install and rollback depmod failures'
+			fi
+			recovery_pattern='.rockpi-rpi-touchscreen.transaction.*'
+			;;
+		uninstall)
+			prepare_uninstall_failure "$sandbox"
+			if DEPMOD_FAIL_EXTERNAL=1 DKMS_STATUS_FAIL_AFTER_REMOVE=1 \
+				run_uninstall "$sandbox" > "$sandbox/output" 2>&1; then
+				fail 'uninstall accepted the injected status and rollback depmod failures'
+			fi
+			recovery_pattern='.rockpi-rpi-touchscreen.uninstall.*'
+			;;
+		esac
+		grep -Fq 'dependency index refresh failed for test-kernel' "$sandbox/output" ||
+			fail "$operation rollback did not report the failed target-kernel depmod refresh"
+		grep -Fq 'rollback also failed' "$sandbox/output" ||
+			fail "$operation rollback did not fail closed after depmod failed"
+		recovery=$(find "$sandbox/usr-src" -mindepth 1 -maxdepth 1 -type d \
+			-name "$recovery_pattern" -print -quit)
+		[ -n "$recovery" ] || fail "$operation rollback discarded recovery after depmod failed"
+		grep -Fq "$recovery" "$sandbox/output" ||
+			fail "$operation rollback did not report its retained recovery directory"
+	done
+	printf 'PASS: install and uninstall depmod rollback failures fail closed with reported recovery\n'
+}
+
+test_existing_persistent_backup_uses_private_current_boot_baseline()
+{
+	sandbox=$workdir/private-current-boot-baseline
+	make_sandbox "$sandbox"
+	seed_old_release "$sandbox"
+	config=$sandbox/boot/armbianEnv.txt
+	backup=$sandbox/boot/armbianEnv.txt.rockpi-rpi-touchscreen.bak
+	printf '%s\n' 'older persistent recovery baseline' > "$backup"
+	/usr/bin/sha256sum "$backup" > "$backup.sha256"
+	config_before=$(/usr/bin/sha256sum "$config" | awk '{print $1}')
+	backup_before=$(/usr/bin/sha256sum "$backup" | awk '{print $1}')
+	backup_checksum_before=$(/usr/bin/sha256sum "$backup.sha256" | awk '{print $1}')
+	if DKMS_FAIL_OLD_REMOVE_AFTER_MUTATION=1 \
+		run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+		fail 'installer accepted the injected late old-release retirement failure'
+	fi
+	assert_equal "$(/usr/bin/sha256sum "$config" | awk '{print $1}')" "$config_before" \
+		'late install failure did not restore the private current boot baseline'
+	assert_equal "$(/usr/bin/sha256sum "$backup" | awk '{print $1}')" "$backup_before" \
+		'install transaction changed the pre-existing persistent boot backup'
+	assert_equal "$(/usr/bin/sha256sum "$backup.sha256" | awk '{print $1}')" \
+		"$backup_checksum_before" 'install transaction changed the persistent backup checksum'
+	printf 'PASS: existing persistent backup remains separate from private current boot rollback\n'
+}
+
+test_private_boot_restore_failure_retains_and_reports_recovery()
+{
+	sandbox=$workdir/private-boot-restore-failure
+	make_sandbox "$sandbox"
+	seed_old_release "$sandbox"
+	backup=$sandbox/boot/armbianEnv.txt.rockpi-rpi-touchscreen.bak
+	printf '%s\n' 'older persistent recovery baseline' > "$backup"
+	/usr/bin/sha256sum "$backup" > "$backup.sha256"
+	if CP_FAIL_PRIVATE_BOOT_RESTORE=1 DKMS_FAIL_OLD_REMOVE_AFTER_MUTATION=1 \
+		run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+		fail 'installer accepted a failed private boot-baseline restore'
+	fi
+	grep -Fq 'private boot baseline retained at ' "$sandbox/output" ||
+		fail 'private boot restore failure did not report its exact recovery snapshot'
+	grep -Fq 'rollback also failed' "$sandbox/output" ||
+		fail 'private boot restore failure did not fail closed'
+	recovery=$(find "$sandbox/usr-src" -mindepth 1 -maxdepth 1 -type d \
+		-name '.rockpi-rpi-touchscreen.transaction.*' -print -quit)
+	[ -n "$recovery" ] || fail 'private boot restore failure discarded transaction recovery'
+	[ -f "$recovery/current-armbianEnv.txt" ] ||
+		fail 'private current-boot snapshot is missing from retained recovery'
+	grep -Fq "$recovery/current-armbianEnv.txt" "$sandbox/output" ||
+		fail 'private boot restore failure did not report the retained snapshot path'
+	printf 'PASS: private boot restore failure fails closed with reported recovery\n'
+}
+
+prepare_exact_uninstall_lifecycle()
+{
+	sandbox=$1
+	phase=$2
+	make_sandbox "$sandbox"
+	run_install "$sandbox" "$sandbox/validate-pass.sh"
+	case $phase in
+	installed) ;;
+	built)
+		rm -f "$sandbox/dkms-installed.state" "$sandbox/dkms-active.state"
+		find "$sandbox/modules/test-kernel" -type f \
+			\( -name 'rockpi_rk3399_display_compat.ko*' \
+			-o -name 'panel_rockpi_rpi_touchscreen.ko*' \
+			-o -name 'raspits_ft5426.ko*' \) -delete
+		refresh_dependency_indexes "$sandbox"
+		;;
+	added)
+		rm -f "$sandbox/dkms-built.state" "$sandbox/dkms-installed.state" \
+			"$sandbox/dkms-active.state"
+		rm -rf "$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.4"
+		find "$sandbox/modules/test-kernel" -type f \
+			\( -name 'rockpi_rk3399_display_compat.ko*' \
+			-o -name 'panel_rockpi_rpi_touchscreen.ko*' \
+			-o -name 'raspits_ft5426.ko*' \) -delete
+		refresh_dependency_indexes "$sandbox"
+		;;
+	*) fail "unknown exact uninstall lifecycle fixture: $phase" ;;
+	esac
+	state=$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.4
+	mkdir -p "$state/transaction-metadata"
+	printf 'exact-%s-baseline\000with-private-bytes\n' "$phase" > "$state/transaction-metadata/baseline"
+}
+
+test_uninstall_restores_exact_dkms_state_tree_for_every_lifecycle()
+{
+	for phase in added built installed; do
+		sandbox=$workdir/uninstall-exact-state-$phase
+		prepare_exact_uninstall_lifecycle "$sandbox" "$phase"
+		state=$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.4
+		state_before=$(source_tree_digest "$state")
+		status_before=$(sandbox_dkms_status "$sandbox" 0.2.4)
+		if DKMS_STATUS_FAIL_AFTER_REMOVE=1 run_uninstall "$sandbox" > "$sandbox/output" 2>&1; then
+			fail "uninstall accepted the injected post-removal failure from $phase state"
+		fi
+		grep -Fq 'rollback also failed' "$sandbox/output" &&
+			fail "uninstall could not cleanly restore the exact $phase state tree"
+		[ -d "$state" ] || fail "uninstall did not recreate the exact $phase DKMS state tree"
+		assert_equal "$(source_tree_digest "$state")" "$state_before" \
+			"uninstall rollback changed bytes in the $phase DKMS state tree"
+		assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.4)" "$status_before" \
+			"uninstall rollback changed the exact $phase lifecycle"
+	done
+	printf 'PASS: uninstall restores exact DKMS state-tree bytes for added, built, and installed states\n'
+}
+
+test_uninstall_state_tree_restore_verification_failure_retains_recovery()
+{
+	sandbox=$workdir/uninstall-state-restore-corruption
+	prepare_exact_uninstall_lifecycle "$sandbox" installed
+	if DKMS_CORRUPT_UNINSTALL_STATE_RESTORE=1 DKMS_STATUS_FAIL_AFTER_REMOVE=1 \
+		run_uninstall "$sandbox" > "$sandbox/output" 2>&1; then
+		fail 'uninstall accepted a corrupted DKMS state-tree restore'
+	fi
+	grep -Fq 'DKMS state-tree restore failed' "$sandbox/output" ||
+		fail 'uninstall did not report DKMS state-tree restore verification failure'
+	grep -Fq 'rollback also failed' "$sandbox/output" ||
+		fail 'uninstall did not fail closed after state-tree restore verification failed'
+	recovery=$(find "$sandbox/usr-src" -mindepth 1 -maxdepth 1 -type d \
+		-name '.rockpi-rpi-touchscreen.uninstall.*' -print -quit)
+	[ -n "$recovery" ] || fail 'uninstall discarded recovery after state-tree verification failed'
+	[ -f "$recovery/dkms-state/transaction-metadata/baseline" ] ||
+		fail 'uninstall recovery lacks the exact DKMS state-tree snapshot'
+	grep -Fq "$recovery" "$sandbox/output" ||
+		fail 'uninstall did not report the retained state-tree recovery directory'
+	printf 'PASS: uninstall state-tree verification failure fails closed with reported recovery\n'
+}
+
 if [ -n "${TEST_FILTER:-}" ]; then
 	"$TEST_FILTER"
 	exit 0
@@ -1765,4 +2056,11 @@ test_failed_old_reinstall_reports_preserved_recovery
 test_failed_old_checksum_verification_preserves_recovery
 test_late_failure_after_dtbo_replacement_restores_previous_dtbo
 test_old_status_failure_retains_source_and_does_not_claim_success
+test_install_rollback_refreshes_dependency_indexes_after_path_suffix_restore
+test_uninstall_rollback_refreshes_dependency_indexes_after_path_suffix_restore
+test_depmod_rollback_failures_retain_and_report_recovery
+test_existing_persistent_backup_uses_private_current_boot_baseline
+test_private_boot_restore_failure_retains_and_reports_recovery
+test_uninstall_restores_exact_dkms_state_tree_for_every_lifecycle
+test_uninstall_state_tree_restore_verification_failure_retains_recovery
 printf 'PASS: transactional installer lifecycle\n'

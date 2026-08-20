@@ -19,6 +19,7 @@
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/pm.h>
+#include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 #include <linux/reset.h>
 
@@ -49,6 +50,7 @@ struct rockpi_display_compat {
 	struct device_node *dsi0_node;
 	struct device *dsi1;
 	struct device_link *dsi1_link;
+	bool vio_power_held;
 	struct mutex lock; /* Serializes DSI0 and saved VOP state. */
 };
 
@@ -70,6 +72,43 @@ static void rockpi_put_clock(void *data)
 static void rockpi_put_reset(void *data)
 {
 	reset_control_put(data);
+}
+
+static int rockpi_vio_power_get(struct rockpi_display_compat *ctx)
+{
+	int ret;
+
+	if (WARN_ON(ctx->vio_power_held))
+		return -EBUSY;
+
+	ret = pm_runtime_resume_and_get(ctx->dev);
+	if (ret)
+		return ret;
+
+	ctx->vio_power_held = true;
+	return 0;
+}
+
+static void rockpi_vio_power_put(struct rockpi_display_compat *ctx)
+{
+	int ret;
+
+	if (!ctx->vio_power_held)
+		return;
+
+	ctx->vio_power_held = false;
+	ret = pm_runtime_put_sync_suspend(ctx->dev);
+	if (ret < 0)
+		dev_warn(ctx->dev, "failed to runtime-suspend VIO: %d\n", ret);
+}
+
+static void rockpi_vio_power_put_noidle(struct rockpi_display_compat *ctx)
+{
+	if (!ctx->vio_power_held)
+		return;
+
+	ctx->vio_power_held = false;
+	pm_runtime_put_noidle(ctx->dev);
 }
 
 static struct device_node *
@@ -164,6 +203,9 @@ static int rockpi_write_dsi0_grf(void *context, rockpi_u32 offset,
 {
 	struct rockpi_display_compat *ctx = context;
 
+	if (WARN_ON(!ctx->vio_power_held))
+		return -EIO;
+
 	return regmap_write(ctx->grf, offset, value);
 }
 
@@ -171,6 +213,9 @@ static int rockpi_read_dsi0(void *context, rockpi_u32 offset,
 			    rockpi_u32 *value)
 {
 	struct rockpi_display_compat *ctx = context;
+
+	if (WARN_ON(!ctx->vio_power_held))
+		return -EIO;
 
 	*value = readl(ctx->dsi0_base + offset);
 	return 0;
@@ -180,6 +225,9 @@ static int rockpi_write_dsi0(void *context, rockpi_u32 offset,
 			     rockpi_u32 value)
 {
 	struct rockpi_display_compat *ctx = context;
+
+	if (WARN_ON(!ctx->vio_power_held))
+		return -EIO;
 
 	writel(value, ctx->dsi0_base + offset);
 	return 0;
@@ -359,10 +407,19 @@ static int rockpi_display_compat_probe(struct platform_device *pdev)
 	if (ret)
 		return dev_err_probe(dev, ret,
 				     "failed to acquire compatibility resources\n");
+	if (!dev->pm_domain) {
+		ret = -ENODEV;
+		goto put_dsi1;
+	}
+
+	pm_runtime_enable(dev);
+	ret = rockpi_vio_power_get(ctx);
+	if (ret)
+		goto disable_runtime_pm;
 
 	ret = rockpi_dsi0_start(&ctx->dsi0_state, &rockpi_display_io, ctx);
 	if (ret)
-		goto put_dsi1;
+		goto put_vio_power;
 
 	ctx->dsi1_link = device_link_add(ctx->dsi1, dev, DL_FLAG_STATELESS);
 	if (!ctx->dsi1_link) {
@@ -376,6 +433,10 @@ static int rockpi_display_compat_probe(struct platform_device *pdev)
 
 stop_dsi0:
 	rockpi_dsi0_stop(&ctx->dsi0_state, &rockpi_display_io, ctx);
+put_vio_power:
+	rockpi_vio_power_put(ctx);
+disable_runtime_pm:
+	pm_runtime_disable(dev);
 put_dsi1:
 	put_device(ctx->dsi1);
 	return dev_err_probe(dev, ret,
@@ -388,7 +449,11 @@ static void rockpi_display_compat_remove(struct platform_device *pdev)
 
 	device_link_del(ctx->dsi1_link);
 	put_device(ctx->dsi1);
+	mutex_lock(&ctx->lock);
 	rockpi_dsi0_stop(&ctx->dsi0_state, &rockpi_display_io, ctx);
+	rockpi_vio_power_put(ctx);
+	mutex_unlock(&ctx->lock);
+	pm_runtime_disable(ctx->dev);
 }
 
 struct rockpi_display_compat *rockpi_display_compat_get(struct device *consumer)
@@ -471,6 +536,7 @@ static int rockpi_display_compat_suspend(struct device *dev)
 		return -EIO;
 	}
 	rockpi_dsi0_stop(&ctx->dsi0_state, &rockpi_display_io, ctx);
+	rockpi_vio_power_put_noidle(ctx);
 	mutex_unlock(&ctx->lock);
 	return 0;
 }
@@ -481,7 +547,13 @@ static int rockpi_display_compat_resume(struct device *dev)
 	int ret;
 
 	mutex_lock(&ctx->lock);
+	ret = rockpi_vio_power_get(ctx);
+	if (ret)
+		goto unlock;
 	ret = rockpi_dsi0_start(&ctx->dsi0_state, &rockpi_display_io, ctx);
+	if (ret)
+		rockpi_vio_power_put_noidle(ctx);
+unlock:
 	mutex_unlock(&ctx->lock);
 	return ret;
 }

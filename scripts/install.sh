@@ -5,7 +5,7 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$script_dir/common.sh"
 
 require_root
-require_command awk cat chmod cmp cp date diff dirname dkms find grep head install mkdir mktemp modinfo mv rm sed sha256sum tail
+require_command awk cat chmod cmp cp date depmod diff dirname dkms find grep head install mkdir mktemp modinfo mv rm sed sha256sum tail
 
 module_content_checksum()
 {
@@ -170,6 +170,8 @@ old_retirement_attempted=0
 old_source_snapshot_complete=0
 new_dkms_state_snapshot_complete=0
 old_dkms_state_snapshot_complete=0
+boot_snapshot_complete=0
+boot_mutation_attempted=0
 backup_created=0
 completed=0
 stage_directory=
@@ -239,9 +241,18 @@ rollback()
 	rollback_note=
 	new_source_retained=0
 	if [ "$completed" -ne 1 ]; then
-		if [ "$backup_created" -eq 1 ] && [ -f "$backup_file" ]; then
-			if ! try_atomic_install_file "$backup_file" "$ARMBIAN_ENV"; then
+		boot_restore_failed=0
+		if [ "$boot_snapshot_complete" -eq 1 ] && [ "$boot_mutation_attempted" -eq 1 ]; then
+			private_boot_snapshot=$recovery_directory/current-armbianEnv.txt
+			if ! try_atomic_install_file "$private_boot_snapshot" "$ARMBIAN_ENV" ||
+				! cmp -s "$private_boot_snapshot" "$ARMBIAN_ENV"; then
 				rollback_failed=1
+				boot_restore_failed=1
+				rollback_note="$rollback_note private boot baseline retained at $private_boot_snapshot;"
+			fi
+		fi
+		if [ "$backup_created" -eq 1 ] && [ -f "$backup_file" ]; then
+			if [ "$boot_restore_failed" -eq 1 ]; then
 				rollback_note="$rollback_note boot configuration backup retained at $backup_file;"
 			elif ! rm -f "$backup_file" "$backup_file.sha256"; then
 				rollback_failed=1
@@ -341,6 +352,10 @@ rollback()
 					rollback_note="$rollback_note $module_name path-set restoration failed;"
 				}
 			done
+			if ! depmod -a "$KERNEL_RELEASE"; then
+				rollback_failed=1
+				rollback_note="$rollback_note dependency index refresh failed for $KERNEL_RELEASE;"
+			fi
 		fi
 		if [ "$dkms_install_attempted" -eq 1 ] || [ "$old_retirement_attempted" -eq 1 ]; then
 			if ! restored_old_status=$(dkms status -m "$PROJECT_NAME" -v "$old_version" 2>&1) ||
@@ -401,6 +416,10 @@ source_parent=$(dirname -- "$PROJECT_SOURCE_DIR")
 mkdir -p "$source_parent"
 recovery_directory=$(mktemp -d "$source_parent/.${PROJECT_NAME}.transaction.XXXXXX")
 stage_directory=$(mktemp -d "$source_parent/.${PROJECT_NAME}.stage.XXXXXX")
+cp "$ARMBIAN_ENV" "$recovery_directory/current-armbianEnv.txt"
+cmp -s "$ARMBIAN_ENV" "$recovery_directory/current-armbianEnv.txt" ||
+	die 'private current boot recovery snapshot verification failed'
+boot_snapshot_complete=1
 if [ "$old_source_owned" -eq 1 ]; then
 	cp -a "$old_source" "$recovery_directory/old-source"
 	diff -qr "$old_source" "$recovery_directory/old-source" >/dev/null ||
@@ -551,6 +570,7 @@ if [ ! -e "$backup_file" ]; then
 fi
 [ -f "$backup_file.sha256" ] || die "boot backup checksum not found: $backup_file.sha256"
 sha256sum -c "$backup_file.sha256" >/dev/null || die "boot backup checksum verification failed: $backup_file"
+boot_mutation_attempted=1
 add_overlay_token "$ARMBIAN_ENV" "$OVERLAY_TOKEN"
 [ "$(awk -v token="$OVERLAY_TOKEN" '
 	/^[[:space:]]*user_overlays[[:space:]]*=/ {

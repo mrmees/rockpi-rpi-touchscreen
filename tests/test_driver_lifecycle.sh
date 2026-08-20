@@ -3,6 +3,7 @@ set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 driver=$repo_root/src/raspits_ft5426.c
+protocol=$repo_root/src/ft5426_protocol.h
 
 fail()
 {
@@ -17,6 +18,11 @@ line_of()
 
 probe_body=$(sed -n '/^static int raspits_probe(/,/^}/p' "$driver")
 poll_body=$(sed -n '/^static void raspits_poll(/,/^}/p' "$driver")
+
+grep -Eq '^#define FT5426_MAX_X[[:space:]]+800$' "$protocol" ||
+	fail 'touch protocol width must remain the literal 800 pixels'
+grep -Eq '^#define FT5426_MAX_Y[[:space:]]+480$' "$protocol" ||
+	fail 'touch protocol height must remain the literal 480 pixels'
 
 probe_read=$(line_of 'raspits_read_fw_register(client, FT5426_REG_FW_VERSION')
 probe_register=$(line_of 'input_register_device(input)')

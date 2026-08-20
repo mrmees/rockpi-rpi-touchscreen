@@ -12,6 +12,8 @@
 &{/} {
 	rockpi_display_compat: rockpi-display-compat {
 		compatible = "rockpi,rk3399-dsi1-rpi-touchscreen-compat";
+		/* RK3399_PD_VIO is binding ID 15. */
+		power-domains = <&power 15>;
 		rockchip,dsi0 = <&mipi_dsi>;
 		rockchip,dsi1 = <&mipi_dsi1>;
 		rockchip,grf = <&grf>;

@@ -66,6 +66,8 @@ grep -Fq 'of_iomap(node, 0)' "$provider" ||
 	fail 'provider must map validated DT resources with of_iomap'
 grep -Fq 'of_reset_control_get_exclusive_by_index(ctx->dsi0_node, 0)' "$provider" ||
 	fail 'provider must exclusively own the disabled DSI0 reset'
+grep -Fq '#include <linux/pm_runtime.h>' "$provider" ||
+	fail 'provider must use the runtime-PM API for its VIO power-domain vote'
 for clock in ref pclk phy_cfg grf; do
 	grep -Fq "= \"$clock\"," "$provider" ||
 		fail "provider must name the DSI0 $clock clock"
@@ -73,10 +75,41 @@ done
 grep -Fq 'of_clk_get_by_name(ctx->dsi0_node, name)' "$provider" ||
 	fail 'provider must acquire each DSI0 clock by name'
 
+power_get_body=$(function_body rockpi_vio_power_get) ||
+	fail 'provider is missing the VIO runtime-PM acquisition helper'
+printf '%s\n' "$power_get_body" |
+	grep -Fq 'pm_runtime_resume_and_get(ctx->dev)' ||
+	fail 'provider must synchronously power VIO before acquiring its lifetime vote'
+power_put_body=$(function_body rockpi_vio_power_put) ||
+	fail 'provider is missing the normal VIO runtime-PM release helper'
+printf '%s\n' "$power_put_body" |
+	grep -Fq 'pm_runtime_put_sync_suspend(ctx->dev)' ||
+	fail 'normal VIO release must synchronously drop the provider runtime-PM vote'
+power_put_noidle_body=$(function_body rockpi_vio_power_put_noidle) ||
+	fail 'provider is missing the system-PM VIO vote release helper'
+printf '%s\n' "$power_put_noidle_body" |
+	grep -Fq 'pm_runtime_put_noidle(ctx->dev)' ||
+	fail 'system-PM VIO release must balance the vote without a nested runtime transition'
+
+for callback in rockpi_write_dsi0_grf rockpi_read_dsi0 rockpi_write_dsi0; do
+	callback_body=$(function_body "$callback")
+	printf '%s\n' "$callback_body" | grep -Fq 'ctx->vio_power_held' ||
+		fail "$callback must reject access without the VIO runtime-PM vote"
+done
+
 probe_body=$(function_body rockpi_display_compat_probe)
 printf '%s\n' "$probe_body" |
 	grep -Fq 'of_machine_is_compatible("radxa,rockpi4b-plus")' ||
 	fail 'provider must reject every machine except the Rock Pi 4B+'
+probe_pm_enable=$(printf '%s\n' "$probe_body" |
+	body_line 'pm_runtime_enable(dev)') ||
+	fail 'provider probe must enable runtime PM after platform genpd attachment'
+probe_domain_check=$(printf '%s\n' "$probe_body" |
+	body_line 'if (!dev->pm_domain)') ||
+	fail 'provider probe must fail closed unless the platform bus attached VIO genpd'
+probe_power_get=$(printf '%s\n' "$probe_body" |
+	body_line 'rockpi_vio_power_get(ctx)') ||
+	fail 'provider probe must acquire and hold the VIO power domain'
 probe_start=$(printf '%s\n' "$probe_body" |
 	body_line 'rockpi_dsi0_start(&ctx->dsi0_state, &rockpi_display_io, ctx)') ||
 	fail 'provider probe must start and lock DSI0'
@@ -89,9 +122,18 @@ probe_link=$(printf '%s\n' "$probe_body" |
 probe_publish=$(printf '%s\n' "$probe_body" |
 	body_line 'platform_set_drvdata(pdev, ctx)') ||
 	fail 'provider must publish driver data after initialization'
-[ "$probe_start" -lt "$probe_link" ] &&
+[ "$probe_domain_check" -lt "$probe_pm_enable" ] &&
+	[ "$probe_pm_enable" -lt "$probe_power_get" ] &&
+	[ "$probe_power_get" -lt "$probe_start" ] &&
+	[ "$probe_start" -lt "$probe_link" ] &&
 	[ "$probe_link" -lt "$probe_publish" ] ||
-	fail 'provider publication must follow successful DSI0 lock and DSI1 link creation'
+	fail 'provider publication must follow VIO acquisition, DSI0 lock, and DSI1 link creation'
+printf '%s\n' "$probe_body" |
+	grep -Fq 'rockpi_vio_power_put(ctx)' ||
+	fail 'provider probe failure must release an acquired VIO vote'
+printf '%s\n' "$probe_body" |
+	grep -Fq 'pm_runtime_disable(dev)' ||
+	fail 'provider probe failure must disable runtime PM after balancing its vote'
 if printf '%s\n' "$probe_body" | grep -Eq '\b(readl|writel)\('; then
 	fail 'provider probe must not access either VOP'
 fi
@@ -151,15 +193,26 @@ suspend_check=$(printf '%s\n' "$suspend_body" |
 suspend_stop=$(printf '%s\n' "$suspend_body" |
 	body_line 'rockpi_dsi0_stop(&ctx->dsi0_state, &rockpi_display_io, ctx)') ||
 	fail 'provider suspend must stop DSI0'
+suspend_power_put=$(printf '%s\n' "$suspend_body" |
+	body_line 'rockpi_vio_power_put_noidle(ctx)') ||
+	fail 'provider suspend must release the VIO vote for genpd system sleep'
 [ "$suspend_restore" -lt "$suspend_check" ] &&
-	[ "$suspend_check" -lt "$suspend_stop" ] ||
-	fail 'provider suspend must restore the live VOP before stopping DSI0'
+	[ "$suspend_check" -lt "$suspend_stop" ] &&
+	[ "$suspend_stop" -lt "$suspend_power_put" ] ||
+	fail 'provider suspend must restore VOP and stop DSI0 before releasing VIO'
 
 resume_body=$(function_body rockpi_display_compat_resume)
-printf '%s\n' "$resume_body" |
-	grep -Fq 'rockpi_dsi0_start(&ctx->dsi0_state, &rockpi_display_io, ctx)' &&
+resume_power_get=$(printf '%s\n' "$resume_body" |
+	body_line 'rockpi_vio_power_get(ctx)') ||
+	fail 'provider resume must reacquire VIO before DSI0 restart'
+resume_start=$(printf '%s\n' "$resume_body" |
+	body_line 'rockpi_dsi0_start(&ctx->dsi0_state, &rockpi_display_io, ctx)') ||
+	fail 'provider resume must restart DSI0'
+[ "$resume_power_get" -lt "$resume_start" ] ||
+	fail 'provider resume must hold VIO before accessing DSI0'
+printf '%s\n' "$resume_body" | grep -Fq 'rockpi_vio_power_put_noidle(ctx)' &&
 	printf '%s\n' "$resume_body" | grep -Fq 'return ret;' ||
-	fail 'provider resume must propagate DSI0 restart failure'
+	fail 'provider resume failure must release VIO and propagate the restart error'
 
 remove_body=$(function_body rockpi_display_compat_remove)
 remove_link=$(printf '%s\n' "$remove_body" |
@@ -171,8 +224,16 @@ remove_put=$(printf '%s\n' "$remove_body" |
 remove_stop=$(printf '%s\n' "$remove_body" |
 	body_line 'rockpi_dsi0_stop(&ctx->dsi0_state, &rockpi_display_io, ctx)') ||
 	fail 'provider remove must stop DSI0'
-[ "$remove_link" -lt "$remove_put" ] && [ "$remove_put" -lt "$remove_stop" ] ||
-	fail 'provider remove must unwind DSI1 link, reference, then DSI0 in reverse order'
+remove_power_put=$(printf '%s\n' "$remove_body" |
+	body_line 'rockpi_vio_power_put(ctx)') ||
+	fail 'provider remove must release its VIO runtime-PM vote'
+remove_pm_disable=$(printf '%s\n' "$remove_body" |
+	body_line 'pm_runtime_disable(ctx->dev)') ||
+	fail 'provider remove must disable runtime PM after dropping its vote'
+[ "$remove_link" -lt "$remove_put" ] && [ "$remove_put" -lt "$remove_stop" ] &&
+	[ "$remove_stop" -lt "$remove_power_put" ] &&
+	[ "$remove_power_put" -lt "$remove_pm_disable" ] ||
+	fail 'provider remove must unwind DSI1, stop DSI0, release VIO, then disable runtime PM'
 if printf '%s\n' "$remove_body" | grep -Fq 'rockpi_vop_restore('; then
 	fail 'provider remove must not access a possibly inactive VOP'
 fi

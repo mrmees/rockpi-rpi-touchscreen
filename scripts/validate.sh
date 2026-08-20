@@ -151,6 +151,14 @@ property_phandle()
 	sed -n "s/^[[:space:]]*${property} = <\\(0x[0-9a-fA-F]*\\)>;.*/\\1/p" | head -n 1
 }
 
+property_cell()
+{
+	property=$1
+	cell=$2
+	sed -n "s/^[[:space:]]*${property} = <\\([^>]*\\)>;.*/\\1/p" |
+		awk -v cell="$cell" 'NR == 1 { print $cell; exit }'
+}
+
 require_equal()
 {
 	actual=$1
@@ -195,7 +203,7 @@ printf 'PASS: all three module builds and metadata\n'
 dtb=$(active_dtb)
 [ -f "$dtb" ] || die "active DTB not found: $dtb"
 run_dtb_decompile base-dtb "$dtb" "$workdir/base.dts"
-for symbol in mipi_dsi mipi_dsi1 mipi1_in_vopl mipi1_in_vopb vopl_out_mipi1 i2c1 grf vopb vopl; do
+for symbol in mipi_dsi mipi_dsi1 mipi1_in_vopl mipi1_in_vopb vopl_out_mipi1 i2c1 grf vopb vopl power; do
 	grep -Eq "^[[:space:]]*$symbol[[:space:]]*=" "$workdir/base.dts" || die "active DTB is missing symbol: $symbol"
 done
 printf 'PASS: active DTB symbols\n'
@@ -205,7 +213,9 @@ mkdir -p "$build_dir"
 overlay=$repo_root/overlays/$OVERLAY_NAME.dts
 dtbo=$build_dir/$OVERLAY_NAME.dtbo
 temporary_dtbo=$workdir/$OVERLAY_NAME.dtbo
-run_warning_free overlay-compile dtc -@ -I dts -O dtb -o "$temporary_dtbo" "$overlay"
+# The standalone overlay cannot expose the external power controller's
+# #power-domain-cells to dtc. The merged-tree checks below validate both cells.
+run_warning_free overlay-compile dtc -Wno-power_domains_property -@ -I dts -O dtb -o "$temporary_dtbo" "$overlay"
 atomic_install_file "$temporary_dtbo" "$dtbo"
 printf 'PASS: overlay compile\n'
 run_warning_free overlay-apply fdtoverlay -i "$dtb" -o "$workdir/merged.dtb" "$dtbo"
@@ -218,6 +228,7 @@ i2c1=$(node_from_file "$workdir/merged.dts" 'i2c@ff110000')
 grf=$(node_from_file "$workdir/merged.dts" 'syscon@ff770000')
 vopb=$(node_from_file "$workdir/merged.dts" 'vop@ff900000')
 vopl=$(node_from_file "$workdir/merged.dts" 'vop@ff8f0000')
+power=$(node_from_file "$workdir/merged.dts" 'power-controller')
 hdmi=$(node_from_file "$workdir/merged.dts" 'hdmi@ff940000')
 provider_count=$(grep -Fc 'compatible = "rockpi,rk3399-dsi1-rpi-touchscreen-compat";' "$workdir/merged.dts" || true)
 [ "$provider_count" -eq 1 ] || die "merged tree has $provider_count display compatibility providers, expected 1"
@@ -243,6 +254,10 @@ require_equal "$(printf '%s\n' "$provider" | property_phandle rockchip,dsi1)" "$
 require_equal "$(printf '%s\n' "$provider" | property_phandle rockchip,grf)" "$(printf '%s\n' "$grf" | property_phandle phandle)" 'display compatibility provider GRF phandle is wrong'
 require_equal "$(printf '%s\n' "$provider" | property_phandle rockchip,vopb)" "$(printf '%s\n' "$vopb" | property_phandle phandle)" 'display compatibility provider big-VOP phandle is wrong'
 require_equal "$(printf '%s\n' "$provider" | property_phandle rockchip,vopl)" "$(printf '%s\n' "$vopl" | property_phandle phandle)" 'display compatibility provider little-VOP phandle is wrong'
+require_equal "$(printf '%s\n' "$provider" | property_cell power-domains 1)" "$(printf '%s\n' "$power" | property_phandle phandle)" 'display compatibility provider VIO controller phandle is wrong'
+require_equal "$(printf '%s\n' "$provider" | property_cell power-domains 2)" '0x0f' 'display compatibility provider power-domain is not RK3399_PD_VIO'
+require_equal "$(printf '%s\n' "$provider" | property_cell power-domains 1)" "$(printf '%s\n' "$dsi0" | property_cell power-domains 1)" 'display compatibility provider and DSI0 use different power controllers'
+require_equal "$(printf '%s\n' "$provider" | property_cell power-domains 2)" "$(printf '%s\n' "$dsi0" | property_cell power-domains 2)" 'display compatibility provider and DSI0 use different power domains'
 printf 'PASS: display compatibility provider resources\n'
 
 require_text "$panel" 'compatible = "rockpi,rpi-7inch-touchscreen-panel";' 'merged project panel compatible is missing'
