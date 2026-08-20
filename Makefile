@@ -20,6 +20,8 @@ clean:
 test:
 	cc -std=c11 -Wall -Wextra -Werror -I. tests/test_protocol.c -o /tmp/test_ft5426
 	/tmp/test_ft5426
+	cc -std=c11 -Wall -Wextra -Werror -I. tests/test_display_compat.c src/display_compat_core.c -o /tmp/test_display_compat
+	/tmp/test_display_compat
 	sh tests/test_driver_lifecycle.sh
 	sh tests/test_panel_lifecycle.sh
 	sh tests/test_overlay.sh
