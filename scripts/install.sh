@@ -109,7 +109,8 @@ rollback()
 				rollback_note="$rollback_note old DKMS reinstall failed; retained old source at $old_source;"
 			fi
 		fi
-		if [ -n "$recovery_directory" ] && [ -d "$recovery_directory/prior-modules" ]; then
+		if [ -n "$recovery_directory" ] &&
+			[ -f "$recovery_directory/prior-modules.snapshot-complete" ]; then
 			for module_name in $MODULE_NAMES; do
 				prior_paths=$recovery_directory/prior-modules/$module_name.paths
 				current_paths=$recovery_directory/prior-modules/$module_name.current-paths
@@ -247,9 +248,13 @@ for module_name in $MODULE_NAMES; do
 	while IFS= read -r prior_module_path; do
 		[ -n "$prior_module_path" ] || continue
 		prior_index=$((prior_index + 1))
-		cp "$prior_module_path" "$recovery_directory/prior-modules/$module_name.$prior_index.backup"
+		prior_module_backup=$recovery_directory/prior-modules/$module_name.$prior_index.backup
+		cp "$prior_module_path" "$prior_module_backup"
+		cmp -s "$prior_module_path" "$prior_module_backup" ||
+			die "recovery snapshot verification failed for $prior_module_path"
 	done < "$prior_paths"
 done
+: > "$recovery_directory/prior-modules.snapshot-complete"
 dkms_install_attempted=1
 dkms install -m "$PROJECT_NAME" -v "$PROJECT_VERSION" -k "$KERNEL_RELEASE"
 
