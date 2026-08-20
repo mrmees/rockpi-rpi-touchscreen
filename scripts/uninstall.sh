@@ -31,16 +31,44 @@ if [ -n "$offline_boot_root" ]; then
 	exit 0
 fi
 
-require_command awk chmod cmp cp depmod diff dkms find grep mkdir mktemp mv rm
+require_command awk chmod cmp cp depmod diff dkms find grep mkdir mktemp mv rm stat
 overlay_destination=$OVERLAY_DIRECTORY/$OVERLAY_NAME.dtbo
+touch_mapper_source=$PROJECT_SOURCE_DIR/scripts/map-touchscreen.sh
+touch_autostart_source=$PROJECT_SOURCE_DIR/assets/rockpi-rpi-touchscreen-touch-map.desktop
+
+runtime_asset_state()
+{
+	runtime_source=$1
+	runtime_destination=$2
+	runtime_mode=$3
+	if [ ! -e "$runtime_destination" ] && [ ! -L "$runtime_destination" ]; then
+		printf '%s\n' absent
+	elif [ -f "$runtime_destination" ] && [ ! -L "$runtime_destination" ] &&
+		[ -f "$runtime_source" ] && cmp -s "$runtime_source" "$runtime_destination" &&
+		[ "$(stat -c '%a' "$runtime_destination")" = "$runtime_mode" ]; then
+		printf '%s\n' owned
+	else
+		printf '%s\n' modified
+	fi
+}
 
 if [ "$dry_run" -eq 1 ]; then
+	mapper_state=$(runtime_asset_state "$touch_mapper_source" "$TOUCH_MAPPER_DESTINATION" 755)
+	autostart_state=$(runtime_asset_state "$touch_autostart_source" "$TOUCH_AUTOSTART_DESTINATION" 644)
 	temporary_config=$(mktemp "${ARMBIAN_ENV}.XXXXXX") || die 'cannot create dry-run temporary configuration'
 	trap 'rm -f "$temporary_config"' HUP INT TERM EXIT
 	cp "$ARMBIAN_ENV" "$temporary_config"
 	remove_overlay_token "$temporary_config" "$OVERLAY_TOKEN"
 	printf 'REMOVE: %s\n' "$overlay_destination"
 	printf 'REMOVE: %s\n' "$PROJECT_SOURCE_DIR"
+	case $mapper_state in
+	owned) printf 'REMOVE: %s\n' "$TOUCH_MAPPER_DESTINATION" ;;
+	modified) printf 'RETAIN MODIFIED: %s\n' "$TOUCH_MAPPER_DESTINATION" ;;
+	esac
+	case $autostart_state in
+	owned) printf 'REMOVE: %s\n' "$TOUCH_AUTOSTART_DESTINATION" ;;
+	modified) printf 'RETAIN MODIFIED: %s\n' "$TOUCH_AUTOSTART_DESTINATION" ;;
+	esac
 	printf 'CONFIG: %s\n' "$ARMBIAN_ENV"
 	for module_name in $MODULE_NAMES; do
 		printf 'MODULE: %s\n' "$module_name"
@@ -61,6 +89,15 @@ if [ -e "$PROJECT_SOURCE_DIR" ]; then
 		grep -Fxq "PACKAGE_VERSION=\"$PROJECT_VERSION\"" "$PROJECT_SOURCE_DIR/dkms.conf" ||
 		die "source path is not owned by this project: $PROJECT_SOURCE_DIR"
 	source_present=1
+fi
+
+mapper_state=$(runtime_asset_state "$touch_mapper_source" "$TOUCH_MAPPER_DESTINATION" 755)
+autostart_state=$(runtime_asset_state "$touch_autostart_source" "$TOUCH_AUTOSTART_DESTINATION" 644)
+if [ "$mapper_state" = modified ]; then
+	printf 'RETAIN MODIFIED: %s\n' "$TOUCH_MAPPER_DESTINATION"
+fi
+if [ "$autostart_state" = modified ]; then
+	printf 'RETAIN MODIFIED: %s\n' "$TOUCH_AUTOSTART_DESTINATION"
 fi
 
 dkms_status=$(dkms status -m "$PROJECT_NAME" -v "$PROJECT_VERSION") ||
@@ -88,6 +125,8 @@ rollback_failed=0
 rollback_note=
 dependency_index_restore_failed=0
 dkms_state_restore_failed=0
+mapper_remove_attempted=0
+autostart_remove_attempted=0
 dkms_state_root=${DKMS_STATE_DIR:-/var/lib/dkms}
 dkms_state_destination=$dkms_state_root/$PROJECT_NAME/$PROJECT_VERSION
 trap 'snapshot_status=$?; trap - EXIT HUP INT TERM; rm -rf "$transaction_directory"; exit "$snapshot_status"' \
@@ -112,6 +151,77 @@ snapshot_module_paths()
 		done < "$paths"
 	done
 	: > "$transaction_directory/modules.snapshot-complete"
+}
+
+snapshot_runtime_asset()
+{
+	runtime_asset_name=$1
+	runtime_destination=$2
+	runtime_backup=$transaction_directory/runtime/$runtime_asset_name
+	runtime_mode=$(stat -c '%a' "$runtime_destination")
+	cp "$runtime_destination" "$runtime_backup" ||
+		die "cannot snapshot runtime asset: $runtime_destination"
+	chmod "$runtime_mode" "$runtime_backup" ||
+		die "cannot snapshot runtime asset mode: $runtime_destination"
+	cmp -s "$runtime_destination" "$runtime_backup" &&
+		[ "$(stat -c '%a' "$runtime_backup")" = "$runtime_mode" ] ||
+		die "cannot verify runtime asset snapshot: $runtime_destination"
+	printf '%s\n' "$runtime_mode" > "$runtime_backup.mode"
+}
+
+snapshot_runtime_assets()
+{
+	mkdir -p "$transaction_directory/runtime"
+	if [ "$mapper_state" = owned ]; then
+		snapshot_runtime_asset mapper "$TOUCH_MAPPER_DESTINATION"
+	fi
+	if [ "$autostart_state" = owned ]; then
+		snapshot_runtime_asset autostart "$TOUCH_AUTOSTART_DESTINATION"
+	fi
+	: > "$transaction_directory/runtime.snapshot-complete"
+}
+
+restore_runtime_asset()
+{
+	runtime_backup=$1
+	runtime_destination=$2
+	IFS= read -r runtime_mode < "$runtime_backup.mode" || return 1
+	if [ -e "$runtime_destination" ] || [ -L "$runtime_destination" ]; then
+		if [ -f "$runtime_destination" ] && [ ! -L "$runtime_destination" ] &&
+			cmp -s "$runtime_backup" "$runtime_destination" &&
+			[ "$(stat -c '%a' "$runtime_destination")" = "$runtime_mode" ]; then
+			return 0
+		fi
+		printf 'RETAIN MODIFIED: %s\n' "$runtime_destination"
+		return 1
+	fi
+	try_atomic_install_file "$runtime_backup" "$runtime_destination" "$runtime_mode" &&
+		[ -f "$runtime_destination" ] && [ ! -L "$runtime_destination" ] &&
+		cmp -s "$runtime_backup" "$runtime_destination" &&
+		[ "$(stat -c '%a' "$runtime_destination")" = "$runtime_mode" ]
+}
+
+restore_runtime_assets()
+{
+	[ -f "$transaction_directory/runtime.snapshot-complete" ] || return 1
+	runtime_restore_failed=0
+	mapper_restored=1
+	if [ "$mapper_remove_attempted" -eq 1 ] &&
+		! restore_runtime_asset "$transaction_directory/runtime/mapper" "$TOUCH_MAPPER_DESTINATION"; then
+		runtime_restore_failed=1
+		mapper_restored=0
+		rollback_note="$rollback_note touch mapper restoration failed: $TOUCH_MAPPER_DESTINATION;"
+	fi
+	if [ "$autostart_remove_attempted" -eq 1 ]; then
+		if [ "$mapper_restored" -eq 0 ]; then
+			runtime_restore_failed=1
+			rollback_note="$rollback_note touch autostart retained because touch mapper restoration failed: $TOUCH_AUTOSTART_DESTINATION;"
+		elif ! restore_runtime_asset "$transaction_directory/runtime/autostart" "$TOUCH_AUTOSTART_DESTINATION"; then
+			runtime_restore_failed=1
+			rollback_note="$rollback_note touch autostart restoration failed: $TOUCH_AUTOSTART_DESTINATION;"
+		fi
+	fi
+	[ "$runtime_restore_failed" -eq 0 ]
 }
 
 restore_module_paths()
@@ -232,6 +342,9 @@ rollback_uninstall()
 		rollback_failed=1
 		rollback_note="$rollback_note source restore failed;"
 	fi
+	if ! restore_runtime_assets; then
+		rollback_failed=1
+	fi
 	if ! try_atomic_install_file "$transaction_directory/armbianEnv.txt" "$ARMBIAN_ENV"; then
 		rollback_failed=1
 		rollback_note="$rollback_note boot configuration restore failed;"
@@ -281,6 +394,7 @@ if [ "$source_present" -eq 1 ]; then
 fi
 snapshot_dkms_state_tree
 snapshot_module_paths
+snapshot_runtime_assets
 : > "$transaction_directory/snapshot-complete"
 trap rollback_uninstall EXIT HUP INT TERM
 
@@ -299,6 +413,18 @@ fi
 
 remove_overlay_token "$ARMBIAN_ENV" "$OVERLAY_TOKEN"
 rm -f "$overlay_destination"
+if [ "$autostart_state" = owned ]; then
+	autostart_remove_attempted=1
+	rm -f "$TOUCH_AUTOSTART_DESTINATION"
+fi
+if [ "$mapper_state" = owned ]; then
+	if [ "$autostart_state" = modified ]; then
+		printf 'RETAIN DEPENDENCY: %s\n' "$TOUCH_MAPPER_DESTINATION"
+	else
+		mapper_remove_attempted=1
+		rm -f "$TOUCH_MAPPER_DESTINATION"
+	fi
+fi
 if [ "$source_present" -eq 1 ]; then
 	rm -rf "$PROJECT_SOURCE_DIR"
 fi
