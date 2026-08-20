@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Rock Pi Raspberry Pi Touchscreen Mapping
+Comment=Map the Raspberry Pi touchscreen to its DSI output
+Exec=/usr/libexec/rockpi-rpi-touchscreen-map-touch --watch
+TryExec=/usr/libexec/rockpi-rpi-touchscreen-map-touch
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
