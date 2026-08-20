@@ -83,7 +83,7 @@ source_parent=$(dirname -- "$PROJECT_SOURCE_DIR")
 mkdir -p "$source_parent"
 transaction_directory=$(mktemp -d "$source_parent/.${PROJECT_NAME}.uninstall.XXXXXX")
 completed=0
-dkms_removed=0
+dkms_remove_attempted=0
 rollback_failed=0
 rollback_note=
 trap 'snapshot_status=$?; trap - EXIT HUP INT TERM; rm -rf "$transaction_directory"; exit "$snapshot_status"' \
@@ -143,19 +143,27 @@ restore_source()
 
 restore_dkms()
 {
-	[ "$dkms_removed" -eq 1 ] || return 0
-	if ! dkms add -m "$PROJECT_NAME" -v "$PROJECT_VERSION" >/dev/null 2>&1; then
-		current_status=$(dkms status -m "$PROJECT_NAME" -v "$PROJECT_VERSION" 2>/dev/null || true)
-		printf '%s\n' "$current_status" | dkms_status_has_version "$PROJECT_VERSION" || return 1
-	fi
-	expected_built="$PROJECT_NAME/$PROJECT_VERSION, $KERNEL_RELEASE, $ARCH: built"
-	expected_installed="$PROJECT_NAME/$PROJECT_VERSION, $KERNEL_RELEASE, $ARCH: installed"
-	if printf '%s\n' "$dkms_status" | grep -Fxq "$expected_built" ||
-		printf '%s\n' "$dkms_status" | grep -Fxq "$expected_installed"; then
-		dkms build -m "$PROJECT_NAME" -v "$PROJECT_VERSION" -k "$KERNEL_RELEASE" >/dev/null 2>&1 || return 1
-	fi
-	if printf '%s\n' "$dkms_status" | grep -Fxq "$expected_installed"; then
-		dkms install -m "$PROJECT_NAME" -v "$PROJECT_VERSION" -k "$KERNEL_RELEASE" >/dev/null 2>&1 || return 1
+	[ "$dkms_remove_attempted" -eq 1 ] || return 0
+	current_status=$(dkms status -m "$PROJECT_NAME" -v "$PROJECT_VERSION" 2>/dev/null) || return 1
+	if [ "$current_status" != "$dkms_status" ]; then
+		if printf '%s\n' "$current_status" | dkms_status_has_version "$PROJECT_VERSION"; then
+			dkms remove -m "$PROJECT_NAME" -v "$PROJECT_VERSION" --all >/dev/null 2>&1 || true
+			current_status=$(dkms status -m "$PROJECT_NAME" -v "$PROJECT_VERSION" 2>/dev/null) || return 1
+			printf '%s\n' "$current_status" | dkms_status_has_version "$PROJECT_VERSION" && return 1
+		fi
+		if ! dkms add -m "$PROJECT_NAME" -v "$PROJECT_VERSION" >/dev/null 2>&1; then
+			current_status=$(dkms status -m "$PROJECT_NAME" -v "$PROJECT_VERSION" 2>/dev/null) || return 1
+			printf '%s\n' "$current_status" | dkms_status_has_version "$PROJECT_VERSION" || return 1
+		fi
+		expected_built="$PROJECT_NAME/$PROJECT_VERSION, $KERNEL_RELEASE, $ARCH: built"
+		expected_installed="$PROJECT_NAME/$PROJECT_VERSION, $KERNEL_RELEASE, $ARCH: installed"
+		if printf '%s\n' "$dkms_status" | grep -Fxq "$expected_built" ||
+			printf '%s\n' "$dkms_status" | grep -Fxq "$expected_installed"; then
+			dkms build -m "$PROJECT_NAME" -v "$PROJECT_VERSION" -k "$KERNEL_RELEASE" >/dev/null 2>&1 || return 1
+		fi
+		if printf '%s\n' "$dkms_status" | grep -Fxq "$expected_installed"; then
+			dkms install -m "$PROJECT_NAME" -v "$PROJECT_VERSION" -k "$KERNEL_RELEASE" >/dev/null 2>&1 || return 1
+		fi
 	fi
 	restore_module_paths || return 1
 	restored_status=$(dkms status -m "$PROJECT_NAME" -v "$PROJECT_VERSION" 2>/dev/null || true)
@@ -214,11 +222,11 @@ snapshot_module_paths
 trap rollback_uninstall EXIT HUP INT TERM
 
 if [ "$dkms_registered" -eq 1 ]; then
+	dkms_remove_attempted=1
 	if ! dkms remove -m "$PROJECT_NAME" -v "$PROJECT_VERSION" --all; then
 		printf 'ERROR: DKMS removal failed; retained source: %s\n' "$PROJECT_SOURCE_DIR" >&2
 		exit 1
 	fi
-	dkms_removed=1
 	remaining_status=$(dkms status -m "$PROJECT_NAME" -v "$PROJECT_VERSION") ||
 		die "cannot verify DKMS removal for $PROJECT_NAME/$PROJECT_VERSION; retained source: $PROJECT_SOURCE_DIR"
 	if printf '%s\n' "$remaining_status" | dkms_status_has_version "$PROJECT_VERSION"; then

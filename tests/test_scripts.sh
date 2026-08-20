@@ -733,6 +733,17 @@ test_uninstall_post_remove_status_failure_restores_transaction()
 	printf 'PASS: post-removal status failure restores uninstall transaction\n'
 }
 
+test_uninstall_remove_mutate_then_fail_restores_transaction()
+{
+	sandbox=$workdir/uninstall-remove-mutate-failure
+	prepare_uninstall_failure "$sandbox"
+	if DKMS_FAIL_ON=remove run_uninstall "$sandbox" > "$sandbox/output" 2>&1; then
+		fail 'uninstall accepted a DKMS removal that mutated state before failing'
+	fi
+	assert_failed_uninstall_restored "$sandbox" "$UNINSTALL_CONFIG_CHECKSUM" "$UNINSTALL_DTBO_CHECKSUM"
+	printf 'PASS: mutate-then-fail DKMS removal restores uninstall transaction\n'
+}
+
 test_uninstall_boot_config_failure_restores_transaction()
 {
 	sandbox=$workdir/uninstall-boot-config-failure
@@ -851,6 +862,27 @@ test_failed_migration_retains_old_release()
 		'failed migration did not retain exact old installed state'
 	assert_file_absent "$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.0"
 	printf 'PASS: failed migration retains 0.1.1 release\n'
+}
+
+test_install_add_mutate_then_fail_restores_absent_baseline()
+{
+	sandbox=$workdir/install-add-mutate-failure
+	make_sandbox "$sandbox"
+	config_before=$(sha256sum "$sandbox/boot/armbianEnv.txt" | awk '{print $1}')
+	if DKMS_FAIL_ON=add run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+		fail 'installer accepted a DKMS add that mutated state before failing'
+	fi
+	assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.0)" '' \
+		'mutate-then-fail DKMS add did not restore the absent registration baseline'
+	assert_file_absent "$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.0"
+	assert_file_absent "$sandbox/boot/overlay-user/rockpi-4b-plus-rpi-touchscreen.dtbo"
+	assert_file_absent "$sandbox/modules/test-kernel/updates/dkms/raspits_ft5426.ko"
+	assert_file_absent "$sandbox/modules/test-kernel/updates/dkms/panel_rockpi_rpi_touchscreen.ko"
+	assert_equal "$(sha256sum "$sandbox/boot/armbianEnv.txt" | awk '{print $1}')" "$config_before" \
+		'mutate-then-fail DKMS add changed boot configuration'
+	grep -Fqx 'remove -m rockpi-rpi-touchscreen -v 0.2.0 --all' "$sandbox/dkms.log" ||
+		fail 'mutate-then-fail DKMS add did not remove the newly created registration'
+	printf 'PASS: mutate-then-fail DKMS add restores absent registration baseline\n'
 }
 
 test_invalid_old_installed_checksum_blocks_migration()
@@ -1034,6 +1066,7 @@ test_boot_rollback_failure_continues_cleanup_and_preserves_backup
 test_uninstall_dkms_failure_retains_source_and_fails
 test_uninstall_dkms_status_failure_leaves_all_assets
 test_uninstall_post_remove_status_failure_restores_transaction
+test_uninstall_remove_mutate_then_fail_restores_transaction
 test_uninstall_boot_config_failure_restores_transaction
 test_uninstall_dtbo_failure_restores_transaction
 test_uninstall_source_failure_restores_transaction
@@ -1041,6 +1074,7 @@ test_uninstall_accepts_unregistered_dkms
 test_uninstall_refuses_unowned_unregistered_source
 test_migration_removes_old_release_only_after_success
 test_failed_migration_retains_old_release
+test_install_add_mutate_then_fail_restores_absent_baseline
 test_invalid_old_installed_checksum_blocks_migration
 test_incomplete_snapshot_leaves_old_modules_untouched
 test_second_module_install_failure_restores_old_release_and_boot

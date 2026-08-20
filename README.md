@@ -133,8 +133,18 @@ reboot, and a shutdown/cold-start have all passed.
 
 The overlay is specific to this board, connector route, and kernel/device-tree
 symbols. It does not support the Touch Display 2, other Rock Pi models, or
-other panels. A missing panel should leave HDMI usable, but kernel upgrades can
-require a compatible compiler or overlay review. The repository is ready for
-publication before physical validation only when clearly marked draft or hardware-unverified;
-do not describe hardware support as complete until the
-checks above and a shutdown/start cycle have passed.
+other panels. A missing or disconnected panel can leave the shared Rockchip DRM
+master waiting for its panel component, so HDMI is not guaranteed to remain
+usable in that failure mode. Keep SSH or serial-console access available; if
+neither display binds, use the offline project-token removal in
+[docs/recovery.md](docs/recovery.md). Kernel upgrades can require a compatible
+compiler or overlay review.
+
+The transactional uninstaller deliberately accepts only an unregistered
+package or one DKMS lifecycle tuple for the running kernel. It stops without
+changing owned assets when multiple kernel tuples exist; follow the exact
+per-kernel reconciliation procedure in [docs/recovery.md](docs/recovery.md)
+before rerunning it. The repository is ready for publication before physical
+validation only when clearly marked draft or hardware-unverified; do not
+describe hardware support as complete until the checks above and a
+shutdown/start cycle have passed.

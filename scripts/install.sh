@@ -50,13 +50,22 @@ if [ "$old_was_installed" -eq 1 ]; then
 		cmp -s "$old_built_baseline" "$old_installed_baseline" ||
 		die 'old installed module does not match its DKMS build; refusing migration'
 fi
+if ! new_status_before=$(dkms status -m "$PROJECT_NAME" -v "$PROJECT_VERSION" 2>&1); then
+	printf 'ERROR: cannot capture DKMS registration baseline for %s/%s: %s\n' \
+		"$PROJECT_NAME" "$PROJECT_VERSION" "$new_status_before" >&2
+	exit 1
+fi
+new_was_registered=0
+if printf '%s\n' "$new_status_before" | dkms_status_has_version "$PROJECT_VERSION"; then
+	new_was_registered=1
+fi
 
 source_created=0
 overlay_created=0
 overlay_backup_created=0
 overlay_replaced=0
 previous_overlay_file=
-dkms_registration_created=0
+dkms_add_attempted=0
 dkms_install_attempted=0
 backup_created=0
 completed=0
@@ -70,7 +79,7 @@ rollback()
 	trap - EXIT HUP INT TERM
 	rollback_failed=0
 	rollback_note=
-	new_registration_retained=0
+	new_source_retained=0
 	if [ "$completed" -ne 1 ]; then
 		if [ "$backup_created" -eq 1 ] && [ -f "$backup_file" ]; then
 			if ! try_atomic_install_file "$backup_file" "$ARMBIAN_ENV"; then
@@ -97,11 +106,20 @@ rollback()
 				rollback_note="$rollback_note overlay backup cleanup failed: $previous_overlay_file;"
 			fi
 		fi
-		if [ "$dkms_registration_created" -eq 1 ] &&
-			! dkms remove -m "$PROJECT_NAME" -v "$PROJECT_VERSION" --all >/dev/null 2>&1; then
-			rollback_failed=1
-			new_registration_retained=1
-			rollback_note="$rollback_note DKMS registration removal failed; new source retained at $PROJECT_SOURCE_DIR;"
+		if [ "$dkms_add_attempted" -eq 1 ]; then
+			if ! new_status_after=$(dkms status -m "$PROJECT_NAME" -v "$PROJECT_VERSION" 2>/dev/null); then
+				rollback_failed=1
+				new_source_retained=1
+				rollback_note="$rollback_note DKMS registration baseline inspection failed; new source retained at $PROJECT_SOURCE_DIR;"
+			elif [ "$new_status_after" != "$new_status_before" ]; then
+				dkms remove -m "$PROJECT_NAME" -v "$PROJECT_VERSION" --all >/dev/null 2>&1 || true
+				if ! new_status_restored=$(dkms status -m "$PROJECT_NAME" -v "$PROJECT_VERSION" 2>/dev/null) ||
+					[ "$new_status_restored" != "$new_status_before" ]; then
+					rollback_failed=1
+					new_source_retained=1
+					rollback_note="$rollback_note DKMS registration baseline restoration failed; new source retained at $PROJECT_SOURCE_DIR;"
+				fi
+			fi
 		fi
 		if [ "$dkms_install_attempted" -eq 1 ] && [ "$old_was_installed" -eq 1 ]; then
 			if ! dkms install -m "$PROJECT_NAME" -v "$old_version" -k "$KERNEL_RELEASE" >/dev/null 2>&1; then
@@ -162,7 +180,7 @@ rollback()
 				fi
 			fi
 		fi
-		if [ "$source_created" -eq 1 ] && [ "$new_registration_retained" -eq 0 ] &&
+		if [ "$source_created" -eq 1 ] && [ "$new_source_retained" -eq 0 ] &&
 			! rm -rf "$PROJECT_SOURCE_DIR"; then
 			rollback_failed=1
 			rollback_note="$rollback_note new source removal failed: $PROJECT_SOURCE_DIR;"
@@ -229,11 +247,10 @@ fi
 [ "$(source_digest "$PROJECT_SOURCE_DIR")" = "$expected_source_digest" ] ||
 	die 'installed DKMS source checksum verification failed'
 
-if dkms add -m "$PROJECT_NAME" -v "$PROJECT_VERSION"; then
-	dkms_registration_created=1
-else
-		dkms status -m "$PROJECT_NAME" -v "$PROJECT_VERSION" | dkms_status_has_version "$PROJECT_VERSION" ||
-		die 'DKMS package could not be added or found'
+if [ "$new_was_registered" -eq 0 ]; then
+	dkms_add_attempted=1
+	dkms add -m "$PROJECT_NAME" -v "$PROJECT_VERSION" ||
+		die 'DKMS package could not be added'
 fi
 dkms build -m "$PROJECT_NAME" -v "$PROJECT_VERSION" -k "$KERNEL_RELEASE"
 

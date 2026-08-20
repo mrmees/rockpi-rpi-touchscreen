@@ -69,6 +69,37 @@ grep -Fq 'dsi->format = MIPI_DSI_FMT_RGB888;' "$panel" ||
 grep -Fq 'MIPI_DSI_MODE_VIDEO_BURST | MIPI_DSI_MODE_LPM;' "$panel" ||
 	fail 'DSI must use Radxa burst and low-power flags'
 
+mode_body=$(awk '
+	/static const struct drm_display_mode rockpi_panel_mode = \{/ {
+		inside = 1
+	}
+	inside {
+		print
+		if (/^[[:space:]]*};/) exit
+	}
+' "$panel")
+printf '%s\n' "$mode_body" | grep -Eq '^[[:space:]]*\.clock = 25979,$' ||
+	fail 'panel mode must use the fixed 25979 kHz clock'
+printf '%s\n' "$mode_body" | grep -Eq '^[[:space:]]*\.hdisplay = 800,$' ||
+	fail 'panel mode must use fixed hdisplay 800'
+printf '%s\n' "$mode_body" | grep -Eq '^[[:space:]]*\.hsync_start = 801,$' ||
+	fail 'panel mode must use fixed hsync_start 801'
+printf '%s\n' "$mode_body" | grep -Eq '^[[:space:]]*\.hsync_end = 803,$' ||
+	fail 'panel mode must use fixed hsync_end 803'
+printf '%s\n' "$mode_body" | grep -Eq '^[[:space:]]*\.htotal = 849,$' ||
+	fail 'panel mode must use fixed htotal 849'
+printf '%s\n' "$mode_body" | grep -Eq '^[[:space:]]*\.vdisplay = 480,$' ||
+	fail 'panel mode must use fixed vdisplay 480'
+printf '%s\n' "$mode_body" | grep -Eq '^[[:space:]]*\.vsync_start = 487,$' ||
+	fail 'panel mode must use fixed vsync_start 487'
+printf '%s\n' "$mode_body" | grep -Eq '^[[:space:]]*\.vsync_end = 489,$' ||
+	fail 'panel mode must use fixed vsync_end 489'
+printf '%s\n' "$mode_body" | grep -Eq '^[[:space:]]*\.vtotal = 510,$' ||
+	fail 'panel mode must use fixed vtotal 510'
+printf '%s\n' "$mode_body" |
+	grep -Eq '^[[:space:]]*\.flags = DRM_MODE_FLAG_NHSYNC \| DRM_MODE_FLAG_NVSYNC,$' ||
+	fail 'panel mode must use fixed negative horizontal and vertical sync flags'
+
 expected_sequence=$(cat <<'EOF'
 0x10, 0x02, 0x03, 0x00, 0x00, 0x00
 0x64, 0x01, 0x0c, 0x00, 0x00, 0x00
