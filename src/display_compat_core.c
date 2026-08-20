@@ -163,15 +163,23 @@ int rockpi_vop_apply(struct rockpi_vop_state *state,
 			    (dsp_ctrl0 & ~ROCKPI_VOP_RGB_SWAP_MASK) |
 			    ROCKPI_VOP_RGB_SWAP_RB);
 	if (ret)
-		return ret;
+		goto rollback;
 	ret = io->write_vop(context, selected, ROCKPI_VOP_CFG_DONE, 1);
 	if (ret)
-		return ret;
+		goto rollback;
 	state->selected = selected;
 	state->original_data01_swap = !!(sys_ctrl & ROCKPI_VOP_DATA01_SWAP);
 	state->original_rgb_swap = dsp_ctrl0 & ROCKPI_VOP_RGB_SWAP_MASK;
 	state->applied = true;
 	return 0;
+
+rollback:
+	state->selected = selected;
+	state->original_data01_swap = !!(sys_ctrl & ROCKPI_VOP_DATA01_SWAP);
+	state->original_rgb_swap = dsp_ctrl0 & ROCKPI_VOP_RGB_SWAP_MASK;
+	state->applied = true;
+	rockpi_vop_restore(state, io, context);
+	return ret;
 }
 
 void rockpi_vop_restore(struct rockpi_vop_state *state,

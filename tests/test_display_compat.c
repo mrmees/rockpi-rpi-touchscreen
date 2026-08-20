@@ -43,6 +43,8 @@ struct fake_context {
 	enum rockpi_vop_id route;
 	unsigned int lock_after_reads;
 	unsigned int lock_reads;
+	bool fail_vop_write_once;
+	rockpi_u32 fail_vop_write_offset;
 	bool non_routed_vop_access;
 };
 
@@ -203,6 +205,11 @@ static int fake_vop_write(void *context, enum rockpi_vop_id vop,
 	log_operation(fake, FAKE_VOP_WRITE, vop, offset, value, 0);
 	if (fake_result(fake, FAKE_VOP_WRITE))
 		return -EIO;
+	if (fake->fail_vop_write_once &&
+	    fake->fail_vop_write_offset == offset) {
+		fake->fail_vop_write_once = false;
+		return -EIO;
+	}
 	*fake_vop_register(fake, vop, offset) = value;
 	return 0;
 }
@@ -451,6 +458,38 @@ static void test_vop_apply_is_idempotent(void)
 	       fake.log_count == log_count, "repeated VOP apply must be a no-op");
 }
 
+static void test_vop_second_field_failure_rolls_back_selected_vop(void)
+{
+	struct fake_context fake;
+	struct rockpi_vop_state state = { 0 };
+
+	init_vop(&fake, ROCKPI_VOP_LIT);
+	fake.fail_vop_write_once = true;
+	fake.fail_vop_write_offset = 0x0010;
+	expect(rockpi_vop_apply(&state, &fake_io, &fake) == -EIO,
+	       "second VOP field write failure was not returned");
+	expect(fake.vopl[0x0008 / 4] == 0x55550000 &&
+	       fake.vopl[0x0010 / 4] == 0xaaaa5000 && fake.vopl[0] == 1 &&
+	       !state.applied && !fake.non_routed_vop_access,
+	       "second VOP field write failure did not roll back VOPL");
+}
+
+static void test_vop_cfg_done_failure_rolls_back_selected_vop(void)
+{
+	struct fake_context fake;
+	struct rockpi_vop_state state = { 0 };
+
+	init_vop(&fake, ROCKPI_VOP_BIG);
+	fake.fail_vop_write_once = true;
+	fake.fail_vop_write_offset = 0x0000;
+	expect(rockpi_vop_apply(&state, &fake_io, &fake) == -EIO,
+	       "VOP CFG_DONE failure was not returned");
+	expect(fake.vopb[0x0008 / 4] == 0x55550000 &&
+	       fake.vopb[0x0010 / 4] == 0xaaaa5000 && fake.vopb[0] == 1 &&
+	       !state.applied && !fake.non_routed_vop_access,
+	       "VOP CFG_DONE failure did not roll back VOPB");
+}
+
 static void test_vop_restore_without_apply_is_noop(void)
 {
 	struct fake_context fake;
@@ -472,6 +511,8 @@ int main(void)
 	test_vop_apply_sets_lane_and_bg_rb_only();
 	test_vop_restore_preserves_unrelated_live_changes();
 	test_vop_apply_is_idempotent();
+	test_vop_second_field_failure_rolls_back_selected_vop();
+	test_vop_cfg_done_failure_rolls_back_selected_vop();
 	test_vop_restore_without_apply_is_noop();
 	puts("PASS: RK3399 display compatibility core");
 	return 0;
