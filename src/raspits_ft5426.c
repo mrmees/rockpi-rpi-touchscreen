@@ -13,6 +13,7 @@
 #include <linux/i2c.h>
 #include <linux/input.h>
 #include <linux/input/mt.h>
+#include <linux/input/touchscreen.h>
 #include <linux/jiffies.h>
 #include <linux/module.h>
 #include <linux/slab.h>
@@ -31,6 +32,7 @@
 struct raspits_ft5426 {
 	struct i2c_client *client;
 	struct input_dev *input;
+	struct touchscreen_properties properties;
 	struct delayed_work poll_work;
 	unsigned long active_ids;
 	u8 consecutive_failures;
@@ -106,8 +108,7 @@ static void raspits_poll(struct work_struct *work)
 
 		input_mt_slot(ts->input, slot);
 		input_mt_report_slot_state(ts->input, MT_TOOL_FINGER, true);
-		input_report_abs(ts->input, ABS_MT_POSITION_X, point->x);
-		input_report_abs(ts->input, ABS_MT_POSITION_Y, point->y);
+		touchscreen_report_pos(ts->input, &ts->properties, point->x, point->y, true);
 		__set_bit(point->id, &next_active_ids);
 	}
 
@@ -190,6 +191,7 @@ static int raspits_probe(struct i2c_client *client)
 			     0, 0);
 	input_set_abs_params(input, ABS_MT_POSITION_Y, 0, FT5426_MAX_Y - 1,
 			     0, 0);
+	touchscreen_parse_properties(input, true, &ts->properties);
 
 	ret = input_mt_init_slots(input, FT5426_MAX_POINTS,
 				  INPUT_MT_DIRECT | INPUT_MT_DROP_UNUSED);
