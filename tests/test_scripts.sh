@@ -260,6 +260,10 @@ status)
 	fi
 	;;
 	remove)
+		if [ "$version" = 0.2.4 ] && [ -n "${DKMS_OLD_RETIREMENT_ATTEMPT_MARKER:-}" ] &&
+			[ -e "${LIBEXEC_DIR:?}/rockpi-rpi-touchscreen-map-touch" ]; then
+			: > "$DKMS_OLD_RETIREMENT_ATTEMPT_MARKER"
+		fi
 		if [ "$version" = 0.2.5 ] && [ "${DKMS_REMOVE_GENUINE_FAIL:-0}" -eq 1 ]; then
 			exit 23
 		fi
@@ -485,6 +489,10 @@ fi
 /bin/mv "$@"
 if [ -n "${MV_CORRUPT_AFTER_TARGET:-}" ] && [ "$last" = "$MV_CORRUPT_AFTER_TARGET" ]; then
 	printf '%s\n' corrupt-runtime-asset > "$last"
+fi
+if [ -n "${MV_CORRUPT_FILE_AFTER_TARGET:-}" ] &&
+	[ "$last" = "${MV_CORRUPT_FILE_TRIGGER:?}" ]; then
+	printf '%s\n' corrupt-runtime-asset > "$MV_CORRUPT_FILE_AFTER_TARGET"
 fi
 if [ -n "${MV_FAIL_AFTER_TARGET:-}" ] && [ "$last" = "$MV_FAIL_AFTER_TARGET" ] &&
 	[ ! -e "${MV_FAIL_AFTER_ONCE_MARKER:?}" ]; then
@@ -1092,6 +1100,29 @@ test_runtime_asset_install_failure_restores_absent_baseline()
 	printf 'PASS: runtime asset install failure restores absent baseline\n'
 }
 
+test_second_runtime_asset_mutate_then_fail_restores_absent_baseline()
+{
+	sandbox=$workdir/runtime-second-asset-mutate-failure
+	make_sandbox "$sandbox"
+	seed_old_release "$sandbox"
+	capture_migration_baseline "$sandbox"
+	mapper=$sandbox/usr-libexec/rockpi-rpi-touchscreen-map-touch
+	autostart=$sandbox/etc/xdg/autostart/rockpi-rpi-touchscreen-touch-map.desktop
+	if MV_FAIL_AFTER_TARGET="$autostart" \
+		MV_FAIL_AFTER_ONCE_MARKER="$sandbox/runtime-mv-failed-after" \
+		run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+		fail 'installer accepted a second runtime asset move that mutated before failing'
+	fi
+	[ -f "$sandbox/runtime-mv-failed-after" ] ||
+		fail 'second runtime asset mutate-then-fail injection was not reached'
+	grep -Fq 'touch autostart installation failed' "$sandbox/output" ||
+		fail 'installer did not report the second runtime asset installation failure'
+	assert_file_absent "$mapper"
+	assert_file_absent "$autostart"
+	assert_clean_failed_migration_restored "$sandbox" "$sandbox/output"
+	printf 'PASS: second runtime asset mutate-then-fail restores absent baseline\n'
+}
+
 test_late_failure_removes_new_runtime_assets()
 {
 	sandbox=$workdir/runtime-late-failure
@@ -1132,6 +1163,81 @@ test_runtime_asset_checksum_failure_retains_recovery()
 	grep -Fq "recovery artifacts retained at $recovery" "$sandbox/output" ||
 		fail 'runtime rollback failure did not report the recovery directory'
 	printf 'PASS: runtime checksum failure retains and reports recovery\n'
+}
+
+test_autostart_rollback_failure_retains_mapper_dependency_and_recovery()
+{
+	sandbox=$workdir/runtime-autostart-removal-failure
+	make_sandbox "$sandbox"
+	mapper=$sandbox/usr-libexec/rockpi-rpi-touchscreen-map-touch
+	autostart=$sandbox/etc/xdg/autostart/rockpi-rpi-touchscreen-touch-map.desktop
+	config=$sandbox/boot/armbianEnv.txt
+	if MV_FAIL_TARGET="$config" MV_FAIL_ONCE_MARKER="$sandbox/boot-mv-failed" \
+		RM_FAIL_TARGET="$autostart" \
+		run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+		fail 'installer accepted autostart rollback removal failure'
+	fi
+	[ -f "$sandbox/boot-mv-failed" ] || fail 'late rollback injection was not reached'
+	cmp "$repo_root/scripts/map-touchscreen.sh" "$mapper" ||
+		fail 'autostart removal failure did not retain its mapper dependency'
+	cmp "$repo_root/assets/rockpi-rpi-touchscreen-touch-map.desktop" "$autostart" ||
+		fail 'failed autostart removal did not retain the installed entry'
+	assert_equal "$(stat -c '%a' "$mapper")" '755' \
+		'autostart removal failure changed retained mapper mode'
+	assert_equal "$(stat -c '%a' "$autostart")" '644' \
+		'autostart removal failure changed retained autostart mode'
+	grep -Fq "touch autostart removal failed: $autostart" "$sandbox/output" ||
+		fail 'rollback did not report the retained autostart'
+	grep -Fq "touch mapper retained because touch autostart remains: $mapper" "$sandbox/output" ||
+		fail 'rollback did not report the retained mapper dependency'
+	grep -Fq 'rollback also failed' "$sandbox/output" ||
+		fail 'autostart rollback failure did not fail closed'
+	recovery=$(find "$sandbox/usr-src" -mindepth 1 -maxdepth 1 -type d \
+		-name '.rockpi-rpi-touchscreen.transaction.*' -print -quit)
+	[ -n "$recovery" ] || fail 'autostart rollback failure discarded recovery artifacts'
+	grep -Fq "recovery artifacts retained at $recovery" "$sandbox/output" ||
+		fail 'autostart rollback failure did not report recovery artifacts'
+	printf 'PASS: autostart rollback failure retains mapper dependency and recovery\n'
+}
+
+test_initial_runtime_verification_blocks_boot_mutation()
+{
+	sandbox=$workdir/runtime-pre-boot-verification
+	make_sandbox "$sandbox"
+	mapper=$sandbox/usr-libexec/rockpi-rpi-touchscreen-map-touch
+	config=$sandbox/boot/armbianEnv.txt
+	if MV_CORRUPT_AFTER_TARGET="$mapper" \
+		run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+		fail 'installer accepted mapper corruption before boot mutation'
+	fi
+	grep -Fq 'installed touch mapper checksum verification failed' "$sandbox/output" ||
+		fail 'initial runtime verification did not report mapper corruption'
+	if awk -v target="$config" '$NF == target { found = 1 } END { exit found ? 0 : 1 }' \
+		"$sandbox/mv.log"; then
+		fail 'initial runtime verification allowed boot configuration mutation'
+	fi
+	printf 'PASS: initial runtime verification blocks boot mutation\n'
+}
+
+test_final_runtime_verification_blocks_old_retirement()
+{
+	sandbox=$workdir/runtime-post-boot-verification
+	make_sandbox "$sandbox"
+	seed_old_release "$sandbox"
+	mapper=$sandbox/usr-libexec/rockpi-rpi-touchscreen-map-touch
+	config=$sandbox/boot/armbianEnv.txt
+	retirement_marker=$sandbox/old-retirement-attempted
+	if MV_CORRUPT_FILE_TRIGGER="$config" MV_CORRUPT_FILE_AFTER_TARGET="$mapper" \
+		DKMS_OLD_RETIREMENT_ATTEMPT_MARKER="$retirement_marker" \
+		run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+		fail 'installer accepted mapper corruption after boot mutation'
+	fi
+	grep -Fq 'final installed touch mapper checksum verification failed' "$sandbox/output" ||
+		fail 'final runtime verification did not report post-boot mapper corruption'
+	awk -v target="$config" '$NF == target { found = 1 } END { exit found ? 0 : 1 }' \
+		"$sandbox/mv.log" || fail 'post-boot corruption injection was not reached'
+	assert_file_absent "$retirement_marker"
+	printf 'PASS: final runtime verification blocks old retirement\n'
 }
 
 test_rollback_preserves_preexisting_exact_runtime_assets()
@@ -2300,8 +2406,12 @@ test_install_owns_verified_runtime_assets
 test_preexisting_unrelated_runtime_asset_blocks_before_mutation
 test_preexisting_wrong_runtime_mode_blocks_before_mutation
 test_runtime_asset_install_failure_restores_absent_baseline
+test_second_runtime_asset_mutate_then_fail_restores_absent_baseline
 test_late_failure_removes_new_runtime_assets
 test_runtime_asset_checksum_failure_retains_recovery
+test_autostart_rollback_failure_retains_mapper_dependency_and_recovery
+test_initial_runtime_verification_blocks_boot_mutation
+test_final_runtime_verification_blocks_old_retirement
 test_rollback_preserves_preexisting_exact_runtime_assets
 test_changed_dtbo_is_transactionally_refreshed
 test_dkms_source_package_is_allowlisted

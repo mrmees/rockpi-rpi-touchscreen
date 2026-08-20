@@ -268,13 +268,20 @@ rollback()
 			rollback_failed=1
 			rollback_note="$rollback_note overlay removal failed: $overlay_destination;"
 		fi
-		if [ "$mapper_created" -eq 1 ] && ! rm -f "$TOUCH_MAPPER_DESTINATION"; then
-			rollback_failed=1
-			rollback_note="$rollback_note touch mapper removal failed: $TOUCH_MAPPER_DESTINATION;"
-		fi
+		autostart_removal_failed=0
 		if [ "$autostart_created" -eq 1 ] && ! rm -f "$TOUCH_AUTOSTART_DESTINATION"; then
 			rollback_failed=1
+			autostart_removal_failed=1
 			rollback_note="$rollback_note touch autostart removal failed: $TOUCH_AUTOSTART_DESTINATION;"
+		fi
+		if [ "$mapper_created" -eq 1 ]; then
+			if [ "$autostart_removal_failed" -eq 1 ]; then
+				rollback_failed=1
+				rollback_note="$rollback_note touch mapper retained because touch autostart remains: $TOUCH_MAPPER_DESTINATION;"
+			elif ! rm -f "$TOUCH_MAPPER_DESTINATION"; then
+				rollback_failed=1
+				rollback_note="$rollback_note touch mapper removal failed: $TOUCH_MAPPER_DESTINATION;"
+			fi
 		fi
 		if [ "$overlay_replaced" -eq 1 ] && [ -f "$previous_overlay_file" ]; then
 			if try_atomic_install_file "$previous_overlay_file" "$overlay_destination"; then
@@ -602,15 +609,15 @@ fi
 cmp "$overlay_output" "$overlay_destination" || die 'installed DTBO checksum verification failed'
 
 if [ ! -e "$TOUCH_MAPPER_DESTINATION" ]; then
+	mapper_created=1
 	try_atomic_install_file "$PROJECT_SOURCE_DIR/scripts/map-touchscreen.sh" \
 		"$TOUCH_MAPPER_DESTINATION" 0755 || die 'touch mapper installation failed'
-	mapper_created=1
 fi
 if [ ! -e "$TOUCH_AUTOSTART_DESTINATION" ]; then
+	autostart_created=1
 	try_atomic_install_file \
 		"$PROJECT_SOURCE_DIR/assets/rockpi-rpi-touchscreen-touch-map.desktop" \
 		"$TOUCH_AUTOSTART_DESTINATION" 0644 || die 'touch autostart installation failed'
-	autostart_created=1
 fi
 cmp -s "$PROJECT_SOURCE_DIR/scripts/map-touchscreen.sh" "$TOUCH_MAPPER_DESTINATION" ||
 	die 'installed touch mapper checksum verification failed'
