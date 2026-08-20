@@ -31,9 +31,11 @@ printf '%s\n' "$*" >> "${MAKE_LOG:?}"
 case " $* " in
 *' modules '*)
 	[ -z "${MAKE_DIAGNOSTIC:-}" ] || printf '%s\n' "$MAKE_DIAGNOSTIC" >&2
-	rm -f "${REPO_ROOT:?}/raspits_ft5426.ko" "${REPO_ROOT:?}/panel_rockpi_rpi_touchscreen.ko"
-	: > "${REPO_ROOT:?}/raspits_ft5426.ko"
-	: > "${REPO_ROOT:?}/panel_rockpi_rpi_touchscreen.ko"
+		rm -f "${REPO_ROOT:?}/raspits_ft5426.ko" "${REPO_ROOT:?}/panel_rockpi_rpi_touchscreen.ko" \
+			"${REPO_ROOT:?}/rockpi_rk3399_display_compat.ko"
+		: > "${REPO_ROOT:?}/raspits_ft5426.ko"
+		: > "${REPO_ROOT:?}/panel_rockpi_rpi_touchscreen.ko"
+		[ "${MAKE_OMIT_PROVIDER:-0}" -eq 1 ] || : > "${REPO_ROOT:?}/rockpi_rk3399_display_compat.ko"
 	;;
 esac
 EOF
@@ -44,8 +46,9 @@ set -eu
 field=$2
 module=${3##*/}
 case "$field:$module" in
-license:raspits_ft5426.ko|license:panel_rockpi_rpi_touchscreen.ko) printf '%s\n' 'GPL v2' ;;
-vermagic:raspits_ft5426.ko|vermagic:panel_rockpi_rpi_touchscreen.ko) printf '%s\n' 'test-kernel SMP mod_unload aarch64' ;;
+license:raspits_ft5426.ko|license:panel_rockpi_rpi_touchscreen.ko|license:rockpi_rk3399_display_compat.ko) printf '%s\n' 'GPL v2' ;;
+vermagic:raspits_ft5426.ko|vermagic:panel_rockpi_rpi_touchscreen.ko|vermagic:rockpi_rk3399_display_compat.ko) printf '%s\n' 'test-kernel SMP mod_unload aarch64' ;;
+alias:rockpi_rk3399_display_compat.ko) printf '%s\n' 'of:N*T*Crockpi,rk3399-dsi1-rpi-touchscreen-compat' ;;
 alias:raspits_ft5426.ko) printf '%s\n' 'of:N*T*Craspits_ft5426' ;;
 alias:panel_rockpi_rpi_touchscreen.ko) printf '%s\n' 'of:N*T*Crockpi,rpi-7inch-touchscreen-panel' ;;
 *) exit 1 ;;
@@ -234,12 +237,14 @@ test_validator_checks_distinct_module_aliases()
 	cat > "$sandbox/bin/modinfo" <<'EOF'
 #!/bin/sh
 set -eu
-case "$2" in
-license) printf '%s\n' 'GPL v2' ;;
-vermagic) printf '%s\n' 'test-kernel SMP mod_unload aarch64' ;;
-alias) printf '%s\n' 'of:N*T*Craspits_ft5426' ;;
-*) exit 1 ;;
-esac
+	case "$2:${3##*/}" in
+	license:*|vermagic:*)
+		[ "$2" = license ] && printf '%s\n' 'GPL v2' || printf '%s\n' 'test-kernel SMP mod_unload aarch64'
+		;;
+	alias:rockpi_rk3399_display_compat.ko) printf '%s\n' 'of:N*T*Crockpi,rk3399-dsi1-rpi-touchscreen-compat' ;;
+	alias:*) printf '%s\n' 'of:N*T*Craspits_ft5426' ;;
+	*) exit 1 ;;
+	esac
 EOF
 	chmod +x "$sandbox/bin/modinfo"
 	if run_validate "$sandbox" > "$sandbox/output" 2>&1; then
@@ -248,6 +253,18 @@ EOF
 	grep -Fq 'panel module metadata is missing project device-tree alias' "$sandbox/output" ||
 		fail 'validator did not identify the panel alias failure'
 	printf 'PASS: validator requires distinct aliases for both modules\n'
+}
+
+test_validator_requires_display_compat_provider_module()
+{
+	sandbox=$workdir/missing-provider-module
+	make_validate_sandbox "$sandbox"
+	if MAKE_OMIT_PROVIDER=1 run_validate "$sandbox" > "$sandbox/output" 2>&1; then
+		fail 'validator accepted a build without the display compatibility provider module'
+	fi
+	grep -Fq 'module build did not produce rockpi_rk3399_display_compat.ko' "$sandbox/output" ||
+		fail 'validator did not identify the missing display compatibility provider module'
+	printf 'PASS: validator requires the display compatibility provider module\n'
 }
 
 test_module_warning_fails_validation()
@@ -455,6 +472,7 @@ EOF
 test_module_warning_fails_validation
 test_old_upstream_panel_compatible_fails_validation
 test_validator_checks_distinct_module_aliases
+test_validator_requires_display_compat_provider_module
 test_overlay_warning_fails_validation
 test_unexpected_base_dtb_warning_fails_validation
 test_documented_base_dtb_diagnostics_are_filtered

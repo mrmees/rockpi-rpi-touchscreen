@@ -173,14 +173,24 @@ for module_name in $MODULE_NAMES; do
 	*) die "$module_name module vermagic does not match $KERNEL_RELEASE" ;;
 	esac
 	case $module_name in
-	raspits_ft5426) expected_alias='of:N*T*Craspits_ft5426' ;;
-	panel_rockpi_rpi_touchscreen) expected_alias='of:N*T*Crockpi,rpi-7inch-touchscreen-panel' ;;
+	rockpi_rk3399_display_compat)
+		expected_alias='of:N*T*Crockpi,rk3399-dsi1-rpi-touchscreen-compat'
+		metadata_error='display compatibility provider module metadata is missing project device-tree alias'
+		;;
+	raspits_ft5426)
+		expected_alias='of:N*T*Craspits_ft5426'
+		metadata_error='touch module metadata is missing expected device-tree alias'
+		;;
+	panel_rockpi_rpi_touchscreen)
+		expected_alias='of:N*T*Crockpi,rpi-7inch-touchscreen-panel'
+		metadata_error='panel module metadata is missing project device-tree alias'
+		;;
 	*) die "no metadata policy for module: $module_name" ;;
 	esac
 	modinfo -F alias "$module_file" | grep -Fxq "$expected_alias" ||
-		die "$([ "$module_name" = panel_rockpi_rpi_touchscreen ] && printf panel || printf touch) module metadata is missing $([ "$module_name" = panel_rockpi_rpi_touchscreen ] && printf project || printf expected) device-tree alias"
+		die "$metadata_error"
 done
-printf 'PASS: both module builds and metadata\n'
+printf 'PASS: all three module builds and metadata\n'
 
 dtb=$(active_dtb)
 [ -f "$dtb" ] || die "active DTB not found: $dtb"

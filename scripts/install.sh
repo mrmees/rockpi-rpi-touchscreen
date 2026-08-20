@@ -17,7 +17,7 @@ overlay_destination=$OVERLAY_DIRECTORY/$OVERLAY_NAME.dtbo
 [ -f "$overlay_output" ] || die "validated overlay not found: $overlay_output"
 [ -f "$ARMBIAN_ENV" ] || die "boot configuration not found: $ARMBIAN_ENV"
 
-old_version=0.2.2
+old_version=0.2.3
 old_source=${DKMS_TREE:-/usr/src}/${PROJECT_NAME}-${old_version}
 if ! old_status=$(dkms status -m "$PROJECT_NAME" -v "$old_version" 2>&1); then
 	printf 'ERROR: cannot verify old DKMS state; retained %s/%s registration and source %s: %s\n' \
@@ -39,11 +39,28 @@ if [ -f "$old_source/dkms.conf" ] &&
 	grep -Fq "PACKAGE_VERSION=\"$old_version\"" "$old_source/dkms.conf"; then
 	old_source_owned=1
 fi
+old_source_faithful=0
+if [ "$old_source_owned" -eq 1 ] &&
+	grep -Fxq 'BUILT_MODULE_NAME[0]="raspits_ft5426"' "$old_source/dkms.conf" &&
+	grep -Fxq 'BUILT_MODULE_LOCATION[0]="."' "$old_source/dkms.conf" &&
+	grep -Fxq 'DEST_MODULE_LOCATION[0]="/updates/dkms"' "$old_source/dkms.conf" &&
+	grep -Fxq 'BUILT_MODULE_NAME[1]="panel_rockpi_rpi_touchscreen"' "$old_source/dkms.conf" &&
+	grep -Fxq 'BUILT_MODULE_LOCATION[1]="."' "$old_source/dkms.conf" &&
+	grep -Fxq 'DEST_MODULE_LOCATION[1]="/updates/dkms"' "$old_source/dkms.conf" &&
+	[ "$(grep -Ec '^BUILT_MODULE_NAME\[[0-9]+\]=' "$old_source/dkms.conf")" -eq 2 ] &&
+	[ "$(grep -Ec '^BUILT_MODULE_LOCATION\[[0-9]+\]=' "$old_source/dkms.conf")" -eq 2 ] &&
+	[ "$(grep -Ec '^DEST_MODULE_LOCATION\[[0-9]+\]=' "$old_source/dkms.conf")" -eq 2 ]; then
+	old_source_faithful=1
+fi
+if [ "$old_registered" -eq 1 ]; then
+	[ "$old_source_faithful" -eq 1 ] ||
+		die "registered old DKMS source is not the faithful two-module $old_version release: $old_source"
+fi
 dkms_state_root=${DKMS_STATE_DIR:-/var/lib/dkms}
 if [ "$old_was_installed" -eq 1 ]; then
 	[ "$old_source_owned" -eq 1 ] ||
 		die "installed old DKMS source is missing or unowned: $old_source"
-	for module_name in $MODULE_NAMES; do
+	for module_name in $OLD_MODULE_NAMES; do
 		old_built_baseline=$(find "$dkms_state_root/$PROJECT_NAME/$old_version/$KERNEL_RELEASE" \
 			-type f -name "$module_name.ko" -print 2>/dev/null | head -n 1)
 		old_installed_baseline=$(modinfo -k "$KERNEL_RELEASE" -n "$module_name" 2>/dev/null || true)
@@ -172,7 +189,7 @@ rollback()
 				rollback_failed=1
 				rollback_note="$rollback_note old DKMS lifecycle restoration failed (expected: ${old_status:-absent}; got: ${restored_old_status:-unavailable});"
 			elif [ "$old_was_installed" -eq 1 ]; then
-				for module_name in $MODULE_NAMES; do
+				for module_name in $OLD_MODULE_NAMES; do
 					old_built_module=$(find "${DKMS_STATE_DIR:-/var/lib/dkms}/$PROJECT_NAME/$old_version/$KERNEL_RELEASE" \
 						-type f -name "$module_name.ko" -print 2>/dev/null | head -n 1)
 					old_installed_module=$(modinfo -k "$KERNEL_RELEASE" -n "$module_name" 2>/dev/null || true)
@@ -222,14 +239,17 @@ install -m 0644 "$repo_root/Makefile" "$repo_root/dkms.conf" "$repo_root/LICENSE
 install -m 0644 "$repo_root/LICENSES/GPL-2.0-only.txt" "$stage_directory/LICENSES/"
 install -m 0644 "$repo_root/LICENSES/UPSTREAM.md" "$stage_directory/LICENSES/"
 install -m 0644 "$repo_root/src/ft5426_protocol.h" "$repo_root/src/raspits_ft5426.c" \
-	"$repo_root/src/panel_rockpi_rpi_touchscreen.c" "$stage_directory/src/"
+	"$repo_root/src/panel_rockpi_rpi_touchscreen.c" "$repo_root/src/display_compat.h" \
+	"$repo_root/src/display_compat_core.h" "$repo_root/src/display_compat_core.c" \
+	"$repo_root/src/display_compat_main.c" "$stage_directory/src/"
 install -m 0755 "$repo_root/scripts/dkms-make.sh" "$stage_directory/scripts/"
 source_digest()
 {
 	(
 		cd "$1"
 		sha256sum Makefile dkms.conf src/ft5426_protocol.h src/raspits_ft5426.c \
-			src/panel_rockpi_rpi_touchscreen.c \
+			src/panel_rockpi_rpi_touchscreen.c src/display_compat.h \
+			src/display_compat_core.h src/display_compat_core.c src/display_compat_main.c \
 			scripts/dkms-make.sh LICENSE LICENSES/GPL-2.0-only.txt LICENSES/UPSTREAM.md | sha256sum | awk '{print $1}'
 	)
 }
@@ -306,6 +326,7 @@ for module_name in $MODULE_NAMES; do
 	*) die "$module_name vermagic does not match $KERNEL_RELEASE" ;;
 	esac
 	case $module_name in
+	rockpi_rk3399_display_compat) expected_alias='of:N*T*Crockpi,rk3399-dsi1-rpi-touchscreen-compat' ;;
 	raspits_ft5426) expected_alias='of:N*T*Craspits_ft5426' ;;
 	panel_rockpi_rpi_touchscreen) expected_alias='of:N*T*Crockpi,rpi-7inch-touchscreen-panel' ;;
 	*) die "no module metadata policy for $module_name" ;;
@@ -372,7 +393,7 @@ elif [ "$old_source_owned" -eq 1 ]; then
 	rm -rf "$old_source"
 fi
 
-printf 'PASS: installed %s/%s and verified both modules, source, backup, boot token, and DTBO checksums\n' \
+printf 'PASS: installed %s/%s and verified all three modules, source, backup, boot token, and DTBO checksums\n' \
 	"$PROJECT_NAME" "$PROJECT_VERSION"
 printf 'NEXT: power off; follow docs/wiring.md; boot with HDMI; run the README first-boot checks.\n'
 printf 'ROLLBACK: sudo sh scripts/uninstall.sh (or use docs/recovery.md offline).\n'

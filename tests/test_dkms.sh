@@ -16,19 +16,41 @@ fail()
 	exit 1
 }
 
-test_two_module_package_metadata()
+test_three_module_package_metadata()
 {
-	metadata=$(bash -c '. "$1"; printf "%s\n" "$PACKAGE_NAME" "$PACKAGE_VERSION" "${BUILT_MODULE_NAME[0]-}" "${BUILT_MODULE_NAME[1]-}" "${BUILT_MODULE_LOCATION[0]-}" "${BUILT_MODULE_LOCATION[1]-}" "${DEST_MODULE_LOCATION[0]-}" "${DEST_MODULE_LOCATION[1]-}"' sh "$repo_root/dkms.conf")
+	metadata=$(bash -c '. "$1"; printf "%s\n" "$PACKAGE_NAME" "$PACKAGE_VERSION" "${BUILT_MODULE_NAME[0]-}" "${BUILT_MODULE_NAME[1]-}" "${BUILT_MODULE_NAME[2]-}" "${BUILT_MODULE_NAME[3]-}" "${BUILT_MODULE_LOCATION[0]-}" "${BUILT_MODULE_LOCATION[1]-}" "${BUILT_MODULE_LOCATION[2]-}" "${DEST_MODULE_LOCATION[0]-}" "${DEST_MODULE_LOCATION[1]-}" "${DEST_MODULE_LOCATION[2]-}"' sh "$repo_root/dkms.conf")
 	expected='rockpi-rpi-touchscreen
-0.2.3
-raspits_ft5426
+0.2.4
+rockpi_rk3399_display_compat
 panel_rockpi_rpi_touchscreen
+raspits_ft5426
+
+.
 .
 .
 /updates/dkms
+/updates/dkms
 /updates/dkms'
-	[ "$metadata" = "$expected" ] || fail 'DKMS metadata does not describe the two-module 0.2.3 package'
-	printf 'PASS: DKMS metadata owns both modules at version 0.2.3\n'
+	[ "$metadata" = "$expected" ] || fail 'DKMS metadata does not describe the ordered three-module 0.2.4 package'
+	printf 'PASS: DKMS metadata owns provider, panel, and touch modules at version 0.2.4\n'
+}
+
+test_makefile_owns_three_module_targets()
+{
+	probe=$workdir/module-targets.mk
+	cat > "$probe" <<EOF
+KERNELRELEASE := metadata-probe
+include $repo_root/Makefile
+print:
+	@printf '%s\n' '\$(obj-m)' '\$(rockpi_rk3399_display_compat-y)' '\$(panel_rockpi_rpi_touchscreen-y)' '\$(raspits_ft5426-y)'
+EOF
+	actual=$(make -s -f "$probe" print)
+	expected='raspits_ft5426.o panel_rockpi_rpi_touchscreen.o rockpi_rk3399_display_compat.o
+src/display_compat_main.o src/display_compat_core.o
+src/panel_rockpi_rpi_touchscreen.o
+src/raspits_ft5426.o'
+	[ "$actual" = "$expected" ] || fail 'Makefile does not own all three DKMS module targets and provider objects'
+	printf 'PASS: Makefile owns all three module targets and provider objects\n'
 }
 
 make_sandbox()
@@ -103,7 +125,8 @@ EOF
 	printf 'PASS: autonomous DKMS make rejects an unmatched compiler\n'
 }
 
-test_two_module_package_metadata
+test_three_module_package_metadata
+test_makefile_owns_three_module_targets
 test_autonomous_dkms_make_uses_target_kernel_compiler
 test_autonomous_dkms_make_rejects_unmatched_compiler
 printf 'PASS: DKMS autonomous compiler selection\n'
