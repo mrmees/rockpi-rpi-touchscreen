@@ -1,0 +1,424 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+armbian_env=${ARMBIAN_ENV:-/boot/armbianEnv.txt}
+dtb_root=${DTB_ROOT:-/boot/dtb}
+overlay=$repo_root/overlays/rockpi-4b-plus-rpi-touchscreen.dts
+workdir=$(mktemp -d)
+output=$workdir/rockpi-4b-plus-rpi-touchscreen.dtbo
+
+cleanup()
+{
+	# mktemp -d creates a private directory; remove only that exact directory.
+	rm -rf "$workdir"
+}
+trap cleanup EXIT HUP INT TERM
+
+REAL_DTC=$(command -v dtc)
+mkdir -p "$workdir/bin"
+cat > "$workdir/bin/dtc" <<'EOF'
+#!/bin/sh
+set -eu
+
+for argument do
+	case $argument in
+	-Wno-graph_port|-Wno-graph_child_address|-Wno-graph_endpoint)
+		printf 'FAIL: overlay test passed a graph warning suppression: %s\n' "$argument" >&2
+		exit 1
+		;;
+	esac
+done
+
+exec "$REAL_DTC" "$@"
+EOF
+chmod +x "$workdir/bin/dtc"
+PATH=$workdir/bin:$PATH
+export PATH REAL_DTC
+
+extract_named_node()
+{
+	node=$1
+	awk -v node="$node" '
+		!found && $0 ~ "^[[:space:]]*" node "[[:space:]]*\\{" {
+			found = 1
+		}
+		found {
+			print
+			line = $0
+			opens = gsub(/\{/, "{", line)
+			closes = gsub(/\}/, "}", line)
+			depth += opens - closes
+			if (depth == 0)
+				exit
+		}
+		END {
+			if (!found || depth != 0)
+				exit 1
+		}
+	'
+}
+
+node_from_file()
+{
+	file=$1
+	node=$2
+	extract_named_node "$node" < "$file"
+}
+
+require_text()
+{
+	text=$1
+	needle=$2
+	message=$3
+	printf '%s\n' "$text" | grep -Fq "$needle" || {
+		printf 'FAIL: %s\n' "$message" >&2
+		exit 1
+	}
+}
+
+property_phandle()
+{
+	property=$1
+	sed -n "s/^[[:space:]]*${property} = <\\(0x[0-9a-fA-F]*\\)>;.*/\\1/p" | head -n 1
+}
+
+property_cell()
+{
+	property=$1
+	cell=$2
+	sed -n "s/^[[:space:]]*${property} = <\\([^>]*\\)>;.*/\\1/p" |
+		awk -v cell="$cell" 'NR == 1 { print $cell; exit }'
+}
+
+property_cell_number()
+{
+	property=$1
+	cell=$2
+	value=$(property_cell "$property" "$cell")
+	case $value in
+	0x*) printf '%d\n' "$((value))" ;;
+	*) printf '%d\n' "$value" ;;
+	esac
+}
+
+endpoint_direct_properties()
+{
+	awk '
+		{
+			line = $0
+			if (depth == 1 && line ~ /^[[:space:]]*[A-Za-z0-9,#_-]+[[:space:]]*(=|;)/) {
+				sub(/^[[:space:]]*/, "", line)
+				sub(/[[:space:]]*$/, "", line)
+				print line
+			}
+			opens = gsub(/\{/, "{", line)
+			closes = gsub(/\}/, "}", line)
+			depth += opens - closes
+		}
+	' | LC_ALL=C sort
+}
+
+vop_hdmi_endpoint_from_file()
+{
+	endpoint_file=$1
+	endpoint_vop=$2
+	endpoint_vop_node=$(node_from_file "$endpoint_file" "$endpoint_vop") || return 1
+	endpoint_vop_port=$(printf '%s\n' "$endpoint_vop_node" | extract_named_node 'port') || return 1
+	printf '%s\n' "$endpoint_vop_port" | extract_named_node 'endpoint@2'
+}
+
+hdmi_input_endpoint_from_file()
+{
+	endpoint_file=$1
+	endpoint_name=$2
+	endpoint_hdmi_node=$(node_from_file "$endpoint_file" 'hdmi@ff940000') || return 1
+	endpoint_hdmi_ports=$(printf '%s\n' "$endpoint_hdmi_node" | extract_named_node 'ports') || return 1
+	endpoint_hdmi_input=$(printf '%s\n' "$endpoint_hdmi_ports" | extract_named_node 'port@0') || return 1
+	printf '%s\n' "$endpoint_hdmi_input" | extract_named_node "$endpoint_name"
+}
+
+require_reciprocal_hdmi_route()
+{
+	route_name=$1
+	route_vop_endpoint=$2
+	route_hdmi_endpoint=$3
+	require_equal "$(printf '%s\n' "$route_vop_endpoint" | property_phandle remote-endpoint)" \
+		"$(printf '%s\n' "$route_hdmi_endpoint" | property_phandle phandle)" \
+		"$route_name HDMI route connects from VOP to HDMI"
+	require_equal "$(printf '%s\n' "$route_hdmi_endpoint" | property_phandle remote-endpoint)" \
+		"$(printf '%s\n' "$route_vop_endpoint" | property_phandle phandle)" \
+		"$route_name HDMI route connects back from HDMI to VOP"
+}
+
+count_direct_named_children()
+{
+	name=$1
+	awk -v name="$name" '
+		{
+			line = $0
+			if (depth == 1 && line ~ "^[[:space:]]*" name "[^[:space:]{]*[[:space:]]*\\{")
+				count++
+			opens = gsub(/\{/, "{", line)
+			closes = gsub(/\}/, "}", line)
+			depth += opens - closes
+		}
+		END { print count + 0 }
+	'
+}
+
+require_equal()
+{
+	actual=$1
+	expected=$2
+	message=$3
+	[ -n "$actual" ] && [ "$actual" = "$expected" ] || {
+		printf 'FAIL: %s (got %s, expected %s)\n' "$message" "$actual" "$expected" >&2
+		exit 1
+	}
+}
+
+active_dtb()
+{
+	env_file=$1
+	dtb_directory=$2
+
+	[ -r "$env_file" ] || {
+		printf 'FAIL: cannot read Armbian environment: %s\n' "$env_file" >&2
+		return 1
+	}
+
+	fdtfile=$(sed -n 's/^[[:space:]]*fdtfile[[:space:]]*=[[:space:]]*\([^[:space:]#][^[:space:]#]*\).*$/\1/p' "$env_file" | tail -n 1)
+	[ -n "$fdtfile" ] || {
+		printf 'FAIL: fdtfile is absent or empty in Armbian environment: %s\n' "$env_file" >&2
+		return 1
+	}
+
+	case $fdtfile in
+	/*) printf '%s\n' "$fdtfile" ;;
+	*) printf '%s/%s\n' "$dtb_directory" "$fdtfile" ;;
+	esac
+}
+
+assert_active_dtb_resolution()
+{
+	resolution_env=$workdir/armbianEnv-resolution
+	missing_fdtfile_env=$workdir/armbianEnv-no-fdtfile
+
+	printf '%s\n' 'fdtfile=rockchip/rk3399-rock-pi-4b-plus.dtb' > "$resolution_env"
+	require_equal "$(active_dtb "$resolution_env" /boot/dtb)" \
+		'/boot/dtb/rockchip/rk3399-rock-pi-4b-plus.dtb' \
+		'configured fdtfile resolves below the DTB root'
+
+	printf '%s\n' '# fdtfile intentionally absent' > "$missing_fdtfile_env"
+	if active_dtb "$missing_fdtfile_env" /boot/dtb >/dev/null 2>&1; then
+		printf 'FAIL: missing fdtfile was accepted\n' >&2
+		exit 1
+	fi
+	if active_dtb "$workdir/no-such-armbianEnv" /boot/dtb >/dev/null 2>&1; then
+		printf 'FAIL: unreadable armbianEnv was accepted\n' >&2
+		exit 1
+	fi
+	printf 'PASS: active DTB configuration resolution\n'
+}
+
+dtb=$(active_dtb "$armbian_env" "$dtb_root")
+assert_active_dtb_resolution
+
+[ -f "$dtb" ] || {
+	printf 'FAIL: active Rock Pi 4B+ DTB not found: %s\n' "$dtb" >&2
+	exit 1
+}
+
+if ! dtc -Wno-power_domains_property -@ -I dts -O dtb -o "$output" "$overlay" \
+	> "$workdir/overlay-compile.stdout" 2> "$workdir/overlay-compile.stderr"; then
+	cat "$workdir/overlay-compile.stdout" "$workdir/overlay-compile.stderr" >&2
+	printf 'FAIL: overlay compilation failed\n' >&2
+	exit 1
+fi
+if [ -s "$workdir/overlay-compile.stdout" ] || [ -s "$workdir/overlay-compile.stderr" ]; then
+	cat "$workdir/overlay-compile.stdout" "$workdir/overlay-compile.stderr" >&2
+	printf 'FAIL: overlay compilation emitted diagnostics\n' >&2
+	exit 1
+fi
+fdtdump "$output" > "$workdir/compiled.dts" 2>/dev/null
+dtc -I dtb -O dts -o "$workdir/base.dts" "$dtb" 2>/dev/null
+fdtoverlay -i "$dtb" -o "$workdir/merged.dtb" "$output"
+dtc -I dtb -O dts -o "$workdir/merged.dts" "$workdir/merged.dtb"
+
+compiled_provider=$(node_from_file "$workdir/compiled.dts" 'rockpi-display-compat') || {
+	printf 'FAIL: compiled overlay is missing the display compatibility provider\n' >&2
+	exit 1
+}
+compiled_panel=$(node_from_file "$workdir/compiled.dts" 'panel@45')
+compiled_touch=$(node_from_file "$workdir/compiled.dts" 'touchscreen@38')
+require_text "$compiled_provider" 'compatible = "rockpi,rk3399-dsi1-rpi-touchscreen-compat";' 'compiled provider compatible'
+require_equal "$(grep -Fc 'compatible = "rockpi,rk3399-dsi1-rpi-touchscreen-compat";' "$workdir/compiled.dts")" \
+	'1' 'compiled overlay has exactly one display compatibility provider'
+require_text "$compiled_provider" 'status = "okay";' 'compiled provider is enabled'
+for property in power-domains rockchip,dsi0 rockchip,dsi1 rockchip,grf rockchip,vopb rockchip,vopl; do
+	require_text "$compiled_provider" "$property = <" "compiled provider property $property"
+done
+require_text "$compiled_panel" 'rockpi,display-compat = <' 'compiled panel provider link'
+require_text "$compiled_touch" 'touchscreen-inverted-x;' 'compiled touch X inversion'
+require_text "$compiled_touch" 'touchscreen-inverted-y;' 'compiled touch Y inversion'
+printf 'PASS: compiled provider and consumer properties\n'
+printf 'PASS: overlay compilation does not suppress graph warnings\n'
+
+dsi0=$(node_from_file "$workdir/merged.dts" 'dsi@ff960000')
+dsi1=$(node_from_file "$workdir/merged.dts" 'dsi@ff968000')
+i2c1=$(node_from_file "$workdir/merged.dts" 'i2c@ff110000')
+grf=$(node_from_file "$workdir/merged.dts" 'syscon@ff770000')
+vopb=$(node_from_file "$workdir/merged.dts" 'vop@ff900000')
+vopl=$(node_from_file "$workdir/merged.dts" 'vop@ff8f0000')
+power=$(node_from_file "$workdir/merged.dts" 'power-controller')
+hdmi=$(node_from_file "$workdir/merged.dts" 'hdmi@ff940000')
+provider=$(node_from_file "$workdir/merged.dts" 'rockpi-display-compat')
+panel=$(printf '%s\n' "$i2c1" | extract_named_node 'panel@45')
+touch=$(printf '%s\n' "$i2c1" | extract_named_node 'touchscreen@38')
+
+require_text "$dsi0" 'status = "disabled";' 'unused DSI0 remains disabled'
+require_text "$dsi1" 'status = "okay";' 'DSI1 is enabled'
+dsi0_output_port=$(printf '%s\n' "$dsi0" | extract_named_node 'port@1')
+if printf '%s\n' "$dsi0_output_port" | grep -Eq '^[[:space:]]*endpoint(@[^[:space:]{]+)?[[:space:]]*\{'; then
+	printf 'FAIL: unused DSI0 has an output endpoint\n' >&2
+	exit 1
+fi
+printf 'PASS: unused DSI0 disabled without an output graph and DSI1 enabled\n'
+
+require_equal "$(grep -Fc 'compatible = "rockpi,rk3399-dsi1-rpi-touchscreen-compat";' "$workdir/merged.dts")" \
+	'1' 'merged tree has exactly one display compatibility provider'
+require_text "$provider" 'status = "okay";' 'display compatibility provider is enabled'
+require_equal "$(printf '%s\n' "$provider" | property_phandle rockchip,dsi0)" \
+	"$(printf '%s\n' "$dsi0" | property_phandle phandle)" 'provider DSI0 resource'
+require_equal "$(printf '%s\n' "$provider" | property_phandle rockchip,dsi1)" \
+	"$(printf '%s\n' "$dsi1" | property_phandle phandle)" 'provider DSI1 resource'
+require_equal "$(printf '%s\n' "$provider" | property_phandle rockchip,grf)" \
+	"$(printf '%s\n' "$grf" | property_phandle phandle)" 'provider GRF resource'
+require_equal "$(printf '%s\n' "$provider" | property_phandle rockchip,vopb)" \
+	"$(printf '%s\n' "$vopb" | property_phandle phandle)" 'provider big-VOP resource'
+require_equal "$(printf '%s\n' "$provider" | property_phandle rockchip,vopl)" \
+	"$(printf '%s\n' "$vopl" | property_phandle phandle)" 'provider little-VOP resource'
+require_equal "$(printf '%s\n' "$provider" | property_cell power-domains 1)" \
+	"$(printf '%s\n' "$power" | property_phandle phandle)" 'provider VIO power controller'
+require_equal "$(printf '%s\n' "$provider" | property_cell power-domains 2)" \
+	'0x0f' 'provider RK3399_PD_VIO domain ID'
+require_equal "$(printf '%s\n' "$provider" | property_cell power-domains 1)" \
+	"$(printf '%s\n' "$dsi0" | property_cell power-domains 1)" 'provider and DSI0 power controller'
+require_equal "$(printf '%s\n' "$provider" | property_cell power-domains 2)" \
+	"$(printf '%s\n' "$dsi0" | property_cell power-domains 2)" 'provider and DSI0 power-domain ID'
+printf 'PASS: enabled display compatibility provider resources\n'
+
+require_text "$panel" 'compatible = "rockpi,rpi-7inch-touchscreen-panel";' 'project panel compatible'
+if printf '%s\n' "$panel" | grep -Fq 'compatible = "raspberrypi,7inch-touchscreen-panel";'; then
+	printf 'FAIL: upstream panel compatible remains on the RK3399 route\n' >&2
+	exit 1
+fi
+require_text "$panel" 'reg = <0x45>;' 'panel address 0x45'
+require_equal "$(printf '%s\n' "$panel" | property_phandle rockpi,display-compat)" \
+	"$(printf '%s\n' "$provider" | property_phandle phandle)" 'panel display compatibility provider link'
+printf 'PASS: panel at 0x45\n'
+
+require_text "$touch" 'compatible = "raspits_ft5426";' 'touch compatible'
+require_text "$touch" 'reg = <0x38>;' 'touch address 0x38'
+require_text "$touch" 'touchscreen-size-x = <0x320>;' 'touch X size'
+require_text "$touch" 'touchscreen-size-y = <0x1e0>;' 'touch Y size'
+require_text "$touch" 'touchscreen-inverted-x;' 'touch X inversion'
+require_text "$touch" 'touchscreen-inverted-y;' 'touch Y inversion'
+printf 'PASS: inverted touch at 0x38\n'
+
+vopl_endpoint=$(printf '%s\n' "$vopl" | extract_named_node 'endpoint@3')
+dsi1_vopb_input=$(printf '%s\n' "$dsi1" | extract_named_node 'endpoint@0')
+dsi1_input=$(printf '%s\n' "$dsi1" | extract_named_node 'endpoint@1')
+route_filter=$(node_from_file "$workdir/merged.dts" 'rockpi-dsi1-vopb-route-filter') || {
+	printf 'FAIL: merged tree is missing the VOPB route filter\n' >&2
+	exit 1
+}
+vopb_endpoint=$(printf '%s\n' "$vopb" | extract_named_node 'endpoint@3')
+filter_port0=$(printf '%s\n' "$route_filter" | extract_named_node 'port@0')
+filter_port1=$(printf '%s\n' "$route_filter" | extract_named_node 'port@1')
+filter_ports=$(printf '%s\n' "$route_filter" | extract_named_node 'ports')
+filter_dsi_sink=$(printf '%s\n' "$filter_port0" | extract_named_node 'endpoint')
+filter_vopb_sink=$(printf '%s\n' "$filter_port1" | extract_named_node 'endpoint')
+
+require_text "$route_filter" 'status = "disabled";' 'route filter is disabled'
+require_equal "$(printf '%s\n' "$filter_ports" | count_direct_named_children 'port@')" \
+	'2' 'route filter has exactly two direct ports'
+require_equal "$(printf '%s\n' "$filter_port0" | property_cell_number reg 1)" \
+	'0' 'route filter port 0 has reg 0'
+require_equal "$(printf '%s\n' "$filter_port1" | property_cell_number reg 1)" \
+	'1' 'route filter port 1 has reg 1'
+require_equal "$(printf '%s\n' "$dsi1_vopb_input" | property_phandle remote-endpoint)" \
+	"$(printf '%s\n' "$filter_dsi_sink" | property_phandle phandle)" \
+	'DSI VOPB input terminates at route filter port 0'
+require_equal "$(printf '%s\n' "$filter_dsi_sink" | property_phandle remote-endpoint)" \
+	"$(printf '%s\n' "$dsi1_vopb_input" | property_phandle phandle)" \
+	'route filter port 0 connects back to DSI VOPB input'
+require_equal "$(printf '%s\n' "$vopb_endpoint" | property_phandle remote-endpoint)" \
+	"$(printf '%s\n' "$filter_vopb_sink" | property_phandle phandle)" \
+	'VOPB DSI output terminates at route filter port 1'
+require_equal "$(printf '%s\n' "$filter_vopb_sink" | property_phandle remote-endpoint)" \
+	"$(printf '%s\n' "$vopb_endpoint" | property_phandle phandle)" \
+	'route filter port 1 connects back to VOPB DSI output'
+require_text "$vopb_endpoint" 'status = "disabled";' 'VOPB DSI output is disabled'
+require_text "$dsi1_vopb_input" 'status = "disabled";' 'big VOP input is disabled'
+require_text "$dsi1_input" 'status = "okay";' 'little VOP input is enabled'
+require_equal "$(printf '%s\n' "$vopl_endpoint" | property_phandle remote-endpoint)" \
+	"$(printf '%s\n' "$dsi1_input" | property_phandle phandle)" \
+	'little VOP output connects to DSI1 input'
+require_equal "$(printf '%s\n' "$dsi1_input" | property_phandle remote-endpoint)" \
+	"$(printf '%s\n' "$vopl_endpoint" | property_phandle phandle)" \
+	'DSI1 input connects back to little VOP output'
+
+dsi1_output_port=$(printf '%s\n' "$dsi1" | extract_named_node 'port@1')
+dsi1_output=$(printf '%s\n' "$dsi1_output_port" | extract_named_node 'endpoint')
+panel_port=$(printf '%s\n' "$panel" | extract_named_node 'port')
+panel_input=$(printf '%s\n' "$panel_port" | extract_named_node 'endpoint')
+require_equal "$(printf '%s\n' "$dsi1_output" | property_phandle remote-endpoint)" \
+	"$(printf '%s\n' "$panel_input" | property_phandle phandle)" \
+	'DSI1 output connects to panel input'
+require_equal "$(printf '%s\n' "$panel_input" | property_phandle remote-endpoint)" \
+	"$(printf '%s\n' "$dsi1_output" | property_phandle phandle)" \
+	'panel input connects back to DSI1 output'
+printf 'PASS: VOPB route is terminated and little-VOP to DSI1 to panel graph\n'
+
+require_text "$hdmi" 'status = "okay";' 'HDMI remains enabled'
+base_vopb_hdmi=$(vop_hdmi_endpoint_from_file "$workdir/base.dts" 'vop@ff900000') || {
+	printf 'FAIL: active base DTB is missing the VOPB HDMI route endpoint\n' >&2
+	exit 1
+}
+base_vopl_hdmi=$(vop_hdmi_endpoint_from_file "$workdir/base.dts" 'vop@ff8f0000') || {
+	printf 'FAIL: active base DTB is missing the VOPL HDMI route endpoint\n' >&2
+	exit 1
+}
+base_hdmi_vopb=$(hdmi_input_endpoint_from_file "$workdir/base.dts" 'endpoint@0') || {
+	printf 'FAIL: active base DTB is missing the HDMI VOPB input endpoint\n' >&2
+	exit 1
+}
+base_hdmi_vopl=$(hdmi_input_endpoint_from_file "$workdir/base.dts" 'endpoint@1') || {
+	printf 'FAIL: active base DTB is missing the HDMI VOPL input endpoint\n' >&2
+	exit 1
+}
+merged_vopb_hdmi=$(vop_hdmi_endpoint_from_file "$workdir/merged.dts" 'vop@ff900000')
+merged_vopl_hdmi=$(vop_hdmi_endpoint_from_file "$workdir/merged.dts" 'vop@ff8f0000')
+merged_hdmi_vopb=$(hdmi_input_endpoint_from_file "$workdir/merged.dts" 'endpoint@0')
+merged_hdmi_vopl=$(hdmi_input_endpoint_from_file "$workdir/merged.dts" 'endpoint@1')
+require_reciprocal_hdmi_route 'active base VOPB' "$base_vopb_hdmi" "$base_hdmi_vopb"
+require_reciprocal_hdmi_route 'active base VOPL' "$base_vopl_hdmi" "$base_hdmi_vopl"
+require_reciprocal_hdmi_route 'merged VOPB' "$merged_vopb_hdmi" "$merged_hdmi_vopb"
+require_reciprocal_hdmi_route 'merged VOPL' "$merged_vopl_hdmi" "$merged_hdmi_vopl"
+require_equal "$(printf '%s\n' "$merged_vopb_hdmi" | endpoint_direct_properties)" \
+	"$(printf '%s\n' "$base_vopb_hdmi" | endpoint_direct_properties)" \
+	'VOPB HDMI endpoint properties unchanged from active base DTB'
+require_equal "$(printf '%s\n' "$merged_hdmi_vopb" | endpoint_direct_properties)" \
+	"$(printf '%s\n' "$base_hdmi_vopb" | endpoint_direct_properties)" \
+	'HDMI VOPB input properties unchanged from active base DTB'
+require_equal "$(printf '%s\n' "$merged_vopl_hdmi" | endpoint_direct_properties)" \
+	"$(printf '%s\n' "$base_vopl_hdmi" | endpoint_direct_properties)" \
+	'VOPL HDMI endpoint properties unchanged from active base DTB'
+require_equal "$(printf '%s\n' "$merged_hdmi_vopl" | endpoint_direct_properties)" \
+	"$(printf '%s\n' "$base_hdmi_vopl" | endpoint_direct_properties)" \
+	'HDMI VOPL input properties unchanged from active base DTB'
+printf 'PASS: HDMI remains enabled with both reciprocal VOP routes unchanged\n'
+
+printf 'PASS: overlay compile, apply, routing, panel, touch, and HDMI checks\n'

@@ -126,7 +126,7 @@ calls `cancel_delayed_work_sync()`. Use managed allocations and no duplicate
 input-device free.
 
 Create a module Makefile and DKMS package `rockpi-rpi-touchscreen` version
-`0.1.0`, module name `raspits_ft5426`, destination `/updates/dkms`.
+`0.1.1`, module name `raspits_ft5426`, destination `/updates/dkms`.
 
 - [ ] **Step 7: Verify module build and metadata**
 
@@ -157,7 +157,7 @@ git commit -m "feat: add safe FT5426 polling driver"
 - Create: `tests/test_overlay.sh`
 
 **Interfaces:**
-- Consumes: active DTB symbols `mipi_dsi`, `mipi_dsi1`, `mipi1_in_vopl`, `mipi1_in_vopb`, `vopl_out_mipi1`, and `i2c1`.
+- Consumes: active DTB symbols `mipi_dsi1`, `mipi1_in_vopl`, `mipi1_in_vopb`, `vopl_out_mipi1`, and `i2c1`.
 - Produces: `build/rockpi-4b-plus-rpi-touchscreen.dtbo` and a test-only merged DTB.
 
 - [ ] **Step 1: Write the failing overlay integration test**
@@ -175,8 +175,10 @@ Expected: missing overlay source failure.
 
 - [ ] **Step 3: Implement the mainline-compatible overlay**
 
-The overlay must enable `&mipi_dsi` and `&mipi_dsi1`, connect a new DSI1
-output endpoint to an I2C1 panel node, and select little VOP:
+The overlay must leave the unused `&mipi_dsi` (DSI0) disabled, enable
+`&mipi_dsi1`, connect a new DSI1 output endpoint to an I2C1 panel node, and
+select little VOP. Enabling the unconnected DSI0 host blocks the shared
+Rockchip DRM component master and takes HDMI down with it:
 
 ```dts
 &i2c1 {
@@ -258,7 +260,7 @@ DSI/panel/touch nodes, and unchanged HDMI. Print one PASS per boundary.
 
 - [ ] **Step 5: Implement transactional installation**
 
-Validate first. Install source at `/usr/src/rockpi-rpi-touchscreen-0.1.0`,
+Validate first. Install source at `/usr/src/rockpi-rpi-touchscreen-0.1.1`,
 run `dkms add/build/install`, install DTBO mode 0644, back up and checksum
 `armbianEnv.txt`, then atomically add the token. A trap restores boot config
 and removes newly added project assets after any post-backup failure.
@@ -359,6 +361,7 @@ passing, one overlay token, readable backup/DTBO, and clean repository.
 
 - [ ] **Step 8: Stop at the hardware checkpoint**
 
-Do not reboot automatically. Give the user the shutdown and wiring sequence.
-After connection and boot, run the spec's journal, DRM, I2C, and libinput
-checks before claiming hardware support or publishing to GitHub.
+Do not reboot automatically. The branch may be pushed first when clearly
+labeled draft and hardware-unverified. Give the user the shutdown and wiring
+sequence. After connection and boot, run the spec's journal, DRM, I2C, and
+libinput checks before claiming hardware support.

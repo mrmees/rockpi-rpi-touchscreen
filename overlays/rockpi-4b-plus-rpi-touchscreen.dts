@@ -1,0 +1,129 @@
+/dts-v1/;
+/plugin/;
+
+/*
+ * Rock Pi 4B+ support for the original Raspberry Pi 7-inch Touch Display.
+ * The graph endpoint statuses prefer the little VOP for DSI1; the display
+ * compatibility provider follows the live DSI1 GRF route. The unused DSI0
+ * host remains disabled and supplies only clocks/PHY resources to the
+ * provider. The panel and touch controllers share I2C1.
+ */
+
+&{/} {
+	rockpi_display_compat: rockpi-display-compat {
+		compatible = "rockpi,rk3399-dsi1-rpi-touchscreen-compat";
+		/* RK3399_PD_VIO is binding ID 15. */
+		power-domains = <&power 15>;
+		rockchip,dsi0 = <&mipi_dsi>;
+		rockchip,dsi1 = <&mipi_dsi1>;
+		rockchip,grf = <&grf>;
+		rockchip,vopb = <&vopb>;
+		rockchip,vopl = <&vopl>;
+		status = "okay";
+	};
+
+	rockpi_dsi1_vopb_route_filter: rockpi-dsi1-vopb-route-filter {
+		status = "disabled";
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+				dsi1_vopb_filter_sink: endpoint {
+					remote-endpoint = <&mipi1_in_vopb>;
+				};
+			};
+
+			port@1 {
+				reg = <1>;
+				vopb_dsi1_filter_sink: endpoint {
+					remote-endpoint = <&vopb_out_mipi1>;
+				};
+			};
+		};
+	};
+};
+
+&mipi_dsi {
+	status = "disabled";
+};
+
+&mipi_dsi1 {
+	status = "okay";
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@1 {
+			reg = <1>;
+			dsi_out_panel: endpoint {
+				remote-endpoint = <&panel_in_dsi>;
+			};
+		};
+
+		port@0 {
+			reg = <0>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			endpoint@0 {
+				reg = <0>;
+				status = "disabled";
+				remote-endpoint = <&dsi1_vopb_filter_sink>;
+			};
+
+			endpoint@1 {
+				reg = <1>;
+			};
+		};
+	};
+};
+
+&mipi1_in_vopl {
+	status = "okay";
+};
+
+&vopl_out_mipi1 {
+	status = "okay";
+};
+
+&vopb {
+	port {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		endpoint@3 {
+			reg = <3>;
+			status = "disabled";
+			remote-endpoint = <&vopb_dsi1_filter_sink>;
+		};
+	};
+};
+
+&i2c1 {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	status = "okay";
+
+	panel@45 {
+		compatible = "rockpi,rpi-7inch-touchscreen-panel";
+		reg = <0x45>;
+		rockpi,display-compat = <&rockpi_display_compat>;
+
+		port {
+			panel_in_dsi: endpoint {
+				remote-endpoint = <&dsi_out_panel>;
+			};
+		};
+	};
+
+	touchscreen@38 {
+		compatible = "raspits_ft5426";
+		reg = <0x38>;
+		touchscreen-size-x = <800>;
+		touchscreen-size-y = <480>;
+		touchscreen-inverted-x;
+		touchscreen-inverted-y;
+	};
+};

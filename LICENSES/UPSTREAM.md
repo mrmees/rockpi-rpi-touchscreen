@@ -1,0 +1,67 @@
+# Upstream attribution
+
+`src/raspits_ft5426.c` is derived from Radxa's FT5426 polling driver added in
+immutable commit `c681d6a31c2289dbaca2e1f822bab41530fc0f68`:
+
+https://github.com/radxa/kernel/blob/c681d6a31c2289dbaca2e1f822bab41530fc0f68/drivers/input/touchscreen/raspits_ft5426.c
+
+The original notices are preserved in the modified source:
+
+- Copyright (c) 2016 ASUSTek Computer Inc.
+- Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
+
+The derived driver remains GPL-2.0-only. It was substantially modified in
+2026 by the Rock Pi RPi Touchscreen contributors for current kernel APIs,
+bounded frame parsing, polling error recovery, and safe lifecycle management.
+
+`src/panel_rockpi_rpi_touchscreen.c` is derived from the upstream Raspberry Pi
+panel driver at Linux v6.18 commit
+`7d0a66e4bb9081d75c82ec4957c50034cb0ea449`:
+
+https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/gpu/drm/panel/panel-raspberrypi-touchscreen.c
+
+It also uses Radxa's RK3399 TC358762 generic-write sequence and DSI mode flags
+from immutable commit `c681d6a31c2289dbaca2e1f822bab41530fc0f68`:
+
+https://github.com/radxa/kernel/blob/c681d6a31c2289dbaca2e1f822bab41530fc0f68/drivers/gpu/drm/panel/panel-raspits-tc358762.c
+
+The panel source preserves the relevant notices from both files:
+
+- Copyright © 2016-2017 Broadcom
+- Copyright (C) 2013, NVIDIA Corporation. All rights reserved.
+- Copyright (c) 2022 Radxa Computer Co., Ltd.
+
+The compatibility driver remains GPL-2.0-only. It was substantially modified
+in 2026 by the Rock Pi RPi Touchscreen contributors to send TC358762 commands
+during panel prepare after the DesignWare host enters command mode, use current
+kernel APIs, and propagate I2C and DSI errors.
+
+`src/display_compat_core.c` and `src/display_compat_main.c` implement the RK3399
+DSI PHY sequence and live DSI1 VOP selection. The immutable Linux v6.18 source
+snapshot is commit `7d0a66e4bb9081d75c82ec4957c50034cb0ea449` (the peeled v6.18
+tag). Its Rockchip DesignWare DSI driver documents the internal D-PHY test
+interface, PHY configuration registers, and RK3399 DSI1 GRF LCD-select bit:
+
+https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/drivers/gpu/drm/rockchip/dw-mipi-dsi-rockchip.c
+
+The corresponding immutable Radxa Rockchip DSI source is the project-pinned
+commit `c681d6a31c2289dbaca2e1f822bab41530fc0f68`:
+
+https://github.com/radxa/kernel/blob/c681d6a31c2289dbaca2e1f822bab41530fc0f68/drivers/gpu/drm/rockchip/dw-mipi-dsi-rockchip.c
+
+Radxa's immutable RK3399 VOP register table identifies `SYS_CTRL.data01_swap`
+and the `DSP_CTRL0` blue/green, red/blue, and red/green output fields used by
+the compatibility provider:
+
+https://github.com/radxa/kernel/blob/c681d6a31c2289dbaca2e1f822bab41530fc0f68/drivers/gpu/drm/rockchip/rockchip_vop_reg.c
+
+Linux v6.18's DRM panel header defines `prepare_prev_first`: the previous
+controller is prepared before the panel, a requirement for DSI panels whose host
+must reach LP-11 before panel power-up. The project sets that field before the
+TC358762 prepare sequence:
+
+https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/include/drm/drm_panel.h
+
+The project implementation is GPL-2.0-only and uses a separately tested,
+reversible compatibility core so the provider accesses only the GRF-selected
+live VOP.

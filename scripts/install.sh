@@ -1,0 +1,943 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$script_dir/common.sh"
+
+require_supported_kernel_release
+require_root
+require_command awk cat chmod cmp cp date depmod diff dirname dkms find grep head install ln mkdir mktemp modinfo mv rm rmdir sed sha256sum sort stat tail
+
+if ! capture_protected_xorg_attestation; then
+	die "$protected_xorg_error"
+fi
+
+attest_pretransaction_exit()
+{
+	pretransaction_status=$?
+	trap - EXIT HUP INT TERM
+	if ! attest_protected_xorg_unchanged; then
+		printf 'ERROR: transaction stopped with status %s; protected Xorg attestation failed: %s\n' \
+			"$pretransaction_status" "$protected_xorg_error" >&2
+		exit 1
+	fi
+	exit "$pretransaction_status"
+}
+trap attest_pretransaction_exit EXIT HUP INT TERM
+
+module_content_checksum()
+{
+	module_file=$1
+	checksum_input=$module_file
+	checksum_temporary=
+	case $module_file in
+	*.ko.xz)
+		require_command xz
+		checksum_temporary=$(mktemp)
+		if ! xz -dc "$module_file" > "$checksum_temporary"; then
+			rm -f "$checksum_temporary"
+			return 1
+		fi
+		checksum_input=$checksum_temporary
+		;;
+	*.ko.gz)
+		require_command gzip
+		checksum_temporary=$(mktemp)
+		if ! gzip -dc "$module_file" > "$checksum_temporary"; then
+			rm -f "$checksum_temporary"
+			return 1
+		fi
+		checksum_input=$checksum_temporary
+		;;
+	*.ko.zst)
+		require_command zstd
+		checksum_temporary=$(mktemp)
+		if ! zstd -q -dc "$module_file" > "$checksum_temporary"; then
+			rm -f "$checksum_temporary"
+			return 1
+		fi
+		checksum_input=$checksum_temporary
+		;;
+	esac
+	if ! checksum_record=$(sha256sum "$checksum_input"); then
+		[ -z "$checksum_temporary" ] || rm -f "$checksum_temporary"
+		return 1
+	fi
+	checksum=${checksum_record%% *}
+	[ -z "$checksum_temporary" ] || rm -f "$checksum_temporary"
+	[ -n "$checksum" ] || return 1
+	printf '%s\n' "$checksum"
+}
+
+dkms_lifecycle_phase()
+{
+	lifecycle_status=$1
+	lifecycle_version=$2
+	case $lifecycle_status in
+	'') printf '%s\n' absent ;;
+	"$PROJECT_NAME/$lifecycle_version: added") printf '%s\n' added ;;
+	"$PROJECT_NAME/$lifecycle_version, $KERNEL_RELEASE, $ARCH: built") printf '%s\n' built ;;
+	"$PROJECT_NAME/$lifecycle_version, $KERNEL_RELEASE, $ARCH: installed") printf '%s\n' installed ;;
+	*) printf '%s\n' unsupported ;;
+	esac
+}
+
+find_dkms_module_artifact()
+{
+	artifact_root=$1
+	artifact_module=$2
+	find "$artifact_root" -type f \
+		\( -name "$artifact_module.ko" -o -name "$artifact_module.ko.xz" \
+		-o -name "$artifact_module.ko.gz" -o -name "$artifact_module.ko.zst" \) \
+		-print 2>/dev/null | head -n 1
+}
+
+validator=${VALIDATE_SCRIPT:-$script_dir/validate.sh}
+[ -x "$validator" ] || [ -f "$validator" ] || die "validation script not found: $validator"
+sh "$validator" --offline
+
+repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+overlay_output=${BUILD_DIR:-$repo_root/build}/$OVERLAY_NAME.dtbo
+overlay_destination=$OVERLAY_DIRECTORY/$OVERLAY_NAME.dtbo
+[ -f "$overlay_output" ] || die "validated overlay not found: $overlay_output"
+[ -f "$ARMBIAN_ENV" ] || die "boot configuration not found: $ARMBIAN_ENV"
+
+old_version=0.2.5
+old_source=${DKMS_TREE:-/usr/src}/${PROJECT_NAME}-${old_version}
+if ! old_status=$(dkms status -m "$PROJECT_NAME" -v "$old_version" 2>&1); then
+	printf 'ERROR: cannot verify old DKMS state; retained %s/%s registration and source %s: %s\n' \
+		"$PROJECT_NAME" "$old_version" "$old_source" "$old_status" >&2
+	exit 1
+fi
+old_registered=0
+if printf '%s\n' "$old_status" | dkms_status_has_version "$old_version"; then
+	old_registered=1
+fi
+old_expected_installed="$PROJECT_NAME/$old_version, $KERNEL_RELEASE, $ARCH: installed"
+old_was_installed=0
+if printf '%s\n' "$old_status" | grep -Fxq "$old_expected_installed"; then
+	old_was_installed=1
+fi
+old_lifecycle_phase=$(dkms_lifecycle_phase "$old_status" "$old_version")
+[ "$old_lifecycle_phase" != unsupported ] ||
+	die "old DKMS lifecycle is not a single restorable target-kernel state: ${old_status:-absent}"
+old_source_owned=0
+old_source_present=0
+if [ -e "$old_source" ] || [ -L "$old_source" ]; then
+	old_source_present=1
+	if source_tree_matches_release "$old_source" "$old_version"; then
+		old_source_owned=1
+	fi
+fi
+if [ "$old_registered" -eq 1 ]; then
+	[ "$old_source_owned" -eq 1 ] ||
+		die "registered old DKMS source does not match exact $old_version ownership: $old_source (${source_ownership_error:-path absent})"
+elif [ "$old_source_present" -eq 1 ] && [ "$old_source_owned" -eq 0 ]; then
+	printf 'RETAIN MODIFIED: %s (%s)\n' "$old_source" "$source_ownership_error"
+fi
+dkms_state_root=${DKMS_STATE_DIR:-/var/lib/dkms}
+if [ "$old_was_installed" -eq 1 ]; then
+	[ "$old_source_owned" -eq 1 ] ||
+		die "installed old DKMS source is missing or unowned: $old_source"
+	for module_name in $OLD_MODULE_NAMES; do
+		old_built_baseline=$(find_dkms_module_artifact \
+			"$dkms_state_root/$PROJECT_NAME/$old_version/$KERNEL_RELEASE" "$module_name")
+		old_installed_baseline=$(modinfo -k "$KERNEL_RELEASE" -n "$module_name" 2>/dev/null || true)
+		[ -n "$old_built_baseline" ] && [ -f "$old_installed_baseline" ] ||
+			die "old installed $module_name module does not match its DKMS build; refusing migration"
+		if ! old_built_checksum=$(module_content_checksum "$old_built_baseline"); then
+			die "cannot verify old DKMS-built $module_name module content"
+		fi
+		if ! old_installed_checksum=$(module_content_checksum "$old_installed_baseline"); then
+			die "cannot verify old installed $module_name module content"
+		fi
+		[ "$old_built_checksum" = "$old_installed_checksum" ] ||
+			die "old installed $module_name module does not match its DKMS build; refusing migration"
+	done
+fi
+if ! new_status_before=$(dkms status -m "$PROJECT_NAME" -v "$PROJECT_VERSION" 2>&1); then
+	printf 'ERROR: cannot capture DKMS registration baseline for %s/%s: %s\n' \
+		"$PROJECT_NAME" "$PROJECT_VERSION" "$new_status_before" >&2
+	exit 1
+fi
+new_was_registered=0
+if printf '%s\n' "$new_status_before" | dkms_status_has_version "$PROJECT_VERSION"; then
+	new_was_registered=1
+fi
+new_lifecycle_phase=$(dkms_lifecycle_phase "$new_status_before" "$PROJECT_VERSION")
+[ "$new_lifecycle_phase" != unsupported ] ||
+	die "new DKMS lifecycle is not a single restorable target-kernel state: ${new_status_before:-absent}"
+
+source_created=0
+overlay_created=0
+mapper_created=0
+autostart_created=0
+lightdm_created=0
+mapper_identity=
+autostart_identity=
+lightdm_identity=
+runtime_publication_ambiguous=0
+runtime_publication_note=
+overlay_backup_created=0
+overlay_replaced=0
+previous_overlay_file=
+new_dkms_mutation_attempted=0
+dkms_install_attempted=0
+old_retirement_attempted=0
+old_source_snapshot_complete=0
+old_source_retirement_failed=0
+old_source_retirement_recovery=
+new_dkms_state_snapshot_complete=0
+old_dkms_state_snapshot_complete=0
+boot_snapshot_complete=0
+boot_mutation_attempted=0
+backup_created=0
+completed=0
+stage_directory=
+recovery_directory=
+backup_file=${BACKUP_PATH:-$ARMBIAN_ENV.$PROJECT_NAME.$(date -u +%Y%m%dT%H%M%SZ).bak}
+
+restore_dkms_lifecycle()
+{
+	restore_version=$1
+	restore_phase=$2
+	restore_expected=$3
+	if ! restore_current=$(dkms status -m "$PROJECT_NAME" -v "$restore_version" 2>/dev/null); then
+		return 1
+	fi
+	if [ "$restore_current" != "$restore_expected" ]; then
+		if [ -n "$restore_current" ] &&
+			! dkms remove -m "$PROJECT_NAME" -v "$restore_version" --all >/dev/null 2>&1; then
+			return 1
+		fi
+		if ! restore_absent=$(dkms status -m "$PROJECT_NAME" -v "$restore_version" 2>/dev/null) ||
+			[ -n "$restore_absent" ]; then
+			return 1
+		fi
+		case $restore_phase in
+		absent) ;;
+		added)
+			dkms add -m "$PROJECT_NAME" -v "$restore_version" >/dev/null 2>&1 || return 1
+			;;
+		built)
+			dkms add -m "$PROJECT_NAME" -v "$restore_version" >/dev/null 2>&1 || return 1
+			dkms build -m "$PROJECT_NAME" -v "$restore_version" -k "$KERNEL_RELEASE" >/dev/null 2>&1 || return 1
+			;;
+		installed)
+			dkms add -m "$PROJECT_NAME" -v "$restore_version" >/dev/null 2>&1 || return 1
+			dkms build -m "$PROJECT_NAME" -v "$restore_version" -k "$KERNEL_RELEASE" >/dev/null 2>&1 || return 1
+			dkms install -m "$PROJECT_NAME" -v "$restore_version" -k "$KERNEL_RELEASE" >/dev/null 2>&1 || return 1
+			;;
+		*) return 1 ;;
+		esac
+	fi
+	restore_final=$(dkms status -m "$PROJECT_NAME" -v "$restore_version" 2>/dev/null) &&
+		[ "$restore_final" = "$restore_expected" ]
+}
+
+restore_dkms_state_tree()
+{
+	restore_state_version=$1
+	restore_state_snapshot=$2
+	restore_state_complete=$3
+	restore_state_destination=$dkms_state_root/$PROJECT_NAME/$restore_state_version
+	[ "$restore_state_complete" -eq 1 ] || return 0
+	rm -rf "$restore_state_destination" || return 1
+	if [ -d "$restore_state_snapshot" ]; then
+		mkdir -p "$(dirname -- "$restore_state_destination")" || return 1
+		cp -a "$restore_state_snapshot" "$restore_state_destination" || return 1
+		diff -qr "$restore_state_snapshot" "$restore_state_destination" >/dev/null || return 1
+	else
+		[ ! -e "$restore_state_destination" ] || return 1
+	fi
+}
+
+published_runtime_asset_matches()
+{
+	published_source=$1
+	published_destination=$2
+	published_mode=$3
+	published_identity=$4
+	regular_file_matches "$published_source" "$published_destination" "$published_mode" &&
+		[ "$(object_identity "$published_destination")" = "$published_identity" ]
+}
+
+restore_claim_without_overwrite()
+{
+	restore_claim=$1
+	restore_destination=$2
+	restore_identity=$(object_identity "$restore_claim" || true)
+	[ -n "$restore_identity" ] || return 1
+	if [ -e "$restore_destination" ] || [ -L "$restore_destination" ]; then
+		return 1
+	fi
+	mv -n -T "$restore_claim" "$restore_destination" || return 1
+	[ ! -e "$restore_claim" ] && [ ! -L "$restore_claim" ] &&
+		[ "$(object_identity "$restore_destination" || true)" = "$restore_identity" ]
+}
+
+claim_created_runtime_asset()
+{
+	created_asset_name=$1
+	created_destination=$2
+	created_source=$3
+	created_mode=$4
+	created_identity=$5
+	created_claim_state=error
+	created_claim_recovery=
+	if [ ! -e "$created_destination" ] && [ ! -L "$created_destination" ]; then
+		created_claim_state=absent
+		return 0
+	fi
+	created_directory=$(dirname -- "$created_destination")
+	created_claim=$(mktemp "$created_directory/.${PROJECT_NAME}.rollback.$created_asset_name.XXXXXX") ||
+		return 1
+	created_claim_recovery=$created_claim
+	created_placeholder_identity=$(object_identity "$created_claim" || true)
+	[ -n "$created_placeholder_identity" ] || return 1
+	if ! mv -f "$created_destination" "$created_claim"; then
+		if unchanged_empty_placeholder "$created_claim" "$created_placeholder_identity" &&
+			{ [ -e "$created_destination" ] || [ -L "$created_destination" ]; }; then
+			created_claim_recovery=$created_destination
+			rm -f "$created_claim" >/dev/null 2>&1 || true
+		fi
+		return 1
+	fi
+	if published_runtime_asset_matches "$created_source" "$created_claim" \
+		"$created_mode" "$created_identity"; then
+		if ! rm -f "$created_claim"; then
+			return 1
+		fi
+		created_claim_recovery=
+		created_claim_state=removed
+		return 0
+	fi
+	printf 'RETAIN MODIFIED: %s\n' "$created_destination"
+	if restore_claim_without_overwrite "$created_claim" "$created_destination"; then
+		created_claim_recovery=$created_destination
+		created_claim_state=modified
+		return 0
+	fi
+	return 1
+}
+
+rollback()
+{
+	transaction_status=$?
+	trap - EXIT HUP INT TERM
+	rollback_failed=0
+	rollback_note=
+	protected_xorg_attestation_failed=0
+	new_source_retained=0
+	if [ "$completed" -ne 1 ]; then
+		if [ "$runtime_publication_ambiguous" -eq 1 ]; then
+			rollback_failed=1
+			rollback_note="$rollback_note$runtime_publication_note;"
+		fi
+		if [ "$old_source_retirement_failed" -eq 1 ] &&
+			[ "$old_source_retirement_recovery" != "$old_source" ]; then
+			rollback_failed=1
+			rollback_note="$rollback_note old source retirement recovery retained at $old_source_retirement_recovery;"
+		fi
+		boot_restore_failed=0
+		if [ "$boot_snapshot_complete" -eq 1 ] && [ "$boot_mutation_attempted" -eq 1 ]; then
+			private_boot_snapshot=$recovery_directory/current-armbianEnv.txt
+			if ! try_atomic_install_file "$private_boot_snapshot" "$ARMBIAN_ENV" ||
+				! cmp -s "$private_boot_snapshot" "$ARMBIAN_ENV"; then
+				rollback_failed=1
+				boot_restore_failed=1
+				rollback_note="$rollback_note private boot baseline retained at $private_boot_snapshot;"
+			fi
+		fi
+		if [ "$backup_created" -eq 1 ] && [ -f "$backup_file" ]; then
+			if [ "$boot_restore_failed" -eq 1 ]; then
+				rollback_note="$rollback_note boot configuration backup retained at $backup_file;"
+			elif ! rm -f "$backup_file" "$backup_file.sha256"; then
+				rollback_failed=1
+				rollback_note="$rollback_note restored boot configuration but could not remove transaction backup $backup_file;"
+			fi
+		fi
+		if [ "$overlay_created" -eq 1 ] && ! rm -f "$overlay_destination"; then
+			rollback_failed=1
+			rollback_note="$rollback_note overlay removal failed: $overlay_destination;"
+		fi
+		if [ "$lightdm_created" -eq 1 ]; then
+			if claim_created_runtime_asset lightdm "$LIGHTDM_GREETER_POLICY_DESTINATION" \
+				"$PROJECT_SOURCE_DIR/assets/90-rockpi-greeter-no-blank.conf" \
+				644 "$lightdm_identity"; then
+				if [ "$created_claim_state" = modified ]; then
+					rollback_failed=1
+					rollback_note="$rollback_note LightDM greeter policy retained at $created_claim_recovery;"
+				fi
+			else
+				rollback_failed=1
+				rollback_note="$rollback_note LightDM greeter policy removal failed: $LIGHTDM_GREETER_POLICY_DESTINATION; recovery retained at $created_claim_recovery;"
+			fi
+		fi
+		autostart_remains=0
+		if [ "$autostart_created" -eq 1 ]; then
+			if claim_created_runtime_asset autostart "$TOUCH_AUTOSTART_DESTINATION" \
+				"$PROJECT_SOURCE_DIR/assets/rockpi-rpi-touchscreen-touch-map.desktop" \
+				644 "$autostart_identity"; then
+				case $created_claim_state in
+				removed|absent) ;;
+				modified)
+					autostart_remains=1
+					rollback_failed=1
+					rollback_note="$rollback_note touch autostart retained at $created_claim_recovery;"
+					;;
+				esac
+			else
+				rollback_failed=1
+				autostart_remains=1
+				rollback_note="$rollback_note touch autostart removal failed: $TOUCH_AUTOSTART_DESTINATION; recovery retained at $created_claim_recovery;"
+			fi
+		elif [ -e "$TOUCH_AUTOSTART_DESTINATION" ] || [ -L "$TOUCH_AUTOSTART_DESTINATION" ]; then
+			autostart_remains=1
+		fi
+		if [ "$mapper_created" -eq 1 ]; then
+			if [ "$autostart_remains" -eq 1 ]; then
+				rollback_failed=1
+				rollback_note="$rollback_note touch mapper retained because touch autostart remains: $TOUCH_MAPPER_DESTINATION;"
+			elif claim_created_runtime_asset mapper "$TOUCH_MAPPER_DESTINATION" \
+				"$PROJECT_SOURCE_DIR/scripts/map-touchscreen.sh" 755 "$mapper_identity"; then
+				if [ "$created_claim_state" = modified ]; then
+					rollback_failed=1
+					rollback_note="$rollback_note touch mapper retained at $created_claim_recovery;"
+				fi
+			else
+				rollback_failed=1
+				rollback_note="$rollback_note touch mapper removal failed: $TOUCH_MAPPER_DESTINATION; recovery retained at $created_claim_recovery;"
+			fi
+		fi
+		if [ "$overlay_replaced" -eq 1 ] && [ -f "$previous_overlay_file" ]; then
+			if try_atomic_install_file "$previous_overlay_file" "$overlay_destination"; then
+				rm -f "$previous_overlay_file"
+				previous_overlay_file=
+				overlay_backup_created=0
+			else
+				rollback_failed=1
+				rollback_note="$rollback_note prior overlay retained at $previous_overlay_file;"
+			fi
+		elif [ "$overlay_backup_created" -eq 1 ] && [ -f "$previous_overlay_file" ]; then
+			if ! rm -f "$previous_overlay_file"; then
+				rollback_failed=1
+				rollback_note="$rollback_note overlay backup cleanup failed: $previous_overlay_file;"
+			fi
+		fi
+		if [ "$new_dkms_mutation_attempted" -eq 1 ]; then
+			if ! restore_dkms_lifecycle "$PROJECT_VERSION" "$new_lifecycle_phase" "$new_status_before" ||
+				! restore_dkms_state_tree "$PROJECT_VERSION" \
+					"$recovery_directory/new-dkms-state" "$new_dkms_state_snapshot_complete" ||
+				! new_status_restored=$(dkms status -m "$PROJECT_NAME" -v "$PROJECT_VERSION" 2>/dev/null) ||
+				[ "$new_status_restored" != "$new_status_before" ]; then
+				rollback_failed=1
+				new_source_retained=1
+				rollback_note="$rollback_note DKMS registration baseline restoration failed; new source retained at $PROJECT_SOURCE_DIR;"
+			fi
+		fi
+		if [ "$old_retirement_attempted" -eq 1 ] && [ "$old_source_owned" -eq 1 ] &&
+			[ "$old_source_snapshot_complete" -eq 1 ]; then
+			if [ -e "$old_source" ] || [ -L "$old_source" ]; then
+				if ! diff -qr "$recovery_directory/old-source" "$old_source" >/dev/null 2>&1; then
+					rollback_failed=1
+					rollback_note="$rollback_note modified old source retained at $old_source; exact snapshot retained at $recovery_directory/old-source;"
+				fi
+			else
+				old_source_restore_stage=$recovery_directory/old-source-restore
+				if [ -e "$old_source_restore_stage" ] || [ -L "$old_source_restore_stage" ] ||
+					! cp -a "$recovery_directory/old-source" "$old_source_restore_stage" ||
+					! diff -qr "$recovery_directory/old-source" "$old_source_restore_stage" >/dev/null ||
+					! mv -n -T "$old_source_restore_stage" "$old_source" ||
+					[ -e "$old_source_restore_stage" ] || [ -L "$old_source_restore_stage" ] ||
+					! diff -qr "$recovery_directory/old-source" "$old_source" >/dev/null; then
+					rollback_failed=1
+					rollback_note="$rollback_note old source restoration failed; snapshot retained at $recovery_directory/old-source;"
+				fi
+			fi
+		fi
+		if [ "$dkms_install_attempted" -eq 1 ] || [ "$old_retirement_attempted" -eq 1 ]; then
+			old_reinstall_failed=0
+			if [ "$dkms_install_attempted" -eq 1 ] && [ "$old_was_installed" -eq 1 ] &&
+				old_current_before_restore=$(dkms status -m "$PROJECT_NAME" -v "$old_version" 2>/dev/null) &&
+				[ "$old_current_before_restore" = "$old_status" ] &&
+				! dkms install -m "$PROJECT_NAME" -v "$old_version" -k "$KERNEL_RELEASE" >/dev/null 2>&1; then
+				old_reinstall_failed=1
+			fi
+			if [ "$old_reinstall_failed" -eq 1 ] ||
+				! restore_dkms_lifecycle "$old_version" "$old_lifecycle_phase" "$old_status" ||
+				! restore_dkms_state_tree "$old_version" \
+					"$recovery_directory/old-dkms-state" "$old_dkms_state_snapshot_complete" ||
+				! old_status_restored=$(dkms status -m "$PROJECT_NAME" -v "$old_version" 2>/dev/null) ||
+				[ "$old_status_restored" != "$old_status" ]; then
+				rollback_failed=1
+				rollback_note="$rollback_note old DKMS reinstall failed; retained old source at $old_source;"
+			fi
+		fi
+		if [ -n "$recovery_directory" ] &&
+			[ -f "$recovery_directory/prior-modules.snapshot-complete" ]; then
+			for module_name in $MODULE_NAMES; do
+				prior_paths=$recovery_directory/prior-modules/$module_name.paths
+				current_paths=$recovery_directory/prior-modules/$module_name.current-paths
+				find "${MODULES_DIR:-/lib/modules}/$KERNEL_RELEASE" -type f \
+					\( -name "$module_name.ko" -o -name "$module_name.ko.xz" \
+					-o -name "$module_name.ko.gz" -o -name "$module_name.ko.zst" \) \
+					-print > "$current_paths" 2>/dev/null || true
+				while IFS= read -r current_path; do
+					[ -n "$current_path" ] || continue
+					if ! rm -f "$current_path"; then
+						rollback_failed=1
+						rollback_note="$rollback_note partial $module_name removal failed: $current_path;"
+					fi
+				done < "$current_paths"
+				prior_index=0
+				while IFS= read -r prior_path; do
+					[ -n "$prior_path" ] || continue
+					prior_index=$((prior_index + 1))
+					prior_module=$recovery_directory/prior-modules/$module_name.$prior_index.backup
+					if ! try_atomic_install_file "$prior_module" "$prior_path" ||
+						! cmp -s "$prior_module" "$prior_path"; then
+						rollback_failed=1
+						rollback_note="$rollback_note prior $module_name module retained at $prior_module;"
+					fi
+				done < "$prior_paths"
+				restored_count=$(find "${MODULES_DIR:-/lib/modules}/$KERNEL_RELEASE" -type f \
+					\( -name "$module_name.ko" -o -name "$module_name.ko.xz" \
+					-o -name "$module_name.ko.gz" -o -name "$module_name.ko.zst" \) \
+					-print 2>/dev/null | awk 'END { print NR + 0 }')
+				[ "$restored_count" -eq "$prior_index" ] || {
+					rollback_failed=1
+					rollback_note="$rollback_note $module_name path-set restoration failed;"
+				}
+			done
+			if ! depmod -a "$KERNEL_RELEASE"; then
+				rollback_failed=1
+				rollback_note="$rollback_note dependency index refresh failed for $KERNEL_RELEASE;"
+			fi
+		fi
+		if [ "$dkms_install_attempted" -eq 1 ] || [ "$old_retirement_attempted" -eq 1 ]; then
+			if ! restored_old_status=$(dkms status -m "$PROJECT_NAME" -v "$old_version" 2>&1) ||
+				[ "$restored_old_status" != "$old_status" ]; then
+				rollback_failed=1
+				rollback_note="$rollback_note old DKMS lifecycle restoration failed (expected: ${old_status:-absent}; got: ${restored_old_status:-unavailable});"
+			elif [ "$old_was_installed" -eq 1 ]; then
+				for module_name in $OLD_MODULE_NAMES; do
+					old_checksum_restoration_failed=0
+					old_built_module=$(find_dkms_module_artifact \
+						"$dkms_state_root/$PROJECT_NAME/$old_version/$KERNEL_RELEASE" "$module_name")
+					old_installed_module=$(modinfo -k "$KERNEL_RELEASE" -n "$module_name" 2>/dev/null || true)
+					if [ -z "$old_built_module" ] || [ ! -f "$old_installed_module" ]; then
+						old_checksum_restoration_failed=1
+					elif ! old_built_checksum=$(module_content_checksum "$old_built_module"); then
+						old_checksum_restoration_failed=1
+					elif ! old_installed_checksum=$(module_content_checksum "$old_installed_module"); then
+						old_checksum_restoration_failed=1
+					elif [ "$old_built_checksum" != "$old_installed_checksum" ]; then
+						old_checksum_restoration_failed=1
+					fi
+					if [ "$old_checksum_restoration_failed" -eq 1 ]; then
+						rollback_failed=1
+						rollback_note="$rollback_note old installed $module_name checksum restoration failed;"
+					fi
+				done
+			fi
+		fi
+		if [ "$source_created" -eq 1 ] && [ "$new_source_retained" -eq 0 ]; then
+			if ! try_retire_owned_source_tree "$PROJECT_SOURCE_DIR" "$PROJECT_VERSION" \
+				"$recovery_directory/new-source-retirement"; then
+				rollback_failed=1
+				new_source_retained=1
+				rollback_note="$rollback_note new source retained at $source_retirement_recovery;"
+			fi
+		fi
+		if [ -n "$stage_directory" ] && [ -d "$stage_directory" ] &&
+			! rm -rf "$stage_directory"; then
+			rollback_failed=1
+			rollback_note="$rollback_note staged source cleanup failed: $stage_directory;"
+		fi
+		if [ "$rollback_failed" -eq 0 ] && [ -n "$recovery_directory" ] &&
+			[ -d "$recovery_directory" ] && ! rm -rf "$recovery_directory"; then
+			rollback_failed=1
+			rollback_note="$rollback_note transaction recovery cleanup failed: $recovery_directory;"
+		fi
+	fi
+	if ! attest_protected_xorg_unchanged; then
+		protected_xorg_attestation_failed=1
+	fi
+	if [ "$completed" -eq 1 ]; then
+		if [ "$protected_xorg_attestation_failed" -eq 1 ]; then
+			printf 'ERROR: installation committed, but protected Xorg attestation failed: %s\n' \
+				"$protected_xorg_error" >&2
+			exit 1
+		fi
+		exit "$transaction_status"
+	fi
+	if [ "$rollback_failed" -ne 0 ]; then
+		if [ -n "$recovery_directory" ] && [ -d "$recovery_directory" ]; then
+			rollback_note="$rollback_note recovery artifacts retained at $recovery_directory;"
+		fi
+		if [ "$protected_xorg_attestation_failed" -eq 1 ]; then
+			rollback_note="$rollback_note protected Xorg attestation failed: $protected_xorg_error;"
+		fi
+		printf 'ERROR: transaction failed with status %s; rollback also failed:%s\n' \
+			"$transaction_status" "$rollback_note" >&2
+		exit 1
+	fi
+	if [ "$protected_xorg_attestation_failed" -eq 1 ]; then
+		printf 'ERROR: transaction failed with status %s; rollback completed, but protected Xorg attestation failed: %s\n' \
+			"$transaction_status" "$protected_xorg_error" >&2
+		exit 1
+	fi
+	exit "$transaction_status"
+}
+trap rollback EXIT HUP INT TERM
+
+source_parent=$(dirname -- "$PROJECT_SOURCE_DIR")
+mkdir -p "$source_parent"
+recovery_directory=$(mktemp -d "$source_parent/.${PROJECT_NAME}.transaction.XXXXXX")
+stage_directory=$(mktemp -d "$source_parent/.${PROJECT_NAME}.stage.XXXXXX")
+cp "$ARMBIAN_ENV" "$recovery_directory/current-armbianEnv.txt"
+cmp -s "$ARMBIAN_ENV" "$recovery_directory/current-armbianEnv.txt" ||
+	die 'private current boot recovery snapshot verification failed'
+boot_snapshot_complete=1
+if [ "$old_source_owned" -eq 1 ]; then
+	cp -a "$old_source" "$recovery_directory/old-source"
+	diff -qr "$old_source" "$recovery_directory/old-source" >/dev/null ||
+		die 'old DKMS source recovery snapshot verification failed'
+	old_source_snapshot_complete=1
+fi
+if [ -d "$dkms_state_root/$PROJECT_NAME/$PROJECT_VERSION" ]; then
+	cp -a "$dkms_state_root/$PROJECT_NAME/$PROJECT_VERSION" \
+		"$recovery_directory/new-dkms-state"
+	diff -qr "$dkms_state_root/$PROJECT_NAME/$PROJECT_VERSION" \
+		"$recovery_directory/new-dkms-state" >/dev/null ||
+		die 'new DKMS state recovery snapshot verification failed'
+fi
+new_dkms_state_snapshot_complete=1
+if [ -d "$dkms_state_root/$PROJECT_NAME/$old_version" ]; then
+	cp -a "$dkms_state_root/$PROJECT_NAME/$old_version" \
+		"$recovery_directory/old-dkms-state"
+	diff -qr "$dkms_state_root/$PROJECT_NAME/$old_version" \
+		"$recovery_directory/old-dkms-state" >/dev/null ||
+		die 'old DKMS state recovery snapshot verification failed'
+fi
+old_dkms_state_snapshot_complete=1
+mkdir -p "$stage_directory/src" "$stage_directory/scripts" "$stage_directory/assets" \
+	"$stage_directory/LICENSES"
+chmod 0755 "$stage_directory" "$stage_directory/src" "$stage_directory/scripts" \
+	"$stage_directory/assets" "$stage_directory/LICENSES"
+install -m 0644 "$repo_root/Makefile" "$repo_root/dkms.conf" "$repo_root/LICENSE" "$stage_directory/"
+install -m 0644 "$repo_root/LICENSES/GPL-2.0-only.txt" "$stage_directory/LICENSES/"
+install -m 0644 "$repo_root/LICENSES/UPSTREAM.md" "$stage_directory/LICENSES/"
+install -m 0644 "$repo_root/src/ft5426_protocol.h" "$repo_root/src/raspits_ft5426.c" \
+	"$repo_root/src/panel_rockpi_rpi_touchscreen.c" "$repo_root/src/display_compat.h" \
+	"$repo_root/src/display_compat_core.h" "$repo_root/src/display_compat_core.c" \
+	"$repo_root/src/display_compat_main.c" "$stage_directory/src/"
+install -m 0755 "$repo_root/scripts/dkms-make.sh" "$stage_directory/scripts/"
+install -m 0755 "$repo_root/scripts/map-touchscreen.sh" "$stage_directory/scripts/"
+install -m 0644 "$repo_root/assets/rockpi-rpi-touchscreen-touch-map.desktop" \
+	"$stage_directory/assets/"
+install -m 0644 "$repo_root/assets/90-rockpi-greeter-no-blank.conf" \
+	"$stage_directory/assets/"
+source_digest()
+{
+	(
+		cd "$1"
+		sha256sum Makefile dkms.conf src/ft5426_protocol.h src/raspits_ft5426.c \
+			src/panel_rockpi_rpi_touchscreen.c src/display_compat.h \
+			src/display_compat_core.h src/display_compat_core.c src/display_compat_main.c \
+			scripts/dkms-make.sh scripts/map-touchscreen.sh \
+			assets/rockpi-rpi-touchscreen-touch-map.desktop \
+			assets/90-rockpi-greeter-no-blank.conf \
+			LICENSE LICENSES/GPL-2.0-only.txt LICENSES/UPSTREAM.md | sha256sum | awk '{print $1}'
+	)
+}
+expected_source_digest=$(source_digest "$stage_directory")
+source_tree_matches_release "$stage_directory" "$PROJECT_VERSION" ||
+	die "staged DKMS source does not match exact $PROJECT_VERSION ownership: $source_ownership_error"
+
+preflight_runtime_asset()
+{
+	runtime_source=$1
+	runtime_destination=$2
+	runtime_mode=$3
+	if [ -e "$runtime_destination" ] || [ -L "$runtime_destination" ]; then
+		[ -f "$runtime_destination" ] && [ ! -L "$runtime_destination" ] &&
+			cmp -s "$runtime_source" "$runtime_destination" &&
+			[ "$(stat -c '%a' "$runtime_destination")" = "$runtime_mode" ] ||
+			die "runtime asset conflicts with project ownership: $runtime_destination"
+	fi
+}
+
+preflight_runtime_asset "$stage_directory/scripts/map-touchscreen.sh" \
+	"$TOUCH_MAPPER_DESTINATION" 755
+preflight_runtime_asset "$stage_directory/assets/rockpi-rpi-touchscreen-touch-map.desktop" \
+	"$TOUCH_AUTOSTART_DESTINATION" 644
+preflight_runtime_asset "$stage_directory/assets/90-rockpi-greeter-no-blank.conf" \
+	"$LIGHTDM_GREETER_POLICY_DESTINATION" 644
+
+publish_runtime_asset()
+{
+	publish_asset_name=$1
+	publish_asset_source=$2
+	publish_asset_destination=$3
+	publish_asset_mode=$4
+	if try_publish_file_no_replace "$publish_asset_source" "$publish_asset_destination" \
+		"$publish_asset_mode"; then
+		published_identity=$publish_identity
+		[ -n "$published_identity" ] ||
+			die "cannot record published runtime asset identity: $publish_asset_destination"
+		return 0
+	fi
+	case $publish_result in
+	collision)
+		die "runtime asset appeared during publication: $publish_asset_destination"
+		;;
+	ambiguous)
+		runtime_publication_ambiguous=1
+		runtime_publication_note=" ambiguous touch $publish_asset_name publication retained at $publish_asset_destination"
+		[ -z "$publish_recovery" ] ||
+			runtime_publication_note="$runtime_publication_note with publication claim $publish_recovery"
+		die "touch $publish_asset_name publication outcome is ambiguous; retained destination: $publish_asset_destination"
+		;;
+	*) die "touch $publish_asset_name installation failed" ;;
+	esac
+}
+
+if [ -e "$PROJECT_SOURCE_DIR" ]; then
+	source_tree_matches_release "$PROJECT_SOURCE_DIR" "$PROJECT_VERSION" ||
+		die "same-version DKMS source differs from exact $PROJECT_VERSION ownership: $PROJECT_SOURCE_DIR ($source_ownership_error)"
+	rm -rf "$stage_directory"
+	stage_directory=
+else
+	mv "$stage_directory" "$PROJECT_SOURCE_DIR"
+	stage_directory=
+	source_created=1
+fi
+[ "$source_created" -eq 0 ] ||
+	source_tree_matches_release "$PROJECT_SOURCE_DIR" "$PROJECT_VERSION" ||
+	die "installed DKMS source does not match exact $PROJECT_VERSION ownership: $source_ownership_error"
+[ "$(source_digest "$PROJECT_SOURCE_DIR")" = "$expected_source_digest" ] ||
+	die 'installed DKMS source checksum verification failed'
+
+if [ "$new_was_registered" -eq 0 ]; then
+	new_dkms_mutation_attempted=1
+	dkms add -m "$PROJECT_NAME" -v "$PROJECT_VERSION" ||
+		die 'DKMS package could not be added'
+fi
+new_dkms_mutation_attempted=1
+dkms build -m "$PROJECT_NAME" -v "$PROJECT_VERSION" -k "$KERNEL_RELEASE"
+
+mkdir -p "$recovery_directory/prior-modules"
+for module_name in $MODULE_NAMES; do
+	prior_paths=$recovery_directory/prior-modules/$module_name.paths
+	find "${MODULES_DIR:-/lib/modules}/$KERNEL_RELEASE" -type f \
+		\( -name "$module_name.ko" -o -name "$module_name.ko.xz" \
+		-o -name "$module_name.ko.gz" -o -name "$module_name.ko.zst" \) \
+		-print > "$prior_paths" 2>/dev/null || true
+	prior_index=0
+	while IFS= read -r prior_module_path; do
+		[ -n "$prior_module_path" ] || continue
+		prior_index=$((prior_index + 1))
+		prior_module_backup=$recovery_directory/prior-modules/$module_name.$prior_index.backup
+		cp "$prior_module_path" "$prior_module_backup"
+		cmp -s "$prior_module_path" "$prior_module_backup" ||
+			die "recovery snapshot verification failed for $prior_module_path"
+	done < "$prior_paths"
+done
+: > "$recovery_directory/prior-modules.snapshot-complete"
+dkms_install_attempted=1
+dkms install -m "$PROJECT_NAME" -v "$PROJECT_VERSION" -k "$KERNEL_RELEASE"
+
+expected_dkms_status="$PROJECT_NAME/$PROJECT_VERSION, $KERNEL_RELEASE, $ARCH: installed"
+dkms_status=$(dkms status -m "$PROJECT_NAME" -v "$PROJECT_VERSION") ||
+	die "cannot verify DKMS status for $PROJECT_NAME/$PROJECT_VERSION"
+printf '%s\n' "$dkms_status" | grep -Fxq "$expected_dkms_status" ||
+	die "DKMS did not report exact installed state: $expected_dkms_status"
+for module_name in $MODULE_NAMES; do
+	built_module=$(find_dkms_module_artifact \
+		"$dkms_state_root/$PROJECT_NAME/$PROJECT_VERSION/$KERNEL_RELEASE" "$module_name")
+	[ -n "$built_module" ] || die "cannot locate the DKMS-built $module_name module"
+	installed_module=$(modinfo -k "$KERNEL_RELEASE" -n "$module_name")
+	[ -f "$installed_module" ] || die "installed module not found: $installed_module"
+	if ! built_checksum=$(module_content_checksum "$built_module"); then
+		die "cannot verify DKMS-built $module_name module content"
+	fi
+	if ! installed_checksum=$(module_content_checksum "$installed_module"); then
+		die "cannot verify installed $module_name module content"
+	fi
+	[ "$built_checksum" = "$installed_checksum" ] ||
+		die "installed $module_name checksum does not match the DKMS build"
+	[ "$(modinfo -F license "$built_module")" = 'GPL v2' ] &&
+		[ "$(modinfo -F license "$installed_module")" = 'GPL v2' ] ||
+		die "$module_name built or installed module license is not GPL v2"
+	built_vermagic=$(modinfo -F vermagic "$built_module")
+	installed_vermagic=$(modinfo -F vermagic "$installed_module")
+	[ "$built_vermagic" = "$installed_vermagic" ] ||
+		die "$module_name built and installed vermagic differ"
+	case $built_vermagic in
+	"$KERNEL_RELEASE "*) ;;
+	*) die "$module_name vermagic does not match $KERNEL_RELEASE" ;;
+	esac
+	case $module_name in
+	rockpi_rk3399_display_compat) expected_alias='of:N*T*Crockpi,rk3399-dsi1-rpi-touchscreen-compat' ;;
+	raspits_ft5426) expected_alias='of:N*T*Craspits_ft5426' ;;
+	panel_rockpi_rpi_touchscreen) expected_alias='of:N*T*Crockpi,rpi-7inch-touchscreen-panel' ;;
+	*) die "no module metadata policy for $module_name" ;;
+	esac
+	modinfo -F alias "$built_module" | grep -Fxq "$expected_alias" ||
+		die "$module_name built module is missing device-tree alias $expected_alias"
+	modinfo -F alias "$installed_module" | grep -Fxq "$expected_alias" ||
+		die "$module_name installed module is missing device-tree alias $expected_alias"
+done
+
+if [ ! -e "$overlay_destination" ]; then
+	overlay_created=1
+	atomic_install_file "$overlay_output" "$overlay_destination"
+elif ! cmp -s "$overlay_output" "$overlay_destination"; then
+	previous_overlay_file=$(mktemp "$BOOT_DIRECTORY/.${PROJECT_NAME}.overlay-backup.XXXXXX")
+	overlay_backup_created=1
+	cp "$overlay_destination" "$previous_overlay_file"
+	overlay_replaced=1
+	atomic_install_file "$overlay_output" "$overlay_destination"
+fi
+cmp "$overlay_output" "$overlay_destination" || die 'installed DTBO checksum verification failed'
+
+if [ ! -e "$TOUCH_MAPPER_DESTINATION" ] && [ ! -L "$TOUCH_MAPPER_DESTINATION" ]; then
+	publish_runtime_asset mapper "$PROJECT_SOURCE_DIR/scripts/map-touchscreen.sh" \
+		"$TOUCH_MAPPER_DESTINATION" 755
+	mapper_identity=$published_identity
+	mapper_created=1
+fi
+if [ ! -e "$TOUCH_AUTOSTART_DESTINATION" ] && [ ! -L "$TOUCH_AUTOSTART_DESTINATION" ]; then
+	publish_runtime_asset autostart \
+		"$PROJECT_SOURCE_DIR/assets/rockpi-rpi-touchscreen-touch-map.desktop" \
+		"$TOUCH_AUTOSTART_DESTINATION" 644
+	autostart_identity=$published_identity
+	autostart_created=1
+fi
+if [ ! -e "$LIGHTDM_GREETER_POLICY_DESTINATION" ] && [ ! -L "$LIGHTDM_GREETER_POLICY_DESTINATION" ]; then
+	publish_runtime_asset lightdm \
+		"$PROJECT_SOURCE_DIR/assets/90-rockpi-greeter-no-blank.conf" \
+		"$LIGHTDM_GREETER_POLICY_DESTINATION" 644
+	lightdm_identity=$published_identity
+	lightdm_created=1
+fi
+cmp -s "$PROJECT_SOURCE_DIR/scripts/map-touchscreen.sh" "$TOUCH_MAPPER_DESTINATION" ||
+	die 'installed touch mapper checksum verification failed'
+[ "$(stat -c '%a' "$TOUCH_MAPPER_DESTINATION")" = 755 ] ||
+	die 'installed touch mapper mode verification failed'
+cmp -s "$PROJECT_SOURCE_DIR/assets/rockpi-rpi-touchscreen-touch-map.desktop" \
+	"$TOUCH_AUTOSTART_DESTINATION" ||
+	die 'installed touch autostart checksum verification failed'
+[ "$(stat -c '%a' "$TOUCH_AUTOSTART_DESTINATION")" = 644 ] ||
+	die 'installed touch autostart mode verification failed'
+cmp -s "$PROJECT_SOURCE_DIR/assets/90-rockpi-greeter-no-blank.conf" \
+	"$LIGHTDM_GREETER_POLICY_DESTINATION" ||
+	die 'installed LightDM greeter policy checksum verification failed'
+[ "$(stat -c '%a' "$LIGHTDM_GREETER_POLICY_DESTINATION")" = 644 ] ||
+	die 'installed LightDM greeter policy mode verification failed'
+
+if [ ! -e "$backup_file" ]; then
+	cp "$ARMBIAN_ENV" "$backup_file"
+	sha256sum "$backup_file" > "$backup_file.sha256"
+	backup_created=1
+fi
+[ -f "$backup_file.sha256" ] || die "boot backup checksum not found: $backup_file.sha256"
+sha256sum -c "$backup_file.sha256" >/dev/null || die "boot backup checksum verification failed: $backup_file"
+boot_mutation_attempted=1
+add_overlay_token "$ARMBIAN_ENV" "$OVERLAY_TOKEN"
+[ "$(awk -v token="$OVERLAY_TOKEN" '
+	/^[[:space:]]*user_overlays[[:space:]]*=/ {
+		value = $0
+		sub(/^[^=]*=/, "", value)
+		n = split(value, tokens, /[[:space:]]+/)
+		for (i = 1; i <= n; i++) if (tokens[i] == token) count++
+	}
+	END { print count + 0 }
+' "$ARMBIAN_ENV")" -eq 1 ] || die 'boot configuration does not contain exactly one project overlay token'
+[ "$(source_digest "$PROJECT_SOURCE_DIR")" = "$expected_source_digest" ] ||
+	die 'final installed DKMS source checksum verification failed'
+cmp "$overlay_output" "$overlay_destination" || die 'final installed DTBO checksum verification failed'
+cmp -s "$PROJECT_SOURCE_DIR/scripts/map-touchscreen.sh" "$TOUCH_MAPPER_DESTINATION" ||
+	die 'final installed touch mapper checksum verification failed'
+[ "$(stat -c '%a' "$TOUCH_MAPPER_DESTINATION")" = 755 ] ||
+	die 'final installed touch mapper mode verification failed'
+cmp -s "$PROJECT_SOURCE_DIR/assets/rockpi-rpi-touchscreen-touch-map.desktop" \
+	"$TOUCH_AUTOSTART_DESTINATION" ||
+	die 'final installed touch autostart checksum verification failed'
+[ "$(stat -c '%a' "$TOUCH_AUTOSTART_DESTINATION")" = 644 ] ||
+	die 'final installed touch autostart mode verification failed'
+cmp -s "$PROJECT_SOURCE_DIR/assets/90-rockpi-greeter-no-blank.conf" \
+	"$LIGHTDM_GREETER_POLICY_DESTINATION" ||
+	die 'final installed LightDM greeter policy checksum verification failed'
+[ "$(stat -c '%a' "$LIGHTDM_GREETER_POLICY_DESTINATION")" = 644 ] ||
+	die 'final installed LightDM greeter policy mode verification failed'
+if [ "$old_registered" -eq 1 ]; then
+	old_retirement_attempted=1
+	dkms remove -m "$PROJECT_NAME" -v "$old_version" --all ||
+		die "old DKMS $old_version retirement failed"
+	retired_old_status=$(dkms status -m "$PROJECT_NAME" -v "$old_version") ||
+		die "cannot verify retired old DKMS $old_version lifecycle"
+	[ -z "$retired_old_status" ] ||
+		die "old DKMS $old_version lifecycle remained after retirement: $retired_old_status"
+	if [ "$old_source_owned" -eq 1 ]; then
+		if ! try_retire_owned_source_tree "$old_source" "$old_version" \
+			"$recovery_directory/old-source-retirement"; then
+			old_source_retirement_failed=1
+			old_source_retirement_recovery=$source_retirement_recovery
+			die "old DKMS source retirement could not claim exact ownership; retained at $old_source_retirement_recovery"
+		fi
+	fi
+elif [ "$old_source_owned" -eq 1 ]; then
+	old_retirement_attempted=1
+	if ! try_retire_owned_source_tree "$old_source" "$old_version" \
+		"$recovery_directory/old-source-retirement"; then
+		old_source_retirement_failed=1
+		old_source_retirement_recovery=$source_retirement_recovery
+		die "old DKMS source retirement could not claim exact ownership; retained at $old_source_retirement_recovery"
+	fi
+fi
+completed=1
+committed_cleanup_failed=0
+committed_cleanup_note=
+if [ "$overlay_replaced" -eq 1 ]; then
+	if rm -f "$previous_overlay_file"; then
+		previous_overlay_file=
+		overlay_backup_created=0
+		overlay_replaced=0
+	else
+		committed_cleanup_failed=1
+		committed_cleanup_note="$committed_cleanup_note prior overlay recovery retained at $previous_overlay_file;"
+	fi
+fi
+if rm -rf "$recovery_directory"; then
+	recovery_directory=
+else
+	committed_cleanup_failed=1
+	committed_cleanup_note="$committed_cleanup_note transaction recovery retained at $recovery_directory;"
+fi
+committed_attestation_failed=0
+if ! attest_protected_xorg_unchanged; then
+	committed_attestation_failed=1
+fi
+trap - EXIT HUP INT TERM
+if [ "$committed_cleanup_failed" -eq 1 ]; then
+	if [ "$committed_attestation_failed" -eq 1 ]; then
+		committed_cleanup_note="$committed_cleanup_note protected Xorg attestation failed: $protected_xorg_error;"
+	fi
+	printf 'ERROR: installation committed, but cleanup failed:%s\n' \
+		"$committed_cleanup_note" >&2
+	exit 1
+fi
+if [ "$committed_attestation_failed" -eq 1 ]; then
+	printf 'ERROR: installation committed, but protected Xorg attestation failed: %s\n' \
+		"$protected_xorg_error" >&2
+	exit 1
+fi
+
+printf 'PASS: installed %s/%s and verified all three modules, source, backup, boot token, and DTBO checksums\n' \
+	"$PROJECT_NAME" "$PROJECT_VERSION"
+printf 'NEXT: installation is complete; no automatic power action occurs. Obtain fresh authorization before any reboot or shutdown.\n'
+printf 'NEXT: first authorized boot: keep HDMI disconnected; validate DSI-1, RGB, and physical touch; then hot-plug HDMI.\n'
+printf 'ROLLBACK: sudo sh scripts/uninstall.sh (or use docs/recovery.md offline).\n'
