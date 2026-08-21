@@ -438,175 +438,32 @@ test_validator_requires_exactly_one_desktop_entry_group()
 	printf 'PASS: validator requires exactly one Desktop Entry group\n'
 }
 
-test_validator_rejects_layout_mutating_touch_mapper()
+test_validator_rejects_every_noncanonical_touch_mapper()
 {
-	sandbox=$workdir/layout-mutating-touch-mapper
-	make_packaged_asset_sandbox "$sandbox"
-	printf '%s\n' 'xrandr --output DSI-1 --primary' >> \
-		"$sandbox/repo/scripts/map-touchscreen.sh"
-	if run_packaged_asset_validate "$sandbox" > "$sandbox/output" 2>&1; then
-		fail 'validator accepted a layout-mutating touch mapper'
-	fi
-	grep -Fq 'touch mapper contains a forbidden layout token' "$sandbox/output" ||
-		fail 'validator did not identify the layout-mutating touch mapper'
-	printf 'PASS: validator rejects a layout-mutating touch mapper\n'
-}
-
-test_validator_rejects_non_current_path_xrandr()
-{
-	sandbox=$workdir/non-current-path-xrandr
-	make_packaged_asset_sandbox "$sandbox"
-	printf '%s\n' '/usr/bin/xrandr --query' >> \
-		"$sandbox/repo/scripts/map-touchscreen.sh"
-	if run_packaged_asset_validate "$sandbox" > "$sandbox/output" 2>&1; then
-		fail 'validator accepted a path-qualified non-current xrandr invocation'
-	fi
-	grep -Fq 'touch mapper contains an xrandr invocation other than xrandr --current' \
-		"$sandbox/output" ||
-		fail 'validator did not identify the path-qualified non-current xrandr invocation'
-	printf 'PASS: validator rejects a path-qualified non-current xrandr invocation\n'
-}
-
-test_validator_rejects_xrandr_lexical_bypasses()
-{
-	for variant in quoted-path punctuation substitution quoted-substitution \
-		multiline-substitution continued-invocation leading-assignment; do
-		sandbox=$workdir/xrandr-bypass-$variant
+	for variant in extra-after-current short-option command-wrapper env-wrapper eval \
+		indirection alternate-path quoted-command punctuated-command source-byte-change; do
+		sandbox=$workdir/noncanonical-touch-mapper-$variant
 		make_packaged_asset_sandbox "$sandbox"
 		case $variant in
-		quoted-path) fixture='"/usr/bin/xrandr" --query' ;;
-		punctuation) fixture='xrandr;' ;;
-		substitution) fixture='result=$(xrandr --query)' ;;
-		quoted-substitution) fixture='result="$(xrandr --query)"' ;;
-		multiline-substitution) fixture='result=$(xrandr
---query)' ;;
-		continued-invocation) fixture='xrandr \
---query' ;;
-		leading-assignment) fixture='LC_ALL=C /usr/bin/xrandr --query' ;;
+		extra-after-current) fixture='xrandr --current --verbose' ;;
+		short-option) fixture='xrandr -q' ;;
+		command-wrapper) fixture='command xrandr --current' ;;
+		env-wrapper) fixture='env xrandr --current' ;;
+		eval) fixture="eval 'xrandr --current'" ;;
+		indirection) fixture='xrandr_command=xrandr; "$xrandr_command" --current' ;;
+		alternate-path) fixture='/usr/bin/xrandr --current' ;;
+		quoted-command) fixture='"xrandr" --current' ;;
+		punctuated-command) fixture='xrandr --current; :' ;;
+		source-byte-change) fixture='# locally changed canonical mapper' ;;
 		esac
 		printf '%s\n' "$fixture" >> "$sandbox/repo/scripts/map-touchscreen.sh"
 		if run_packaged_asset_validate "$sandbox" > "$sandbox/output" 2>&1; then
-			fail "validator accepted xrandr lexical bypass: $variant"
+			fail "validator accepted noncanonical touch mapper: $variant"
 		fi
-		grep -Fq 'touch mapper contains an xrandr invocation other than xrandr --current' \
-			"$sandbox/output" ||
-			fail "validator did not identify xrandr lexical bypass: $variant"
+		grep -Fq 'touch mapper does not match canonical project artifact' "$sandbox/output" ||
+			fail "validator did not report canonical identity failure: $variant"
 	done
-	printf 'PASS: validator rejects quoted, punctuated, multiline, substituted, continued, and assignment-led xrandr bypasses\n'
-}
-
-test_validator_preserves_substitution_word_state()
-{
-	for variant in suffix-semicolon suffix-whitespace suffix-and nested-unsafe; do
-		sandbox=$workdir/xrandr-substitution-state-$variant
-		make_packaged_asset_sandbox "$sandbox"
-		case $variant in
-		suffix-semicolon) fixture='marker=$(printf x)suffix; xrandr --query' ;;
-		suffix-whitespace) fixture='marker=$(printf x)suffix xrandr --query' ;;
-		suffix-and) fixture='marker=$(printf x)suffix && xrandr --query' ;;
-		nested-unsafe) fixture='marker=$(printf "%s" "$(xrandr --query)")suffix' ;;
-		esac
-		printf '%s\n' "$fixture" >> "$sandbox/repo/scripts/map-touchscreen.sh"
-		if run_packaged_asset_validate "$sandbox" > "$sandbox/output" 2>&1; then
-			fail "validator lost xrandr command state around substitution: $variant"
-		fi
-		grep -Fq 'touch mapper contains an xrandr invocation other than xrandr --current' \
-			"$sandbox/output" ||
-			fail "validator did not identify substitution-state bypass: $variant"
-	done
-	printf 'PASS: validator preserves outer words and command boundaries around nested substitutions\n'
-}
-
-test_validator_rejects_legacy_backtick_substitution()
-{
-	sandbox=$workdir/xrandr-legacy-backtick
-	make_packaged_asset_sandbox "$sandbox"
-	printf '%s\n' 'marker=`xrandr --query`' >> \
-		"$sandbox/repo/scripts/map-touchscreen.sh"
-	if run_packaged_asset_validate "$sandbox" > "$sandbox/output" 2>&1; then
-		fail 'validator accepted unsafe xrandr in legacy backtick substitution'
-	fi
-	grep -Fq 'touch mapper uses unsupported legacy backtick substitution; use $(...)' \
-		"$sandbox/output" ||
-		fail 'validator did not report the legacy backtick substitution policy'
-	printf 'PASS: validator rejects legacy backtick substitution with actionable policy\n'
-}
-
-test_validator_rejects_xrandr_after_leading_redirections()
-{
-	for variant in output stderr separated assignment-target; do
-		sandbox=$workdir/xrandr-leading-redirection-$variant
-		make_packaged_asset_sandbox "$sandbox"
-		case $variant in
-		output) fixture='>/tmp/touch-map-query xrandr --query' ;;
-		stderr) fixture='2>/dev/null /usr/bin/xrandr --query' ;;
-		separated) fixture='2> /dev/null xrandr --query' ;;
-		assignment-target) fixture='> marker=file xrandr --query' ;;
-		esac
-		printf '%s\n' "$fixture" >> "$sandbox/repo/scripts/map-touchscreen.sh"
-		if run_packaged_asset_validate "$sandbox" > "$sandbox/output" 2>&1; then
-			fail "validator accepted xrandr after leading redirection: $variant"
-		fi
-		grep -Fq 'touch mapper contains an xrandr invocation other than xrandr --current' \
-			"$sandbox/output" ||
-			fail "validator did not identify leading-redirection bypass: $variant"
-	done
-	printf 'PASS: validator recognizes xrandr after leading redirections\n'
-}
-
-test_validator_accepts_safe_substitution_and_redirection_boundaries()
-{
-	for variant in substitution-current substitution-argument nested-current \
-		redirection-current assignment-target-current; do
-		sandbox=$workdir/xrandr-safe-substitution-$variant
-		make_packaged_asset_sandbox "$sandbox"
-		case $variant in
-		substitution-current) fixture='marker=$(printf x)suffix xrandr --current' ;;
-		substitution-argument) fixture="marker=\$(printf x)suffix printf '%s\\n' xrandr --query" ;;
-		nested-current) fixture='marker=$(printf "%s" "$(printf x)")suffix; xrandr --current' ;;
-		redirection-current) fixture='2>/dev/null /usr/bin/xrandr --current' ;;
-		assignment-target-current) fixture='> marker=file xrandr --current' ;;
-		esac
-		printf '%s\n' "$fixture" >> "$sandbox/repo/scripts/map-touchscreen.sh"
-		if ! run_packaged_asset_validate "$sandbox" > "$sandbox/output" 2>&1; then
-			cat "$sandbox/output" >&2
-			fail "validator rejected safe substitution/redirection boundary: $variant"
-		fi
-	done
-	printf 'PASS: validator accepts safe substitution suffixes and leading redirections\n'
-}
-
-test_validator_runs_shell_syntax_before_lexical_policy()
-{
-	sandbox=$workdir/unclosed-touch-mapper-substitution
-	make_packaged_asset_sandbox "$sandbox"
-	printf '%s\n' 'marker=$(printf x' >> "$sandbox/repo/scripts/map-touchscreen.sh"
-	if run_packaged_asset_validate "$sandbox" > "$sandbox/output" 2>&1; then
-		fail 'validator accepted an unclosed mapper command substitution'
-	fi
-	grep -Fq 'touch mapper source has invalid shell syntax' "$sandbox/output" ||
-		fail 'validator did not run shell syntax before lexical policy'
-	printf 'PASS: validator runs shell syntax before lexical policy for unclosed constructs\n'
-}
-
-test_validator_accepts_non_command_xrandr_text()
-{
-	for variant in comment argument quoted-argument assignment; do
-		sandbox=$workdir/xrandr-safe-text-$variant
-		make_packaged_asset_sandbox "$sandbox"
-		case $variant in
-		comment) fixture='# xrandr --query is documentation, not a command' ;;
-		argument) fixture="printf '%s\\n' xrandr --query" ;;
-		quoted-argument) fixture="printf '%s\\n' 'xrandr --query'" ;;
-		assignment) fixture="message='xrandr --query'" ;;
-		esac
-		printf '%s\n' "$fixture" >> "$sandbox/repo/scripts/map-touchscreen.sh"
-		if ! run_packaged_asset_validate "$sandbox" > "$sandbox/output" 2>&1; then
-			cat "$sandbox/output" >&2
-			fail "validator rejected non-command xrandr text: $variant"
-		fi
-	done
-	printf 'PASS: validator ignores xrandr in comments, arguments, and assignment values\n'
+	printf 'PASS: validator rejects every noncanonical touch mapper byte change\n'
 }
 
 test_old_upstream_panel_compatible_fails_validation()
@@ -921,15 +778,7 @@ test_validator_rejects_malformed_desktop_exec
 test_validator_rejects_invalid_touch_mapper_syntax
 test_validator_rejects_malformed_desktop_tryexec
 test_validator_requires_exactly_one_desktop_entry_group
-test_validator_rejects_layout_mutating_touch_mapper
-test_validator_rejects_non_current_path_xrandr
-test_validator_rejects_xrandr_lexical_bypasses
-test_validator_preserves_substitution_word_state
-test_validator_rejects_legacy_backtick_substitution
-test_validator_rejects_xrandr_after_leading_redirections
-test_validator_accepts_safe_substitution_and_redirection_boundaries
-test_validator_runs_shell_syntax_before_lexical_policy
-test_validator_accepts_non_command_xrandr_text
+test_validator_rejects_every_noncanonical_touch_mapper
 test_old_upstream_panel_compatible_fails_validation
 test_validator_checks_distinct_module_aliases
 test_validator_requires_display_compat_provider_module
