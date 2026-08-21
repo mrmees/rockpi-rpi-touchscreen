@@ -177,27 +177,47 @@ snapshot_module_paths()
 snapshot_runtime_asset()
 {
 	runtime_asset_name=$1
-	runtime_destination=$2
+	runtime_source=$2
+	runtime_destination=$3
+	runtime_expected_mode=$4
 	runtime_backup=$transaction_directory/runtime/$runtime_asset_name
-	runtime_mode=$(stat -c '%a' "$runtime_destination")
-	cp "$runtime_destination" "$runtime_backup" ||
+	runtime_snapshot_state=modified
+	if ! runtime_asset_matches "$runtime_source" "$runtime_destination" "$runtime_expected_mode"; then
+		printf 'RETAIN MODIFIED: %s\n' "$runtime_destination"
+		return 0
+	fi
+	if ! cp "$runtime_destination" "$runtime_backup"; then
+		if ! runtime_asset_matches "$runtime_source" "$runtime_destination" "$runtime_expected_mode"; then
+			rm -f "$runtime_backup" "$runtime_backup.mode" >/dev/null 2>&1 || true
+			printf 'RETAIN MODIFIED: %s\n' "$runtime_destination"
+			return 0
+		fi
 		die "cannot snapshot runtime asset: $runtime_destination"
-	chmod "$runtime_mode" "$runtime_backup" ||
+	fi
+	chmod "$runtime_expected_mode" "$runtime_backup" ||
 		die "cannot snapshot runtime asset mode: $runtime_destination"
-	cmp -s "$runtime_destination" "$runtime_backup" &&
-		[ "$(stat -c '%a' "$runtime_backup")" = "$runtime_mode" ] ||
-		die "cannot verify runtime asset snapshot: $runtime_destination"
-	printf '%s\n' "$runtime_mode" > "$runtime_backup.mode"
+	if ! runtime_asset_matches "$runtime_source" "$runtime_backup" "$runtime_expected_mode" ||
+		! runtime_asset_matches "$runtime_source" "$runtime_destination" "$runtime_expected_mode"; then
+		rm -f "$runtime_backup" "$runtime_backup.mode" >/dev/null 2>&1 || true
+		printf 'RETAIN MODIFIED: %s\n' "$runtime_destination"
+		return 0
+	fi
+	printf '%s\n' "$runtime_expected_mode" > "$runtime_backup.mode"
+	runtime_snapshot_state=owned
 }
 
 snapshot_runtime_assets()
 {
 	mkdir -p "$transaction_directory/runtime"
 	if [ "$mapper_state" = owned ]; then
-		snapshot_runtime_asset mapper "$TOUCH_MAPPER_DESTINATION"
+		snapshot_runtime_asset mapper "$touch_mapper_source" \
+			"$TOUCH_MAPPER_DESTINATION" 755
+		mapper_state=$runtime_snapshot_state
 	fi
 	if [ "$autostart_state" = owned ]; then
-		snapshot_runtime_asset autostart "$TOUCH_AUTOSTART_DESTINATION"
+		snapshot_runtime_asset autostart "$touch_autostart_source" \
+			"$TOUCH_AUTOSTART_DESTINATION" 644
+		autostart_state=$runtime_snapshot_state
 	fi
 	: > "$transaction_directory/runtime.snapshot-complete"
 }
@@ -223,7 +243,7 @@ restore_runtime_asset()
 		rm -f "$runtime_temporary"
 		return 1
 	fi
-	if ! ln "$runtime_temporary" "$runtime_destination"; then
+	if ! ln -T "$runtime_temporary" "$runtime_destination"; then
 		rm -f "$runtime_temporary"
 		if [ -e "$runtime_destination" ] || [ -L "$runtime_destination" ]; then
 			printf 'RETAIN MODIFIED: %s\n' "$runtime_destination"
@@ -238,33 +258,47 @@ restore_runtime_claim()
 {
 	runtime_claim=$1
 	runtime_destination=$2
-	ln "$runtime_claim" "$runtime_destination" || return 1
-	rm -f "$runtime_claim"
+	runtime_claim_identity=$(object_identity "$runtime_claim" || true)
+	[ -n "$runtime_claim_identity" ] || return 1
+	if [ -e "$runtime_destination" ] || [ -L "$runtime_destination" ]; then
+		return 1
+	fi
+	mv -n -T "$runtime_claim" "$runtime_destination" || return 1
+	[ ! -e "$runtime_claim" ] && [ ! -L "$runtime_claim" ] &&
+		[ "$(object_identity "$runtime_destination" || true)" = "$runtime_claim_identity" ]
 }
 
 claim_runtime_asset()
 {
 	runtime_asset_name=$1
 	runtime_destination=$2
-	runtime_backup=$3
+	runtime_source=$3
 	runtime_mode=$4
 	runtime_claim_state=error
 	runtime_claim_recovery=
 	runtime_directory=$(dirname -- "$runtime_destination")
 	runtime_claim=$(mktemp "$runtime_directory/.${PROJECT_NAME}.uninstall.$runtime_asset_name.XXXXXX") ||
 		return 1
+	runtime_claim_recovery=$runtime_claim
 	if ! mv -f "$runtime_destination" "$runtime_claim"; then
-		rm -f "$runtime_claim" || return 1
-		if [ -e "$runtime_destination" ] || [ -L "$runtime_destination" ]; then
-			printf 'RETAIN MODIFIED: %s\n' "$runtime_destination"
-			runtime_claim_state=modified
-		else
-			runtime_claim_state=absent
+		if [ ! -e "$runtime_destination" ] && [ ! -L "$runtime_destination" ] &&
+			runtime_asset_matches "$runtime_source" "$runtime_claim" "$runtime_mode"; then
+			return 1
 		fi
-		return 0
+		if [ -e "$runtime_destination" ] || [ -L "$runtime_destination" ]; then
+			runtime_claim_recovery=$runtime_destination
+			if ! runtime_asset_matches "$runtime_source" "$runtime_destination" "$runtime_mode"; then
+				printf 'RETAIN MODIFIED: %s\n' "$runtime_destination"
+			fi
+		fi
+		rm -f "$runtime_claim" >/dev/null 2>&1 || true
+		return 1
 	fi
-	if runtime_asset_matches "$runtime_backup" "$runtime_claim" "$runtime_mode"; then
-		rm -f "$runtime_claim" || return 1
+	if runtime_asset_matches "$runtime_source" "$runtime_claim" "$runtime_mode"; then
+		if ! rm -f "$runtime_claim"; then
+			return 1
+		fi
+		runtime_claim_recovery=
 		runtime_claim_state=removed
 		return 0
 	fi
@@ -273,7 +307,6 @@ claim_runtime_asset()
 		runtime_claim_state=modified
 		return 0
 	fi
-	runtime_claim_recovery=$runtime_claim
 	return 1
 }
 
@@ -503,7 +536,7 @@ remove_overlay_token "$ARMBIAN_ENV" "$OVERLAY_TOKEN"
 rm -f "$overlay_destination"
 if [ "$autostart_state" = owned ]; then
 	if ! claim_runtime_asset autostart "$TOUCH_AUTOSTART_DESTINATION" \
-		"$transaction_directory/runtime/autostart" 644; then
+		"$touch_autostart_source" 644; then
 		autostart_claim_held=1
 		autostart_claim_recovery=$runtime_claim_recovery
 		rollback_note="$rollback_note touch autostart claim retained at $autostart_claim_recovery;"
@@ -524,7 +557,7 @@ if [ "$mapper_state" = owned ]; then
 		printf 'RETAIN DEPENDENCY: %s\n' "$TOUCH_MAPPER_DESTINATION"
 	else
 		if ! claim_runtime_asset mapper "$TOUCH_MAPPER_DESTINATION" \
-			"$transaction_directory/runtime/mapper" 755; then
+			"$touch_mapper_source" 755; then
 			mapper_claim_held=1
 			mapper_claim_recovery=$runtime_claim_recovery
 			rollback_note="$rollback_note touch mapper claim retained at $mapper_claim_recovery;"

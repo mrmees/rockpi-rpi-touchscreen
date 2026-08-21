@@ -96,6 +96,79 @@ try_atomic_install_file()
 	fi
 }
 
+regular_file_matches()
+{
+	match_source=$1
+	match_destination=$2
+	match_mode=$3
+	[ -f "$match_destination" ] && [ ! -L "$match_destination" ] &&
+		cmp -s "$match_source" "$match_destination" &&
+		[ "$(stat -c '%a' "$match_destination")" = "$match_mode" ]
+}
+
+object_identity()
+{
+	stat -c '%d:%i:%f' -- "$1" 2>/dev/null
+}
+
+try_publish_file_no_replace()
+{
+	publish_source=$1
+	publish_destination=$2
+	publish_mode=$3
+	publish_result=error
+	publish_recovery=
+	publish_directory=$(dirname -- "$publish_destination")
+	mkdir -p "$publish_directory" || return 1
+	publish_temporary=$(mktemp "$publish_directory/.${PROJECT_NAME}.publish.XXXXXX") || return 1
+	publish_recovery=$publish_temporary
+	if ! cp "$publish_source" "$publish_temporary" ||
+		! chmod "$publish_mode" "$publish_temporary"; then
+		rm -f "$publish_temporary" || true
+		return 1
+	fi
+	if ln -T "$publish_temporary" "$publish_destination"; then
+		publish_temporary_identity=$(object_identity "$publish_temporary" || true)
+		publish_destination_identity=$(object_identity "$publish_destination" || true)
+		if [ -z "$publish_temporary_identity" ] ||
+			[ "$publish_temporary_identity" != "$publish_destination_identity" ] ||
+			! regular_file_matches "$publish_source" "$publish_temporary" "$publish_mode" ||
+			! regular_file_matches "$publish_source" "$publish_destination" "$publish_mode"; then
+			publish_result=ambiguous
+			return 1
+		fi
+		if ! rm -f "$publish_temporary"; then
+			publish_result=ambiguous
+			return 1
+		fi
+		publish_recovery=
+		publish_result=created
+		return 0
+	fi
+	if [ -e "$publish_destination" ] || [ -L "$publish_destination" ]; then
+		publish_temporary_identity=$(object_identity "$publish_temporary" || true)
+		publish_destination_identity=$(object_identity "$publish_destination" || true)
+		if [ -n "$publish_temporary_identity" ] &&
+			[ "$publish_temporary_identity" = "$publish_destination_identity" ]; then
+			publish_result=ambiguous
+			return 1
+		fi
+		if rm -f "$publish_temporary"; then
+			publish_recovery=
+			publish_result=collision
+		else
+			publish_result=ambiguous
+		fi
+		return 1
+	fi
+	if rm -f "$publish_temporary"; then
+		publish_recovery=
+	else
+		publish_result=ambiguous
+	fi
+	return 1
+}
+
 atomic_replace_temp()
 {
 	temporary_file=$1

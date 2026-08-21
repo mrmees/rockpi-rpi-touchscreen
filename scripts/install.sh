@@ -6,7 +6,7 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 require_supported_kernel_release
 require_root
-require_command awk cat chmod cmp cp date depmod diff dirname dkms find grep head install mkdir mktemp modinfo mv rm sed sha256sum stat tail
+require_command awk cat chmod cmp cp date depmod diff dirname dkms find grep head install ln mkdir mktemp modinfo mv rm sed sha256sum stat tail
 
 module_content_checksum()
 {
@@ -167,6 +167,10 @@ source_created=0
 overlay_created=0
 mapper_created=0
 autostart_created=0
+mapper_identity=
+autostart_identity=
+runtime_publication_ambiguous=0
+runtime_publication_note=
 overlay_backup_created=0
 overlay_replaced=0
 previous_overlay_file=
@@ -239,6 +243,76 @@ restore_dkms_state_tree()
 	fi
 }
 
+published_runtime_asset_matches()
+{
+	published_source=$1
+	published_destination=$2
+	published_mode=$3
+	published_identity=$4
+	regular_file_matches "$published_source" "$published_destination" "$published_mode" &&
+		[ "$(object_identity "$published_destination")" = "$published_identity" ]
+}
+
+restore_claim_without_overwrite()
+{
+	restore_claim=$1
+	restore_destination=$2
+	restore_identity=$(object_identity "$restore_claim" || true)
+	[ -n "$restore_identity" ] || return 1
+	if [ -e "$restore_destination" ] || [ -L "$restore_destination" ]; then
+		return 1
+	fi
+	mv -n -T "$restore_claim" "$restore_destination" || return 1
+	[ ! -e "$restore_claim" ] && [ ! -L "$restore_claim" ] &&
+		[ "$(object_identity "$restore_destination" || true)" = "$restore_identity" ]
+}
+
+claim_created_runtime_asset()
+{
+	created_asset_name=$1
+	created_destination=$2
+	created_source=$3
+	created_mode=$4
+	created_identity=$5
+	created_claim_state=error
+	created_claim_recovery=
+	if [ ! -e "$created_destination" ] && [ ! -L "$created_destination" ]; then
+		created_claim_state=absent
+		return 0
+	fi
+	created_directory=$(dirname -- "$created_destination")
+	created_claim=$(mktemp "$created_directory/.${PROJECT_NAME}.rollback.$created_asset_name.XXXXXX") ||
+		return 1
+	created_claim_recovery=$created_claim
+	if ! mv -f "$created_destination" "$created_claim"; then
+		if published_runtime_asset_matches "$created_source" "$created_claim" \
+			"$created_mode" "$created_identity"; then
+			return 1
+		fi
+		if [ -e "$created_destination" ] || [ -L "$created_destination" ]; then
+			created_claim_recovery=$created_destination
+		fi
+		rm -f "$created_claim" >/dev/null 2>&1 || true
+		return 1
+	fi
+	if published_runtime_asset_matches "$created_source" "$created_claim" \
+		"$created_mode" "$created_identity"; then
+		if ! rm -f "$created_claim"; then
+			return 1
+		fi
+		created_claim_recovery=
+		created_claim_state=removed
+		return 0
+	fi
+	printf 'RETAIN MODIFIED: %s\n' "$created_destination"
+	if restore_claim_without_overwrite "$created_claim" "$created_destination"; then
+		created_claim_recovery=$created_destination
+		created_claim_state=modified
+		return 0
+	fi
+	return 1
+}
+
 rollback()
 {
 	transaction_status=$?
@@ -247,6 +321,10 @@ rollback()
 	rollback_note=
 	new_source_retained=0
 	if [ "$completed" -ne 1 ]; then
+		if [ "$runtime_publication_ambiguous" -eq 1 ]; then
+			rollback_failed=1
+			rollback_note="$rollback_note$runtime_publication_note;"
+		fi
 		boot_restore_failed=0
 		if [ "$boot_snapshot_complete" -eq 1 ] && [ "$boot_mutation_attempted" -eq 1 ]; then
 			private_boot_snapshot=$recovery_directory/current-armbianEnv.txt
@@ -269,19 +347,40 @@ rollback()
 			rollback_failed=1
 			rollback_note="$rollback_note overlay removal failed: $overlay_destination;"
 		fi
-		autostart_removal_failed=0
-		if [ "$autostart_created" -eq 1 ] && ! rm -f "$TOUCH_AUTOSTART_DESTINATION"; then
-			rollback_failed=1
-			autostart_removal_failed=1
-			rollback_note="$rollback_note touch autostart removal failed: $TOUCH_AUTOSTART_DESTINATION;"
+		autostart_remains=0
+		if [ "$autostart_created" -eq 1 ]; then
+			if claim_created_runtime_asset autostart "$TOUCH_AUTOSTART_DESTINATION" \
+				"$PROJECT_SOURCE_DIR/assets/rockpi-rpi-touchscreen-touch-map.desktop" \
+				644 "$autostart_identity"; then
+				case $created_claim_state in
+				removed|absent) ;;
+				modified)
+					autostart_remains=1
+					rollback_failed=1
+					rollback_note="$rollback_note touch autostart retained at $created_claim_recovery;"
+					;;
+				esac
+			else
+				rollback_failed=1
+				autostart_remains=1
+				rollback_note="$rollback_note touch autostart removal failed: $TOUCH_AUTOSTART_DESTINATION; recovery retained at $created_claim_recovery;"
+			fi
+		elif [ -e "$TOUCH_AUTOSTART_DESTINATION" ] || [ -L "$TOUCH_AUTOSTART_DESTINATION" ]; then
+			autostart_remains=1
 		fi
 		if [ "$mapper_created" -eq 1 ]; then
-			if [ "$autostart_removal_failed" -eq 1 ]; then
+			if [ "$autostart_remains" -eq 1 ]; then
 				rollback_failed=1
 				rollback_note="$rollback_note touch mapper retained because touch autostart remains: $TOUCH_MAPPER_DESTINATION;"
-			elif ! rm -f "$TOUCH_MAPPER_DESTINATION"; then
+			elif claim_created_runtime_asset mapper "$TOUCH_MAPPER_DESTINATION" \
+				"$PROJECT_SOURCE_DIR/scripts/map-touchscreen.sh" 755 "$mapper_identity"; then
+				if [ "$created_claim_state" = modified ]; then
+					rollback_failed=1
+					rollback_note="$rollback_note touch mapper retained at $created_claim_recovery;"
+				fi
+			else
 				rollback_failed=1
-				rollback_note="$rollback_note touch mapper removal failed: $TOUCH_MAPPER_DESTINATION;"
+				rollback_note="$rollback_note touch mapper removal failed: $TOUCH_MAPPER_DESTINATION; recovery retained at $created_claim_recovery;"
 			fi
 		fi
 		if [ "$overlay_replaced" -eq 1 ] && [ -f "$previous_overlay_file" ]; then
@@ -510,6 +609,34 @@ preflight_runtime_asset "$stage_directory/scripts/map-touchscreen.sh" \
 preflight_runtime_asset "$stage_directory/assets/rockpi-rpi-touchscreen-touch-map.desktop" \
 	"$TOUCH_AUTOSTART_DESTINATION" 644
 
+publish_runtime_asset()
+{
+	publish_asset_name=$1
+	publish_asset_source=$2
+	publish_asset_destination=$3
+	publish_asset_mode=$4
+	if try_publish_file_no_replace "$publish_asset_source" "$publish_asset_destination" \
+		"$publish_asset_mode"; then
+		published_identity=$(object_identity "$publish_asset_destination" || true)
+		[ -n "$published_identity" ] ||
+			die "cannot record published runtime asset identity: $publish_asset_destination"
+		return 0
+	fi
+	case $publish_result in
+	collision)
+		die "runtime asset appeared during publication: $publish_asset_destination"
+		;;
+	ambiguous)
+		runtime_publication_ambiguous=1
+		runtime_publication_note=" ambiguous touch $publish_asset_name publication retained at $publish_asset_destination"
+		[ -z "$publish_recovery" ] ||
+			runtime_publication_note="$runtime_publication_note with publication claim $publish_recovery"
+		die "touch $publish_asset_name publication outcome is ambiguous; retained destination: $publish_asset_destination"
+		;;
+	*) die "touch $publish_asset_name installation failed" ;;
+	esac
+}
+
 if [ -e "$PROJECT_SOURCE_DIR" ]; then
 	[ -d "$PROJECT_SOURCE_DIR" ] || die "DKMS source path is not a directory: $PROJECT_SOURCE_DIR"
 	[ -f "$PROJECT_SOURCE_DIR/dkms.conf" ] || die "DKMS source path is not owned by this project: $PROJECT_SOURCE_DIR"
@@ -609,16 +736,18 @@ elif ! cmp -s "$overlay_output" "$overlay_destination"; then
 fi
 cmp "$overlay_output" "$overlay_destination" || die 'installed DTBO checksum verification failed'
 
-if [ ! -e "$TOUCH_MAPPER_DESTINATION" ]; then
+if [ ! -e "$TOUCH_MAPPER_DESTINATION" ] && [ ! -L "$TOUCH_MAPPER_DESTINATION" ]; then
+	publish_runtime_asset mapper "$PROJECT_SOURCE_DIR/scripts/map-touchscreen.sh" \
+		"$TOUCH_MAPPER_DESTINATION" 755
+	mapper_identity=$published_identity
 	mapper_created=1
-	try_atomic_install_file "$PROJECT_SOURCE_DIR/scripts/map-touchscreen.sh" \
-		"$TOUCH_MAPPER_DESTINATION" 0755 || die 'touch mapper installation failed'
 fi
-if [ ! -e "$TOUCH_AUTOSTART_DESTINATION" ]; then
-	autostart_created=1
-	try_atomic_install_file \
+if [ ! -e "$TOUCH_AUTOSTART_DESTINATION" ] && [ ! -L "$TOUCH_AUTOSTART_DESTINATION" ]; then
+	publish_runtime_asset autostart \
 		"$PROJECT_SOURCE_DIR/assets/rockpi-rpi-touchscreen-touch-map.desktop" \
-		"$TOUCH_AUTOSTART_DESTINATION" 0644 || die 'touch autostart installation failed'
+		"$TOUCH_AUTOSTART_DESTINATION" 644
+	autostart_identity=$published_identity
+	autostart_created=1
 fi
 cmp -s "$PROJECT_SOURCE_DIR/scripts/map-touchscreen.sh" "$TOUCH_MAPPER_DESTINATION" ||
 	die 'installed touch mapper checksum verification failed'

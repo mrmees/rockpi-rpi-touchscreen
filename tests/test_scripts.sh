@@ -259,9 +259,11 @@ status)
 		done < "$DKMS_ADDED_STATE"
 	fi
 	;;
-	remove)
-		if [ "$version" = 0.2.4 ] && [ -n "${DKMS_OLD_RETIREMENT_ATTEMPT_MARKER:-}" ] &&
-			[ -e "${LIBEXEC_DIR:?}/rockpi-rpi-touchscreen-map-touch" ]; then
+		remove)
+			if [ "$version" = 0.2.4 ] && [ -n "${DKMS_OLD_RETIREMENT_ATTEMPT_MARKER:-}" ] &&
+				[ -f "${LIBEXEC_DIR:?}/rockpi-rpi-touchscreen-map-touch" ] &&
+				cmp "${DKMS_TREE:?}/rockpi-rpi-touchscreen-0.2.5/scripts/map-touchscreen.sh" \
+					"${LIBEXEC_DIR:?}/rockpi-rpi-touchscreen-map-touch" >/dev/null 2>&1; then
 			: > "$DKMS_OLD_RETIREMENT_ATTEMPT_MARKER"
 		fi
 		if [ "$version" = 0.2.5 ] && [ "${DKMS_REMOVE_GENUINE_FAIL:-0}" -eq 1 ]; then
@@ -465,8 +467,13 @@ cat > "$sandbox/bin/mv" <<'EOF'
 #!/bin/sh
 set -eu
 last=
+source=
 for argument do
 	last=$argument
+	case $argument in
+	-*) ;;
+	*) [ -n "$source" ] || source=$argument ;;
+	esac
 done
 printf '%s\n' "$*" >> "${MV_LOG:?}"
 [ -z "${OP_LOG:-}" ] || printf 'mv %s\n' "$*" >> "$OP_LOG"
@@ -492,6 +499,11 @@ if [ -n "${MV_CREATE_FILE_BEFORE_TARGET:-}" ] && [ "$last" = "$MV_CREATE_FILE_BE
 	chmod 0600 "$last"
 fi
 /bin/mv "$@"
+if [ -n "${MV_FAIL_AFTER_SOURCE:-}" ] && [ "$source" = "$MV_FAIL_AFTER_SOURCE" ] &&
+	[ ! -e "${MV_FAIL_AFTER_SOURCE_MARKER:?}" ]; then
+	: > "$MV_FAIL_AFTER_SOURCE_MARKER"
+	exit 1
+fi
 if [ -n "${MV_CREATE_FILE_AFTER_SOURCE:-}" ] && [ "$2" = "$MV_CREATE_FILE_AFTER_SOURCE" ]; then
 	printf '%s\n' raced-runtime-asset > "${MV_CREATE_FILE_AFTER_TARGET:?}"
 	chmod 0600 "${MV_CREATE_FILE_AFTER_TARGET:?}"
@@ -526,11 +538,35 @@ last=
 for argument do
 	last=$argument
 done
+[ -z "${OP_LOG:-}" ] || printf 'ln %s\n' "$*" >> "$OP_LOG"
 if [ -n "${LN_CREATE_FILE_BEFORE_TARGET:-}" ] && [ "$last" = "$LN_CREATE_FILE_BEFORE_TARGET" ]; then
 	printf '%s\n' raced-runtime-asset > "$last"
 	chmod 0600 "$last"
 fi
-exec /bin/ln "$@"
+if [ -n "${LN_CREATE_SYMLINK_BEFORE_TARGET:-}" ] && [ "$last" = "$LN_CREATE_SYMLINK_BEFORE_TARGET" ]; then
+	/bin/ln -s "${LN_CREATE_SYMLINK_VALUE:?}" "$last"
+fi
+if [ -n "${LN_CREATE_DIRECTORY_BEFORE_TARGET:-}" ] && [ "$last" = "$LN_CREATE_DIRECTORY_BEFORE_TARGET" ]; then
+	mkdir "$last"
+fi
+if [ -n "${LN_FAIL_BEFORE_TARGET:-}" ] && [ "$last" = "$LN_FAIL_BEFORE_TARGET" ] &&
+	[ ! -e "${LN_FAIL_BEFORE_TARGET_MARKER:?}" ]; then
+	: > "$LN_FAIL_BEFORE_TARGET_MARKER"
+	exit 1
+fi
+/bin/ln "$@"
+if [ -n "${LN_CORRUPT_AFTER_TARGET:-}" ] && [ "$last" = "$LN_CORRUPT_AFTER_TARGET" ]; then
+	printf '%s\n' corrupt-runtime-asset > "$last"
+fi
+if [ -n "${LN_CORRUPT_FILE_AFTER_TARGET:-}" ] &&
+	[ "$last" = "${LN_CORRUPT_FILE_TRIGGER:?}" ]; then
+	printf '%s\n' corrupt-runtime-asset > "$LN_CORRUPT_FILE_AFTER_TARGET"
+fi
+if [ -n "${LN_FAIL_AFTER_TARGET:-}" ] && [ "$last" = "$LN_FAIL_AFTER_TARGET" ] &&
+	[ ! -e "${LN_FAIL_AFTER_TARGET_MARKER:?}" ]; then
+	: > "$LN_FAIL_AFTER_TARGET_MARKER"
+	exit 1
+fi
 EOF
 	chmod +x "$sandbox/bin/ln"
 	cat > "$sandbox/bin/cp" <<'EOF'
@@ -560,6 +596,28 @@ fi
 if [ -n "${CP_FAIL_SNAPSHOT_MODULE:-}" ]; then
 	case $source_file:$destination_file in
 	*"/modules/6.18.43-current-rockchip64/"*"/$CP_FAIL_SNAPSHOT_MODULE.ko:"*"/.rockpi-rpi-touchscreen.transaction."*"/prior-modules/"*) exit 29 ;;
+	esac
+fi
+if [ -n "${CP_MUTATE_RUNTIME_SOURCE:-}" ] && [ "$source_file" = "$CP_MUTATE_RUNTIME_SOURCE" ]; then
+	case $destination_file in
+	*"/.rockpi-rpi-touchscreen.uninstall."*"/runtime/"*)
+		case ${CP_MUTATE_RUNTIME_KIND:-file} in
+		file)
+			printf '%s\n' pre-snapshot-local-edit > "$source_file"
+			chmod 0755 "$source_file"
+			;;
+		symlink)
+			/bin/rm -f "$source_file"
+			/bin/ln -s "${CP_MUTATE_RUNTIME_SYMLINK_TARGET:?}" "$source_file"
+			;;
+		directory)
+			/bin/rm -f "$source_file"
+			mkdir "$source_file"
+			printf '%s\n' local-directory-data > "$source_file/local-data"
+			;;
+		*) exit 61 ;;
+		esac
+		;;
 	esac
 fi
 /bin/cp "$@"
@@ -1219,6 +1277,101 @@ test_uninstall_claim_revalidates_modified_runtime_asset()
 	printf 'PASS: uninstall revalidates and retains a post-snapshot modified mapper\n'
 }
 
+test_uninstall_pre_snapshot_byte_edit_is_retained()
+{
+	sandbox=$workdir/uninstall-pre-snapshot-edit
+	make_sandbox "$sandbox"
+	run_install "$sandbox" "$sandbox/validate-pass.sh"
+	mapper=$sandbox/usr-libexec/rockpi-rpi-touchscreen-map-touch
+	if ! CP_MUTATE_RUNTIME_SOURCE="$mapper" CP_MUTATE_RUNTIME_KIND=file \
+		run_uninstall "$sandbox" > "$sandbox/output" 2>&1; then
+		fail 'uninstall rejected a safely retained pre-snapshot byte edit'
+	fi
+	grep -Fqx 'pre-snapshot-local-edit' "$mapper" ||
+		fail 'uninstall deleted the mapper edited at the snapshot boundary'
+	assert_equal "$(stat -c '%a' "$mapper")" '755' \
+		'uninstall changed the pre-snapshot mapper mode'
+	grep -Fqx "RETAIN MODIFIED: $mapper" "$sandbox/output" ||
+		fail 'uninstall did not report the pre-snapshot mapper edit'
+	printf 'PASS: uninstall revalidates immutable source at the snapshot boundary\n'
+}
+
+test_uninstall_pre_snapshot_type_replacements_are_retained()
+{
+	for kind in symlink directory; do
+		sandbox=$workdir/uninstall-pre-snapshot-$kind
+		make_sandbox "$sandbox"
+		run_install "$sandbox" "$sandbox/validate-pass.sh"
+		mapper=$sandbox/usr-libexec/rockpi-rpi-touchscreen-map-touch
+		if ! CP_MUTATE_RUNTIME_SOURCE="$mapper" CP_MUTATE_RUNTIME_KIND=$kind \
+			CP_MUTATE_RUNTIME_SYMLINK_TARGET=/tmp/local-touch-mapper \
+			run_uninstall "$sandbox" > "$sandbox/output" 2>&1; then
+			fail "uninstall rejected a safely retained pre-snapshot mapper $kind"
+		fi
+		case $kind in
+		symlink)
+			[ -L "$mapper" ] || fail 'uninstall changed pre-snapshot mapper symlink type'
+			assert_equal "$(readlink "$mapper")" /tmp/local-touch-mapper \
+				'uninstall changed pre-snapshot mapper symlink target'
+			;;
+		directory)
+			[ -d "$mapper" ] && [ -f "$mapper/local-data" ] ||
+				fail 'uninstall changed pre-snapshot mapper directory contents'
+			;;
+		esac
+		grep -Fqx "RETAIN MODIFIED: $mapper" "$sandbox/output" ||
+			fail "uninstall did not report pre-snapshot mapper $kind retention"
+	done
+	printf 'PASS: uninstall retains pre-snapshot symlink and directory replacements\n'
+}
+
+test_uninstall_rename_then_error_retains_named_claim()
+{
+	sandbox=$workdir/uninstall-rename-then-error
+	make_sandbox "$sandbox"
+	run_install "$sandbox" "$sandbox/validate-pass.sh"
+	autostart=$sandbox/etc/xdg/autostart/rockpi-rpi-touchscreen-touch-map.desktop
+	if MV_FAIL_AFTER_SOURCE="$autostart" \
+		MV_FAIL_AFTER_SOURCE_MARKER="$sandbox/autostart-rename-failed-after" \
+		run_uninstall "$sandbox" > "$sandbox/output" 2>&1; then
+		fail 'uninstall accepted a claim rename that mutated before error'
+	fi
+	claim=$(find "$sandbox/etc/xdg/autostart" -maxdepth 1 -type f \
+		-name '.rockpi-rpi-touchscreen.uninstall.autostart.*' -print -quit)
+	[ -n "$claim" ] || fail 'rename-then-error discarded the exact held autostart claim'
+	cmp "$repo_root/assets/rockpi-rpi-touchscreen-touch-map.desktop" "$claim" ||
+		fail 'rename-then-error changed held autostart claim bytes'
+	assert_equal "$(stat -c '%a' "$claim")" '644' \
+		'rename-then-error changed held autostart claim mode'
+	grep -Fq "touch autostart claim retained at $claim" "$sandbox/output" ||
+		fail 'rename-then-error did not report the nonempty held claim path'
+	recovery=$(find "$sandbox/usr-src" -mindepth 1 -maxdepth 1 -type d \
+		-name '.rockpi-rpi-touchscreen.uninstall.*' -print -quit)
+	[ -n "$recovery" ] || fail 'rename-then-error discarded transaction recovery'
+	printf 'PASS: rename-then-error retains and reports the exact held claim\n'
+}
+
+test_uninstall_claim_cleanup_failure_reports_nonempty_recovery()
+{
+	sandbox=$workdir/uninstall-claim-cleanup-failure
+	make_sandbox "$sandbox"
+	run_install "$sandbox" "$sandbox/validate-pass.sh"
+	autostart=$sandbox/etc/xdg/autostart/rockpi-rpi-touchscreen-touch-map.desktop
+	claim_prefix=$sandbox/etc/xdg/autostart/.rockpi-rpi-touchscreen.uninstall.autostart.
+	if RM_FAIL_PREFIX="$claim_prefix" run_uninstall "$sandbox" > "$sandbox/output" 2>&1; then
+		fail 'uninstall accepted a held-claim cleanup failure'
+	fi
+	claim=$(find "$sandbox/etc/xdg/autostart" -maxdepth 1 -type f \
+		-name '.rockpi-rpi-touchscreen.uninstall.autostart.*' -print -quit)
+	[ -n "$claim" ] || fail 'claim cleanup failure discarded the recoverable claim'
+	grep -Fq "touch autostart claim retained at $claim" "$sandbox/output" ||
+		fail 'claim cleanup failure reported an empty or wrong claim recovery path'
+	recovery=$(find "$sandbox/usr-src" -mindepth 1 -maxdepth 1 -type d \
+		-name '.rockpi-rpi-touchscreen.uninstall.*' -print -quit)
+	[ -n "$recovery" ] || fail 'claim cleanup failure discarded transaction recovery'
+	printf 'PASS: claim cleanup failure reports nonempty claim and transaction recovery\n'
+}
+
 test_uninstall_claim_preserves_mapper_for_raced_autostart()
 {
 	sandbox=$workdir/uninstall-runtime-autostart-claim-race
@@ -1255,7 +1408,7 @@ test_uninstall_autostart_claim_collision_retains_recovery()
 	config=$sandbox/boot/armbianEnv.txt
 	if MV_CORRUPT_FILE_AFTER_TARGET="$autostart" MV_CORRUPT_FILE_TRIGGER="$config" \
 		MV_CORRUPT_FILE_AFTER_ONCE_MARKER="$sandbox/autostart-corrupted" \
-		LN_CREATE_FILE_BEFORE_TARGET="$autostart" run_uninstall "$sandbox" > "$sandbox/output" 2>&1; then
+		MV_CREATE_FILE_BEFORE_TARGET="$autostart" run_uninstall "$sandbox" > "$sandbox/output" 2>&1; then
 		fail 'uninstall accepted a held autostart claim collision'
 	fi
 	claim=$(find "$sandbox/etc/xdg/autostart" -maxdepth 1 -type f \
@@ -1567,11 +1720,11 @@ test_runtime_asset_install_failure_restores_absent_baseline()
 	seed_old_release "$sandbox"
 	capture_migration_baseline "$sandbox"
 	autostart=$sandbox/etc/xdg/autostart/rockpi-rpi-touchscreen-touch-map.desktop
-	if MV_FAIL_TARGET="$autostart" MV_FAIL_ONCE_MARKER="$sandbox/runtime-mv-failed" \
+	if LN_FAIL_BEFORE_TARGET="$autostart" LN_FAIL_BEFORE_TARGET_MARKER="$sandbox/runtime-link-failed" \
 		run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
 		fail 'installer accepted runtime asset installation failure'
 	fi
-	[ -f "$sandbox/runtime-mv-failed" ] || fail 'runtime failure injection was not reached'
+	[ -f "$sandbox/runtime-link-failed" ] || fail 'runtime failure injection was not reached'
 	grep -Fq 'touch autostart installation failed' "$sandbox/output" ||
 		fail 'installer did not report the runtime asset installation failure'
 	assert_file_absent "$sandbox/usr-libexec/rockpi-rpi-touchscreen-map-touch"
@@ -1588,19 +1741,114 @@ test_second_runtime_asset_mutate_then_fail_restores_absent_baseline()
 	capture_migration_baseline "$sandbox"
 	mapper=$sandbox/usr-libexec/rockpi-rpi-touchscreen-map-touch
 	autostart=$sandbox/etc/xdg/autostart/rockpi-rpi-touchscreen-touch-map.desktop
-	if MV_FAIL_AFTER_TARGET="$autostart" \
-		MV_FAIL_AFTER_ONCE_MARKER="$sandbox/runtime-mv-failed-after" \
+	if LN_FAIL_AFTER_TARGET="$autostart" \
+		LN_FAIL_AFTER_TARGET_MARKER="$sandbox/runtime-link-failed-after" \
 		run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
-		fail 'installer accepted a second runtime asset move that mutated before failing'
+		fail 'installer accepted a second runtime publication that mutated before failing'
 	fi
-	[ -f "$sandbox/runtime-mv-failed-after" ] ||
-		fail 'second runtime asset mutate-then-fail injection was not reached'
-	grep -Fq 'touch autostart installation failed' "$sandbox/output" ||
-		fail 'installer did not report the second runtime asset installation failure'
-	assert_file_absent "$mapper"
+	[ -f "$sandbox/runtime-link-failed-after" ] ||
+		fail 'second runtime publication mutate-then-error injection was not reached'
+	cmp "$repo_root/assets/rockpi-rpi-touchscreen-touch-map.desktop" "$autostart" ||
+		fail 'ambiguous autostart publication discarded or changed the held object'
+	assert_equal "$(stat -c '%a' "$autostart")" '644' \
+		'ambiguous autostart publication changed the held mode'
+	cmp "$repo_root/scripts/map-touchscreen.sh" "$mapper" ||
+		fail 'ambiguous autostart publication stranded it without the mapper dependency'
+	grep -Fq "ambiguous touch autostart publication retained at $autostart" "$sandbox/output" ||
+		fail 'installer did not report the ambiguous autostart destination'
+	grep -Fq 'rollback also failed' "$sandbox/output" ||
+		fail 'ambiguous runtime publication did not retain recovery'
+	recovery=$(find "$sandbox/usr-src" -mindepth 1 -maxdepth 1 -type d \
+		-name '.rockpi-rpi-touchscreen.transaction.*' -print -quit)
+	[ -n "$recovery" ] || fail 'ambiguous runtime publication discarded transaction recovery'
+	printf 'PASS: mutate-then-error runtime publication retains exact objects and named recovery\n'
+}
+
+test_runtime_publication_collisions_preserve_exact_raced_objects()
+{
+	for asset in mapper autostart; do
+		sandbox=$workdir/runtime-publication-collision-$asset
+		make_sandbox "$sandbox"
+		mapper=$sandbox/usr-libexec/rockpi-rpi-touchscreen-map-touch
+		autostart=$sandbox/etc/xdg/autostart/rockpi-rpi-touchscreen-touch-map.desktop
+		case $asset in
+		mapper) destination=$mapper ;;
+		autostart) destination=$autostart ;;
+		esac
+		if LN_CREATE_FILE_BEFORE_TARGET="$destination" \
+			run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+			fail "installer accepted a raced $asset publication"
+		fi
+		grep -Fqx 'raced-runtime-asset' "$destination" ||
+			fail "installer overwrote raced $asset bytes"
+		assert_equal "$(stat -c '%a' "$destination")" '600' \
+			"installer changed raced $asset mode"
+		grep -Fq "runtime asset appeared during publication: $destination" "$sandbox/output" ||
+			fail "installer did not report raced $asset publication"
+		if [ "$asset" = autostart ]; then
+			cmp "$repo_root/scripts/map-touchscreen.sh" "$mapper" ||
+				fail 'raced autostart publication stranded it without mapper dependency'
+			grep -Fq "touch mapper retained because touch autostart remains: $mapper" \
+				"$sandbox/output" || fail 'raced autostart did not report retained mapper dependency'
+		fi
+	done
+	printf 'PASS: first and second publication collisions preserve exact raced objects\n'
+}
+
+test_runtime_publication_preserves_symlink_and_directory_collisions()
+{
+	for kind in symlink directory; do
+		sandbox=$workdir/runtime-publication-type-$kind
+		make_sandbox "$sandbox"
+		mapper=$sandbox/usr-libexec/rockpi-rpi-touchscreen-map-touch
+		case $kind in
+		symlink)
+			if LN_CREATE_SYMLINK_BEFORE_TARGET="$mapper" \
+				LN_CREATE_SYMLINK_VALUE=/tmp/local-mapper \
+				run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+				fail 'installer accepted a raced mapper symlink'
+			fi
+			[ -L "$mapper" ] || fail 'installer replaced raced mapper symlink type'
+			assert_equal "$(readlink "$mapper")" /tmp/local-mapper \
+				'installer changed raced mapper symlink target'
+			;;
+		directory)
+			if LN_CREATE_DIRECTORY_BEFORE_TARGET="$mapper" \
+				run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+				fail 'installer accepted a raced mapper directory'
+			fi
+			[ -d "$mapper" ] && [ ! -L "$mapper" ] ||
+				fail 'installer replaced raced mapper directory type'
+			;;
+		esac
+		grep -Fq "runtime asset appeared during publication: $mapper" "$sandbox/output" ||
+			fail "installer did not report raced mapper $kind"
+	done
+	printf 'PASS: runtime publication preserves raced symlink and directory types\n'
+}
+
+test_install_rollback_retains_post_publication_local_edit()
+{
+	sandbox=$workdir/runtime-post-publication-edit
+	make_sandbox "$sandbox"
+	mapper=$sandbox/usr-libexec/rockpi-rpi-touchscreen-map-touch
+	autostart=$sandbox/etc/xdg/autostart/rockpi-rpi-touchscreen-touch-map.desktop
+	config=$sandbox/boot/armbianEnv.txt
+	if MV_CORRUPT_FILE_AFTER_TARGET="$mapper" MV_CORRUPT_FILE_TRIGGER="$config" \
+		MV_FAIL_AFTER_TARGET="$config" MV_FAIL_AFTER_ONCE_MARKER="$sandbox/boot-failed-after" \
+		run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+		fail 'installer accepted a late failure after a local mapper edit'
+	fi
+	grep -Fqx 'corrupt-runtime-asset' "$mapper" ||
+		fail 'install rollback deleted or changed the post-publication mapper edit'
+	assert_equal "$(stat -c '%a' "$mapper")" '755' \
+		'install rollback changed post-publication mapper mode'
 	assert_file_absent "$autostart"
-	assert_clean_failed_migration_restored "$sandbox" "$sandbox/output"
-	printf 'PASS: second runtime asset mutate-then-fail restores absent baseline\n'
+	grep -Fq "RETAIN MODIFIED: $mapper" "$sandbox/output" ||
+		fail 'install rollback did not report the retained local mapper edit'
+	grep -Fq 'rollback also failed' "$sandbox/output" ||
+		fail 'retained local mapper edit did not keep transaction recovery'
+	printf 'PASS: install rollback retains and reports a post-publication local edit\n'
 }
 
 test_late_failure_removes_new_runtime_assets()
@@ -1626,13 +1874,14 @@ test_runtime_asset_checksum_failure_retains_recovery()
 	sandbox=$workdir/runtime-checksum-failure
 	make_sandbox "$sandbox"
 	mapper=$sandbox/usr-libexec/rockpi-rpi-touchscreen-map-touch
-	if MV_CORRUPT_AFTER_TARGET="$mapper" RM_FAIL_TARGET="$mapper" \
+	autostart=$sandbox/etc/xdg/autostart/rockpi-rpi-touchscreen-touch-map.desktop
+	if LN_CORRUPT_FILE_AFTER_TARGET="$mapper" LN_CORRUPT_FILE_TRIGGER="$autostart" \
 		run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
 		fail 'installer accepted a corrupted runtime asset'
 	fi
 	grep -Fq 'installed touch mapper checksum verification failed' "$sandbox/output" ||
 		fail 'installer did not report runtime checksum failure'
-	grep -Fq "touch mapper removal failed: $mapper" "$sandbox/output" ||
+	grep -Fq "touch mapper retained at $mapper" "$sandbox/output" ||
 		fail 'rollback did not report retained runtime asset'
 	grep -Fq 'rollback also failed' "$sandbox/output" ||
 		fail 'runtime rollback failure did not fail closed'
@@ -1653,21 +1902,26 @@ test_autostart_rollback_failure_retains_mapper_dependency_and_recovery()
 	autostart=$sandbox/etc/xdg/autostart/rockpi-rpi-touchscreen-touch-map.desktop
 	config=$sandbox/boot/armbianEnv.txt
 	if MV_FAIL_TARGET="$config" MV_FAIL_ONCE_MARKER="$sandbox/boot-mv-failed" \
-		RM_FAIL_TARGET="$autostart" \
+		RM_FAIL_PREFIX="$sandbox/etc/xdg/autostart/.rockpi-rpi-touchscreen.rollback.autostart." \
 		run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
 		fail 'installer accepted autostart rollback removal failure'
 	fi
 	[ -f "$sandbox/boot-mv-failed" ] || fail 'late rollback injection was not reached'
 	cmp "$repo_root/scripts/map-touchscreen.sh" "$mapper" ||
 		fail 'autostart removal failure did not retain its mapper dependency'
-	cmp "$repo_root/assets/rockpi-rpi-touchscreen-touch-map.desktop" "$autostart" ||
-		fail 'failed autostart removal did not retain the installed entry'
+	claim=$(find "$sandbox/etc/xdg/autostart" -maxdepth 1 -type f \
+		-name '.rockpi-rpi-touchscreen.rollback.autostart.*' -print -quit)
+	[ -n "$claim" ] || fail 'failed autostart removal did not retain a recoverable claim'
+	cmp "$repo_root/assets/rockpi-rpi-touchscreen-touch-map.desktop" "$claim" ||
+		fail 'failed autostart removal changed the held claim'
 	assert_equal "$(stat -c '%a' "$mapper")" '755' \
 		'autostart removal failure changed retained mapper mode'
-	assert_equal "$(stat -c '%a' "$autostart")" '644' \
-		'autostart removal failure changed retained autostart mode'
+	assert_equal "$(stat -c '%a' "$claim")" '644' \
+		'autostart removal failure changed retained claim mode'
 	grep -Fq "touch autostart removal failed: $autostart" "$sandbox/output" ||
 		fail 'rollback did not report the retained autostart'
+	grep -Fq "recovery retained at $claim" "$sandbox/output" ||
+		fail 'rollback did not name the recoverable autostart claim'
 	grep -Fq "touch mapper retained because touch autostart remains: $mapper" "$sandbox/output" ||
 		fail 'rollback did not report the retained mapper dependency'
 	grep -Fq 'rollback also failed' "$sandbox/output" ||
@@ -1685,8 +1939,9 @@ test_initial_runtime_verification_blocks_boot_mutation()
 	sandbox=$workdir/runtime-pre-boot-verification
 	make_sandbox "$sandbox"
 	mapper=$sandbox/usr-libexec/rockpi-rpi-touchscreen-map-touch
+	autostart=$sandbox/etc/xdg/autostart/rockpi-rpi-touchscreen-touch-map.desktop
 	config=$sandbox/boot/armbianEnv.txt
-	if MV_CORRUPT_AFTER_TARGET="$mapper" \
+	if LN_CORRUPT_FILE_AFTER_TARGET="$mapper" LN_CORRUPT_FILE_TRIGGER="$autostart" \
 		run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
 		fail 'installer accepted mapper corruption before boot mutation'
 	fi
@@ -2884,6 +3139,10 @@ test_uninstall_late_failure_restores_removed_runtime_assets
 test_uninstall_runtime_restore_failure_retains_recovery
 test_uninstall_dry_run_retains_modified_runtime_assets
 test_uninstall_claim_revalidates_modified_runtime_asset
+test_uninstall_pre_snapshot_byte_edit_is_retained
+test_uninstall_pre_snapshot_type_replacements_are_retained
+test_uninstall_rename_then_error_retains_named_claim
+test_uninstall_claim_cleanup_failure_reports_nonempty_recovery
 test_uninstall_claim_preserves_mapper_for_raced_autostart
 test_uninstall_autostart_claim_collision_retains_recovery
 test_uninstall_mapper_claim_linearizes_autostart_dependency
@@ -2903,6 +3162,9 @@ test_preexisting_unrelated_runtime_asset_blocks_before_mutation
 test_preexisting_wrong_runtime_mode_blocks_before_mutation
 test_runtime_asset_install_failure_restores_absent_baseline
 test_second_runtime_asset_mutate_then_fail_restores_absent_baseline
+test_runtime_publication_collisions_preserve_exact_raced_objects
+test_runtime_publication_preserves_symlink_and_directory_collisions
+test_install_rollback_retains_post_publication_local_edit
 test_late_failure_removes_new_runtime_assets
 test_runtime_asset_checksum_failure_retains_recovery
 test_autostart_rollback_failure_retains_mapper_dependency_and_recovery
