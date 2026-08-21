@@ -844,21 +844,42 @@ elif [ "$old_source_owned" -eq 1 ]; then
 	[ ! -e "$old_source" ] || die "old DKMS source remained after retirement: $old_source"
 fi
 completed=1
+committed_cleanup_failed=0
+committed_cleanup_note=
 if [ "$overlay_replaced" -eq 1 ]; then
-	rm -f "$previous_overlay_file"
-	previous_overlay_file=
-	overlay_backup_created=0
-	overlay_replaced=0
+	if rm -f "$previous_overlay_file"; then
+		previous_overlay_file=
+		overlay_backup_created=0
+		overlay_replaced=0
+	else
+		committed_cleanup_failed=1
+		committed_cleanup_note="$committed_cleanup_note prior overlay recovery retained at $previous_overlay_file;"
+	fi
 fi
-rm -rf "$recovery_directory"
-recovery_directory=
+if rm -rf "$recovery_directory"; then
+	recovery_directory=
+else
+	committed_cleanup_failed=1
+	committed_cleanup_note="$committed_cleanup_note transaction recovery retained at $recovery_directory;"
+fi
+committed_attestation_failed=0
 if ! attest_protected_xorg_unchanged; then
-	trap - EXIT HUP INT TERM
+	committed_attestation_failed=1
+fi
+trap - EXIT HUP INT TERM
+if [ "$committed_cleanup_failed" -eq 1 ]; then
+	if [ "$committed_attestation_failed" -eq 1 ]; then
+		committed_cleanup_note="$committed_cleanup_note protected Xorg attestation failed: $protected_xorg_error;"
+	fi
+	printf 'ERROR: installation committed, but cleanup failed:%s\n' \
+		"$committed_cleanup_note" >&2
+	exit 1
+fi
+if [ "$committed_attestation_failed" -eq 1 ]; then
 	printf 'ERROR: installation committed, but protected Xorg attestation failed: %s\n' \
 		"$protected_xorg_error" >&2
 	exit 1
 fi
-trap - EXIT HUP INT TERM
 
 printf 'PASS: installed %s/%s and verified all three modules, source, backup, boot token, and DTBO checksums\n' \
 	"$PROJECT_NAME" "$PROJECT_VERSION"

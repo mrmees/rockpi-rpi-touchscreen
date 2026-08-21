@@ -658,6 +658,12 @@ case ${RM_FAIL_PREFIX:-} in
    "${RM_FAIL_PREFIX}"*) exit 30 ;;
    esac ;;
 esac
+case ${RM_FAIL_PREFIX_SECOND:-} in
+'') ;;
+*) case $last in
+   "${RM_FAIL_PREFIX_SECOND}"*) exit 30 ;;
+   esac ;;
+esac
 exec /bin/rm "$@"
 EOF
 	chmod +x "$sandbox/bin/rm"
@@ -1712,6 +1718,87 @@ test_uninstall_recovery_cleanup_failure_is_reported()
 	assert_file_absent "$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5"
 	assert_file_absent "$sandbox/boot/overlay-user/rockpi-4b-plus-rpi-touchscreen.dtbo"
 	printf 'PASS: committed uninstall reports failed recovery cleanup\n'
+}
+
+assert_install_remains_committed_after_cleanup_failure()
+{
+	sandbox=$1
+	assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.5)" \
+		'rockpi-rpi-touchscreen/0.2.5, 6.18.43-current-rockchip64, aarch64: installed' \
+		'committed cleanup failure changed the installed DKMS lifecycle'
+	[ -d "$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5" ] ||
+		fail 'committed cleanup failure removed installed source'
+	assert_runtime_assets_match_source "$sandbox"
+	[ "$(awk '
+		/^[[:space:]]*user_overlays[[:space:]]*=/ {
+			for (field = 1; field <= NF; field++)
+				if ($field == "rockpi-4b-plus-rpi-touchscreen") count++
+		}
+		END { print count + 0 }
+	' "$sandbox/boot/armbianEnv.txt")" -eq 1 ] ||
+		fail 'committed cleanup failure rolled back the boot overlay token'
+	cmp "$sandbox/build/rockpi-4b-plus-rpi-touchscreen.dtbo" \
+		"$sandbox/boot/overlay-user/rockpi-4b-plus-rpi-touchscreen.dtbo" ||
+		fail 'committed cleanup failure rolled back the installed overlay'
+}
+
+test_install_prior_overlay_cleanup_failure_reports_commit_and_continues()
+{
+	sandbox=$workdir/install-prior-overlay-cleanup-failure
+	make_sandbox "$sandbox"
+	destination=$sandbox/boot/overlay-user/rockpi-4b-plus-rpi-touchscreen.dtbo
+	printf '%s\n' prior-overlay-recovery > "$destination"
+	prior_prefix=$sandbox/boot/.rockpi-rpi-touchscreen.overlay-backup.
+	if RM_FAIL_PREFIX="$prior_prefix" \
+		run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+		fail 'installer accepted failed prior-overlay cleanup after commit'
+	fi
+	grep -Fq 'installation committed, but cleanup failed:' "$sandbox/output" ||
+		fail 'prior-overlay cleanup failure did not report committed installation'
+	prior_recovery=$(find "$sandbox/boot" -maxdepth 1 -type f \
+		-name '.rockpi-rpi-touchscreen.overlay-backup.*' -print -quit)
+	[ -n "$prior_recovery" ] || fail 'prior-overlay cleanup failure discarded recovery'
+	grep -Fq "prior overlay recovery retained at $prior_recovery" "$sandbox/output" ||
+		fail 'prior-overlay cleanup failure did not name retained recovery'
+	grep -Fxq prior-overlay-recovery "$prior_recovery" ||
+		fail 'retained prior-overlay recovery bytes changed'
+	[ -z "$(find "$sandbox/usr-src" -mindepth 1 -maxdepth 1 -type d \
+		-name '.rockpi-rpi-touchscreen.transaction.*' -print -quit)" ] ||
+		fail 'prior-overlay cleanup failure prevented transaction recovery cleanup'
+	! grep -Fq 'rollback also failed' "$sandbox/output" ||
+		fail 'prior-overlay cleanup failure attempted rollback after commit'
+	assert_install_remains_committed_after_cleanup_failure "$sandbox"
+	printf 'PASS: prior-overlay cleanup failure reports commit and continues cleanup\n'
+}
+
+test_install_reports_every_committed_cleanup_failure()
+{
+	sandbox=$workdir/install-all-committed-cleanup-failures
+	make_sandbox "$sandbox"
+	destination=$sandbox/boot/overlay-user/rockpi-4b-plus-rpi-touchscreen.dtbo
+	printf '%s\n' prior-overlay-recovery > "$destination"
+	prior_prefix=$sandbox/boot/.rockpi-rpi-touchscreen.overlay-backup.
+	transaction_prefix=$sandbox/usr-src/.rockpi-rpi-touchscreen.transaction.
+	if RM_FAIL_PREFIX="$prior_prefix" RM_FAIL_PREFIX_SECOND="$transaction_prefix" \
+		run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+		fail 'installer accepted both committed cleanup failures'
+	fi
+	grep -Fq 'installation committed, but cleanup failed:' "$sandbox/output" ||
+		fail 'combined cleanup failure did not report committed installation'
+	prior_recovery=$(find "$sandbox/boot" -maxdepth 1 -type f \
+		-name '.rockpi-rpi-touchscreen.overlay-backup.*' -print -quit)
+	transaction_recovery=$(find "$sandbox/usr-src" -mindepth 1 -maxdepth 1 -type d \
+		-name '.rockpi-rpi-touchscreen.transaction.*' -print -quit)
+	[ -n "$prior_recovery" ] || fail 'combined cleanup failure discarded prior-overlay recovery'
+	[ -n "$transaction_recovery" ] || fail 'combined cleanup failure discarded transaction recovery'
+	grep -Fq "prior overlay recovery retained at $prior_recovery" "$sandbox/output" ||
+		fail 'combined cleanup failure omitted prior-overlay recovery path'
+	grep -Fq "transaction recovery retained at $transaction_recovery" "$sandbox/output" ||
+		fail 'combined cleanup failure omitted transaction recovery path'
+	! grep -Fq 'rollback also failed' "$sandbox/output" ||
+		fail 'combined cleanup failure attempted rollback after commit'
+	assert_install_remains_committed_after_cleanup_failure "$sandbox"
+	printf 'PASS: installer reports every retained recovery after committed cleanup failures\n'
 }
 
 test_failed_validation_does_not_mutate_boot_configuration()
@@ -3331,6 +3418,8 @@ test_uninstall_mapper_claim_linearizes_autostart_dependency
 test_uninstall_claim_retains_raced_symlink_mapper
 test_uninstall_runtime_restore_publication_never_overwrites_race
 test_uninstall_recovery_cleanup_failure_is_reported
+test_install_prior_overlay_cleanup_failure_reports_commit_and_continues
+test_install_reports_every_committed_cleanup_failure
 test_failed_validation_does_not_mutate_boot_configuration
 test_installer_requires_the_panel_specific_alias
 test_installer_requires_the_provider_specific_alias
