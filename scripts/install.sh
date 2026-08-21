@@ -102,7 +102,7 @@ overlay_destination=$OVERLAY_DIRECTORY/$OVERLAY_NAME.dtbo
 [ -f "$overlay_output" ] || die "validated overlay not found: $overlay_output"
 [ -f "$ARMBIAN_ENV" ] || die "boot configuration not found: $ARMBIAN_ENV"
 
-old_version=0.2.4
+old_version=0.2.5
 old_source=${DKMS_TREE:-/usr/src}/${PROJECT_NAME}-${old_version}
 if ! old_status=$(dkms status -m "$PROJECT_NAME" -v "$old_version" 2>&1); then
 	printf 'ERROR: cannot verify old DKMS state; retained %s/%s registration and source %s: %s\n' \
@@ -172,8 +172,10 @@ source_created=0
 overlay_created=0
 mapper_created=0
 autostart_created=0
+lightdm_created=0
 mapper_identity=
 autostart_identity=
+lightdm_identity=
 runtime_publication_ambiguous=0
 runtime_publication_note=
 overlay_backup_created=0
@@ -358,6 +360,19 @@ rollback()
 		if [ "$overlay_created" -eq 1 ] && ! rm -f "$overlay_destination"; then
 			rollback_failed=1
 			rollback_note="$rollback_note overlay removal failed: $overlay_destination;"
+		fi
+		if [ "$lightdm_created" -eq 1 ]; then
+			if claim_created_runtime_asset lightdm "$LIGHTDM_GREETER_POLICY_DESTINATION" \
+				"$PROJECT_SOURCE_DIR/assets/90-rockpi-greeter-no-blank.conf" \
+				644 "$lightdm_identity"; then
+				if [ "$created_claim_state" = modified ]; then
+					rollback_failed=1
+					rollback_note="$rollback_note LightDM greeter policy retained at $created_claim_recovery;"
+				fi
+			else
+				rollback_failed=1
+				rollback_note="$rollback_note LightDM greeter policy removal failed: $LIGHTDM_GREETER_POLICY_DESTINATION; recovery retained at $created_claim_recovery;"
+			fi
 		fi
 		autostart_remains=0
 		if [ "$autostart_created" -eq 1 ]; then
@@ -622,6 +637,8 @@ install -m 0755 "$repo_root/scripts/dkms-make.sh" "$stage_directory/scripts/"
 install -m 0755 "$repo_root/scripts/map-touchscreen.sh" "$stage_directory/scripts/"
 install -m 0644 "$repo_root/assets/rockpi-rpi-touchscreen-touch-map.desktop" \
 	"$stage_directory/assets/"
+install -m 0644 "$repo_root/assets/90-rockpi-greeter-no-blank.conf" \
+	"$stage_directory/assets/"
 source_digest()
 {
 	(
@@ -631,6 +648,7 @@ source_digest()
 			src/display_compat_core.h src/display_compat_core.c src/display_compat_main.c \
 			scripts/dkms-make.sh scripts/map-touchscreen.sh \
 			assets/rockpi-rpi-touchscreen-touch-map.desktop \
+			assets/90-rockpi-greeter-no-blank.conf \
 			LICENSE LICENSES/GPL-2.0-only.txt LICENSES/UPSTREAM.md | sha256sum | awk '{print $1}'
 	)
 }
@@ -655,6 +673,8 @@ preflight_runtime_asset "$stage_directory/scripts/map-touchscreen.sh" \
 	"$TOUCH_MAPPER_DESTINATION" 755
 preflight_runtime_asset "$stage_directory/assets/rockpi-rpi-touchscreen-touch-map.desktop" \
 	"$TOUCH_AUTOSTART_DESTINATION" 644
+preflight_runtime_asset "$stage_directory/assets/90-rockpi-greeter-no-blank.conf" \
+	"$LIGHTDM_GREETER_POLICY_DESTINATION" 644
 
 publish_runtime_asset()
 {
@@ -796,6 +816,13 @@ if [ ! -e "$TOUCH_AUTOSTART_DESTINATION" ] && [ ! -L "$TOUCH_AUTOSTART_DESTINATI
 	autostart_identity=$published_identity
 	autostart_created=1
 fi
+if [ ! -e "$LIGHTDM_GREETER_POLICY_DESTINATION" ] && [ ! -L "$LIGHTDM_GREETER_POLICY_DESTINATION" ]; then
+	publish_runtime_asset lightdm \
+		"$PROJECT_SOURCE_DIR/assets/90-rockpi-greeter-no-blank.conf" \
+		"$LIGHTDM_GREETER_POLICY_DESTINATION" 644
+	lightdm_identity=$published_identity
+	lightdm_created=1
+fi
 cmp -s "$PROJECT_SOURCE_DIR/scripts/map-touchscreen.sh" "$TOUCH_MAPPER_DESTINATION" ||
 	die 'installed touch mapper checksum verification failed'
 [ "$(stat -c '%a' "$TOUCH_MAPPER_DESTINATION")" = 755 ] ||
@@ -805,6 +832,11 @@ cmp -s "$PROJECT_SOURCE_DIR/assets/rockpi-rpi-touchscreen-touch-map.desktop" \
 	die 'installed touch autostart checksum verification failed'
 [ "$(stat -c '%a' "$TOUCH_AUTOSTART_DESTINATION")" = 644 ] ||
 	die 'installed touch autostart mode verification failed'
+cmp -s "$PROJECT_SOURCE_DIR/assets/90-rockpi-greeter-no-blank.conf" \
+	"$LIGHTDM_GREETER_POLICY_DESTINATION" ||
+	die 'installed LightDM greeter policy checksum verification failed'
+[ "$(stat -c '%a' "$LIGHTDM_GREETER_POLICY_DESTINATION")" = 644 ] ||
+	die 'installed LightDM greeter policy mode verification failed'
 
 if [ ! -e "$backup_file" ]; then
 	cp "$ARMBIAN_ENV" "$backup_file"
@@ -836,6 +868,11 @@ cmp -s "$PROJECT_SOURCE_DIR/assets/rockpi-rpi-touchscreen-touch-map.desktop" \
 	die 'final installed touch autostart checksum verification failed'
 [ "$(stat -c '%a' "$TOUCH_AUTOSTART_DESTINATION")" = 644 ] ||
 	die 'final installed touch autostart mode verification failed'
+cmp -s "$PROJECT_SOURCE_DIR/assets/90-rockpi-greeter-no-blank.conf" \
+	"$LIGHTDM_GREETER_POLICY_DESTINATION" ||
+	die 'final installed LightDM greeter policy checksum verification failed'
+[ "$(stat -c '%a' "$LIGHTDM_GREETER_POLICY_DESTINATION")" = 644 ] ||
+	die 'final installed LightDM greeter policy mode verification failed'
 if [ "$old_registered" -eq 1 ]; then
 	old_retirement_attempted=1
 	dkms remove -m "$PROJECT_NAME" -v "$old_version" --all ||

@@ -1,7 +1,7 @@
 #!/bin/sh
 
 PROJECT_NAME=rockpi-rpi-touchscreen
-PROJECT_VERSION=0.2.5
+PROJECT_VERSION=0.2.6
 SUPPORTED_KERNEL_RELEASE=6.18.43-current-rockchip64
 PROJECT_SOURCE_DIR=${DKMS_TREE:-/usr/src}/${PROJECT_NAME}-${PROJECT_VERSION}
 MODULE_NAMES='rockpi_rk3399_display_compat panel_rockpi_rpi_touchscreen raspits_ft5426'
@@ -17,8 +17,10 @@ ARCH=${ARCH:-$(uname -m)}
 KERNEL_BUILD=${MODULES_DIR:-/lib/modules}/$KERNEL_RELEASE/build
 LIBEXEC_DIRECTORY=${LIBEXEC_DIR:-/usr/libexec}
 XDG_AUTOSTART_DIRECTORY=${XDG_AUTOSTART_DIR:-/etc/xdg/autostart}
+LIGHTDM_CONFIG_DIRECTORY=${LIGHTDM_CONFIG_DIR:-/etc/lightdm/lightdm.conf.d}
 TOUCH_MAPPER_DESTINATION=$LIBEXEC_DIRECTORY/rockpi-rpi-touchscreen-map-touch
 TOUCH_AUTOSTART_DESTINATION=$XDG_AUTOSTART_DIRECTORY/rockpi-rpi-touchscreen-touch-map.desktop
+LIGHTDM_GREETER_POLICY_DESTINATION=$LIGHTDM_CONFIG_DIRECTORY/90-rockpi-greeter-no-blank.conf
 PROTECTED_XORG_CONFIGURATION=${PROTECTED_XORG_PATH:-/etc/X11/xorg.conf.d/20-dfrobot-display.conf}
 protected_xorg_attestation_started=0
 protected_xorg_baseline_identity=
@@ -175,6 +177,30 @@ f|644|cfe5235869a8a9df094456e87cd7c19fc538335c832698cfb9b368b0eb7e54d2|src/panel
 f|644|711bbef47e24f82119d8650def28da25ed28e35079cd658f1f0af5c16d892bd4|src/raspits_ft5426.c
 EOF
 		;;
+	0.2.6)
+		cat <<'EOF'
+d|755||LICENSES
+d|755||assets
+d|755||scripts
+d|755||src
+f|644|edaef632cbb643e4e7a221717a6c441a4c1a7c918e6e4d56debc3d8739b233f6|LICENSE
+f|644|edaef632cbb643e4e7a221717a6c441a4c1a7c918e6e4d56debc3d8739b233f6|LICENSES/GPL-2.0-only.txt
+f|644|4aa0e8346d39b950e458d0297d0b945c8c4a1ba5cf446030e872b2e34594bb5a|LICENSES/UPSTREAM.md
+f|644|109f548f08c67f11415ac9d5e4a9217c95b1138e9153c41b6400653ba1ef9d55|Makefile
+f|644|c7e41b398c46cb24e4d7d3d9f7538c31953bf3b77529e28aa9ce78fa4f2a3735|assets/90-rockpi-greeter-no-blank.conf
+f|644|19b30895e66f09757df8975a6975b6d02c630a508f5e2cbd8531c7cce5a65dd1|assets/rockpi-rpi-touchscreen-touch-map.desktop
+f|644|5d2ef0f417fc165d1e2b394325dbcf2b9f1a3ae6ebaa12f35bbab0deea40e5c7|dkms.conf
+f|755|b36d8eb9f8f2c6406125a1713b51ec0291cbc6cb3ee186835f785e1cd7819fc8|scripts/dkms-make.sh
+f|755|b2f332b54ad003da2e1f783fffb3a8edcb8640df75a77b3c16e54b8ccbdfa904|scripts/map-touchscreen.sh
+f|644|c804e9c522f2c4a2fe0022233c08dffbb2a9a0e29c950e9673bb299ff9ee8f7d|src/display_compat.h
+f|644|61c22988bd66fd6b383246f6eace27f082a07a5f2eb8a2f77dd40b1a9ff48db1|src/display_compat_core.c
+f|644|b45f838a08c0442b739dd0494e058f10cd9a9f81d7962658cffd1a9345e944c3|src/display_compat_core.h
+f|644|36c04fece0717b5ddc5e5a5d942a94b04e612a4dee4c825c498f9d8db4b8270d|src/display_compat_main.c
+f|644|14f5b7bbed7f0be412d7a4a1c9c7f459b66266fe60dcfdf37ee2025598969dd1|src/ft5426_protocol.h
+f|644|cfe5235869a8a9df094456e87cd7c19fc538335c832698cfb9b368b0eb7e54d2|src/panel_rockpi_rpi_touchscreen.c
+f|644|711bbef47e24f82119d8650def28da25ed28e35079cd658f1f0af5c16d892bd4|src/raspits_ft5426.c
+EOF
+		;;
 	*) return 1 ;;
 	esac
 }
@@ -282,6 +308,7 @@ try_retire_owned_source_tree()
 	case $retire_version in
 	0.2.4) retire_directories='LICENSES scripts src' ;;
 	0.2.5) retire_directories='LICENSES assets scripts src' ;;
+	0.2.6) retire_directories='LICENSES assets scripts src' ;;
 	*) source_retirement_result=error; return 1 ;;
 	esac
 	for retire_directory in $retire_directories; do

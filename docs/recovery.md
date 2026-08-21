@@ -8,7 +8,7 @@ boot checks documented in the
 available, use the offline project-token removal below.
 
 These procedures are scoped recovery operations; they do not authorize an
-automatic reboot, shutdown, display-layout change, or Xorg edit. DKMS 0.2.5
+automatic reboot, shutdown, display-layout change, or Xorg edit. DKMS 0.2.6
 hardware acceptance remains pending until the separately authorized reboot,
 HDMI hot-plug and layout, physical touch, persistent-log, and later
 shutdown/cold-start checks pass.
@@ -29,7 +29,7 @@ Preview the change first:
 sudo sh scripts/uninstall.sh --dry-run
 ```
 
-Then run the exact scoped SSH rollback. It removes the project DTBO, DKMS 0.2.5
+Then run the exact scoped SSH rollback. It removes the project DTBO, DKMS 0.2.6
 source and exact three modules, owned runtime assets, and `user_overlays` token:
 
 Exact scoped SSH rollback command: `sudo sh scripts/uninstall.sh`.
@@ -40,7 +40,7 @@ sudo sh scripts/uninstall.sh
 
 Rollback removes only project-owned assets: the overlay token, DTBO, DKMS package, and matching runtime files. It does not remove unrelated overlays or
 alter the HDMI Xorg configuration. The
-single `rockpi-rpi-touchscreen/0.2.5` package owns
+single `rockpi-rpi-touchscreen/0.2.6` package owns
 `rockpi_rk3399_display_compat`, `panel_rockpi_rpi_touchscreen`, and
 `raspits_ft5426`. Uninstalling it does not edit
 `/etc/X11/xorg.conf.d/20-dfrobot-display.conf`.
@@ -50,9 +50,11 @@ single `rockpi-rpi-touchscreen/0.2.5` package owns
 The package also owns the matching mode-0755 mapper at
 `/usr/libexec/rockpi-rpi-touchscreen-map-touch` and matching mode-0644 XDG
 entry at
-`/etc/xdg/autostart/rockpi-rpi-touchscreen-touch-map.desktop`. Ownership
+`/etc/xdg/autostart/rockpi-rpi-touchscreen-touch-map.desktop`, plus the
+matching mode-0644 LightDM greeter policy at
+`/etc/lightdm/lightdm.conf.d/90-rockpi-greeter-no-blank.conf`. Ownership
 requires the installed bytes, regular-file type, and mode to match the immutable
-0.2.5 source. The uninstaller removes an owned match, ignores an absent path,
+0.2.6 source. The uninstaller removes an owned match, ignores an absent path,
 and retains any changed bytes, mode, type, or symlink without overwriting it.
 
 Dry-run output is predictive and makes no changes. An owned path is printed as
@@ -61,6 +63,7 @@ Dry-run output is predictive and makes no changes. An owned path is printed as
 ```text
 RETAIN MODIFIED: /usr/libexec/rockpi-rpi-touchscreen-map-touch
 RETAIN MODIFIED: /etc/xdg/autostart/rockpi-rpi-touchscreen-touch-map.desktop
+RETAIN MODIFIED: /etc/lightdm/lightdm.conf.d/90-rockpi-greeter-no-blank.conf
 ```
 
 Dry-run applies the same autostart-to-mapper dependency decision as real uninstall.
@@ -68,9 +71,9 @@ If the autostart entry is modified while the mapper is owned, dry-run reports
 `RETAIN MODIFIED` for the autostart entry and `RETAIN DEPENDENCY` for the
 mapper instead of predicting mapper removal.
 
-Matching runtime assets are snapshotted in mapper-then-autostart order before any removal claim.
-During a real uninstall, removal claims occur in dependency order: autostart
-first, then mapper. A modified or newly appeared autostart is retained, and its
+Matching runtime assets are snapshotted in mapper-then-autostart-then-LightDM order before any removal claim.
+During a real uninstall, the independent LightDM policy is claimed first,
+followed by dependency order for autostart and mapper. A modified or newly appeared autostart is retained, and its
 matching mapper is retained with
 `RETAIN DEPENDENCY` so the entry is not stranded without its executable. A
 modified mapper may be retained while an otherwise owned autostart is removed.
@@ -86,25 +89,25 @@ the configuration with a timestamp and `.sha256` checksum.
 ## Multiple DKMS kernel tuples
 
 The transactional online uninstaller supports either no registered
-`rockpi-rpi-touchscreen/0.2.5` package or exactly one `added`, `built`, or
+`rockpi-rpi-touchscreen/0.2.6` package or exactly one `added`, `built`, or
 `installed` lifecycle tuple for the running kernel and architecture. If this
 command lists more than one line, or a tuple for another kernel or
 architecture, the uninstaller stops before changing the boot configuration,
 DTBO, source, or modules:
 
 ```sh
-dkms status -m rockpi-rpi-touchscreen -v 0.2.5
+dkms status -m rockpi-rpi-touchscreen -v 0.2.6
 ```
 
 To complete an intentional uninstall, remove each non-running-kernel tuple
 explicitly, substituting the `KERNEL` and `ARCH` printed by `dkms status`:
 
 ```sh
-sudo dkms remove -m rockpi-rpi-touchscreen -v 0.2.5 -k KERNEL -a ARCH
+sudo dkms remove -m rockpi-rpi-touchscreen -v 0.2.6 -k KERNEL -a ARCH
 ```
 
 Stop if any removal fails and retain
-`/usr/src/rockpi-rpi-touchscreen-0.2.5`; use `dkms status` to reconcile that
+`/usr/src/rockpi-rpi-touchscreen-0.2.6`; use `dkms status` to reconcile that
 tuple before continuing. Once status shows only the running kernel's exact
 tuple, rerun `sudo sh scripts/uninstall.sh`. If display recovery is urgent,
 remove only the overlay token with the offline procedure instead and leave all

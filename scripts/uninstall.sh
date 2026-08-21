@@ -63,6 +63,7 @@ trap attest_pretransaction_exit EXIT HUP INT TERM
 overlay_destination=$OVERLAY_DIRECTORY/$OVERLAY_NAME.dtbo
 touch_mapper_source=$PROJECT_SOURCE_DIR/scripts/map-touchscreen.sh
 touch_autostart_source=$PROJECT_SOURCE_DIR/assets/rockpi-rpi-touchscreen-touch-map.desktop
+lightdm_greeter_policy_source=$PROJECT_SOURCE_DIR/assets/90-rockpi-greeter-no-blank.conf
 
 runtime_asset_state()
 {
@@ -93,6 +94,8 @@ runtime_asset_matches()
 if [ "$dry_run" -eq 1 ]; then
 	mapper_state=$(runtime_asset_state "$touch_mapper_source" "$TOUCH_MAPPER_DESTINATION" 755)
 	autostart_state=$(runtime_asset_state "$touch_autostart_source" "$TOUCH_AUTOSTART_DESTINATION" 644)
+	lightdm_state=$(runtime_asset_state "$lightdm_greeter_policy_source" \
+		"$LIGHTDM_GREETER_POLICY_DESTINATION" 644)
 	temporary_config=$(mktemp "${ARMBIAN_ENV}.XXXXXX") || die 'cannot create dry-run temporary configuration'
 	dry_run_exit()
 	{
@@ -125,6 +128,10 @@ if [ "$dry_run" -eq 1 ]; then
 		;;
 	modified) printf 'RETAIN MODIFIED: %s\n' "$TOUCH_MAPPER_DESTINATION" ;;
 	esac
+	case $lightdm_state in
+	owned) printf 'REMOVE: %s\n' "$LIGHTDM_GREETER_POLICY_DESTINATION" ;;
+	modified) printf 'RETAIN MODIFIED: %s\n' "$LIGHTDM_GREETER_POLICY_DESTINATION" ;;
+	esac
 	printf 'CONFIG: %s\n' "$ARMBIAN_ENV"
 	for module_name in $MODULE_NAMES; do
 		printf 'MODULE: %s\n' "$module_name"
@@ -151,11 +158,16 @@ fi
 
 mapper_state=$(runtime_asset_state "$touch_mapper_source" "$TOUCH_MAPPER_DESTINATION" 755)
 autostart_state=$(runtime_asset_state "$touch_autostart_source" "$TOUCH_AUTOSTART_DESTINATION" 644)
+lightdm_state=$(runtime_asset_state "$lightdm_greeter_policy_source" \
+	"$LIGHTDM_GREETER_POLICY_DESTINATION" 644)
 if [ "$mapper_state" = modified ]; then
 	printf 'RETAIN MODIFIED: %s\n' "$TOUCH_MAPPER_DESTINATION"
 fi
 if [ "$autostart_state" = modified ]; then
 	printf 'RETAIN MODIFIED: %s\n' "$TOUCH_AUTOSTART_DESTINATION"
+fi
+if [ "$lightdm_state" = modified ]; then
+	printf 'RETAIN MODIFIED: %s\n' "$LIGHTDM_GREETER_POLICY_DESTINATION"
 fi
 
 dkms_status=$(dkms status -m "$PROJECT_NAME" -v "$PROJECT_VERSION") ||
@@ -185,10 +197,13 @@ dependency_index_restore_failed=0
 dkms_state_restore_failed=0
 mapper_remove_attempted=0
 autostart_remove_attempted=0
+lightdm_remove_attempted=0
 mapper_claim_held=0
 mapper_claim_recovery=
 autostart_claim_held=0
 autostart_claim_recovery=
+lightdm_claim_held=0
+lightdm_claim_recovery=
 mapper_dependency_restore_failed=0
 source_retirement_failed=0
 source_retirement_recovery=
@@ -273,6 +288,11 @@ snapshot_runtime_assets()
 		snapshot_runtime_asset autostart "$touch_autostart_source" \
 			"$TOUCH_AUTOSTART_DESTINATION" 644
 		autostart_state=$runtime_snapshot_state
+	fi
+	if [ "$lightdm_state" = owned ]; then
+		snapshot_runtime_asset lightdm "$lightdm_greeter_policy_source" \
+			"$LIGHTDM_GREETER_POLICY_DESTINATION" 644
+		lightdm_state=$runtime_snapshot_state
 	fi
 	: > "$transaction_directory/runtime.snapshot-complete"
 }
@@ -395,6 +415,16 @@ restore_runtime_assets()
 	if [ "$autostart_claim_held" -eq 1 ]; then
 		runtime_restore_failed=1
 		rollback_note="$rollback_note touch autostart claim retained at $autostart_claim_recovery;"
+	fi
+	if [ "$lightdm_remove_attempted" -eq 1 ] &&
+		! restore_runtime_asset "$transaction_directory/runtime/lightdm" \
+			"$LIGHTDM_GREETER_POLICY_DESTINATION"; then
+		runtime_restore_failed=1
+		rollback_note="$rollback_note LightDM greeter policy restoration failed: $LIGHTDM_GREETER_POLICY_DESTINATION;"
+	fi
+	if [ "$lightdm_claim_held" -eq 1 ]; then
+		runtime_restore_failed=1
+		rollback_note="$rollback_note LightDM greeter policy claim retained at $lightdm_claim_recovery;"
 	fi
 	[ "$runtime_restore_failed" -eq 0 ]
 }
@@ -618,6 +648,24 @@ fi
 
 remove_overlay_token "$ARMBIAN_ENV" "$OVERLAY_TOKEN"
 rm -f "$overlay_destination"
+if [ "$lightdm_state" = owned ]; then
+	if ! claim_runtime_asset lightdm "$LIGHTDM_GREETER_POLICY_DESTINATION" \
+		"$lightdm_greeter_policy_source" 644; then
+		lightdm_claim_held=1
+		lightdm_claim_recovery=$runtime_claim_recovery
+		rollback_note="$rollback_note LightDM greeter policy claim retained at $lightdm_claim_recovery;"
+		exit 1
+	fi
+	case $runtime_claim_state in
+	removed)
+		lightdm_remove_attempted=1
+		lightdm_state=absent
+		;;
+	absent) lightdm_state=absent ;;
+	modified) lightdm_state=modified ;;
+	*) die "unknown LightDM greeter policy claim state: $runtime_claim_state" ;;
+	esac
+fi
 if [ "$autostart_state" = owned ]; then
 	if ! claim_runtime_asset autostart "$TOUCH_AUTOSTART_DESTINATION" \
 		"$touch_autostart_source" 644; then

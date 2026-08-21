@@ -26,7 +26,7 @@ is fully seated and aligned.
 
 The device-tree overlay supplies the panel controller at I2C address `0x45`
 and the touch controller at `0x38`; no separate touch interrupt wire is used.
-Install DKMS `0.2.5` before the separately authorized production boot: it supplies exactly three modules in provider, panel, then touch order:
+Install DKMS `0.2.6` before the separately authorized production boot: it supplies exactly three modules in provider, panel, then touch order:
 `rockpi_rk3399_display_compat`, `panel_rockpi_rpi_touchscreen`, and
 `raspits_ft5426`. The overlay keeps DSI0 disabled as a DRM output while the
 compatibility provider uses it only as the DSI1 PLL supplier. Its reciprocal

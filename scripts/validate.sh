@@ -262,6 +262,7 @@ require_distinct()
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 touch_mapper=$repo_root/scripts/map-touchscreen.sh
 touch_autostart=$repo_root/assets/rockpi-rpi-touchscreen-touch-map.desktop
+lightdm_greeter_policy=$repo_root/assets/90-rockpi-greeter-no-blank.conf
 
 [ -e "$touch_mapper" ] || [ -L "$touch_mapper" ] || die 'touch mapper source is missing'
 [ -f "$touch_mapper" ] && [ ! -L "$touch_mapper" ] ||
@@ -298,7 +299,32 @@ touch_mapper_checksum_record=$(sha256sum -- "$touch_mapper") ||
 	die 'cannot hash touch mapper source'
 [ "${touch_mapper_checksum_record%% *}" = "$canonical_touch_mapper_sha256" ] ||
 	die 'touch mapper does not match canonical project artifact'
-printf 'PASS: packaged touch mapper and autostart boundaries\n'
+
+[ -e "$lightdm_greeter_policy" ] || [ -L "$lightdm_greeter_policy" ] ||
+	die 'LightDM greeter policy source is missing'
+[ -f "$lightdm_greeter_policy" ] && [ ! -L "$lightdm_greeter_policy" ] ||
+	die 'LightDM greeter policy must be a non-symlink regular file'
+lightdm_policy_mode=$(stat -c '%a' -- "$lightdm_greeter_policy") ||
+	die 'cannot determine LightDM greeter policy mode'
+[ "$lightdm_policy_mode" = 644 ] ||
+	die 'LightDM greeter policy mode is not exactly 644'
+first_lightdm_line=$(sed -n '1p' "$lightdm_greeter_policy")
+lightdm_group_count=$(grep -Ec '^\[[^][]+\]$' "$lightdm_greeter_policy" || true)
+seat_group_count=$(grep -Fxc '[Seat:*]' "$lightdm_greeter_policy" || true)
+[ "$first_lightdm_line" = '[Seat:*]' ] && [ "$lightdm_group_count" -eq 1 ] &&
+	[ "$seat_group_count" -eq 1 ] ||
+	die 'LightDM greeter policy must contain exactly one [Seat:*] group'
+expected_lightdm_command='xserver-command=X -core -s 0 -dpms'
+lightdm_command_count=$(grep -c '^xserver-command=' "$lightdm_greeter_policy" || true)
+exact_lightdm_command_count=$(grep -Fxc "$expected_lightdm_command" "$lightdm_greeter_policy" || true)
+[ "$lightdm_command_count" -eq 1 ] && [ "$exact_lightdm_command_count" -eq 1 ] ||
+	die 'LightDM greeter policy command is not exact'
+canonical_lightdm_policy_sha256=c7e41b398c46cb24e4d7d3d9f7538c31953bf3b77529e28aa9ce78fa4f2a3735
+lightdm_policy_checksum_record=$(sha256sum -- "$lightdm_greeter_policy") ||
+	die 'cannot hash LightDM greeter policy source'
+[ "${lightdm_policy_checksum_record%% *}" = "$canonical_lightdm_policy_sha256" ] ||
+	die 'LightDM greeter policy does not match canonical project artifact'
+printf 'PASS: packaged touch mapper, autostart, and LightDM greeter policy boundaries\n'
 
 run_warning_free module-clean make -C "$repo_root" KDIR="$KERNEL_BUILD" clean
 run_warning_free module-build "$script_dir/dkms-make.sh" "$KERNEL_RELEASE" \

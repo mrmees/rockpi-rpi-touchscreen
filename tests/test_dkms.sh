@@ -17,7 +17,7 @@ fail()
 }
 
 expected_metadata='rockpi-rpi-touchscreen
-0.2.5
+0.2.6
 rockpi_rk3399_display_compat
 panel_rockpi_rpi_touchscreen
 raspits_ft5426
@@ -43,8 +43,8 @@ metadata_is_exact_three_module_package()
 test_three_module_package_metadata()
 {
 	metadata_is_exact_three_module_package "$repo_root/dkms.conf" ||
-		fail 'DKMS metadata does not describe exactly the ordered three-module 0.2.5 package'
-	printf 'PASS: DKMS metadata owns provider, panel, and touch modules at version 0.2.5\n'
+		fail 'DKMS metadata does not describe exactly the ordered three-module 0.2.6 package'
+	printf 'PASS: DKMS metadata owns provider, panel, and touch modules at version 0.2.6\n'
 }
 
 test_sparse_fourth_module_metadata_is_rejected()

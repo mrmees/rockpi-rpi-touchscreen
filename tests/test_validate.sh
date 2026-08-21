@@ -401,6 +401,16 @@ make_packaged_asset_sandbox()
 		"$sandbox/repo/scripts/"
 	chmod 0755 "$sandbox/repo/scripts/map-touchscreen.sh"
 	cp "$repo_root/assets/rockpi-rpi-touchscreen-touch-map.desktop" "$sandbox/repo/assets/"
+	if [ -f "$repo_root/assets/90-rockpi-greeter-no-blank.conf" ]; then
+		cp "$repo_root/assets/90-rockpi-greeter-no-blank.conf" "$sandbox/repo/assets/"
+	else
+		cat > "$sandbox/repo/assets/90-rockpi-greeter-no-blank.conf" <<'EOF'
+[Seat:*]
+# Keep the greeter awake; a logged-in desktop may apply its own power policy.
+xserver-command=X -core -s 0 -dpms
+EOF
+	fi
+	chmod 0644 "$sandbox/repo/assets/90-rockpi-greeter-no-blank.conf"
 	cp "$repo_root/overlays/rockpi-4b-plus-rpi-touchscreen.dts" "$sandbox/repo/overlays/"
 }
 
@@ -525,6 +535,57 @@ test_validator_rejects_malformed_desktop_tryexec()
 	grep -Fq 'touch autostart TryExec is not exact' "$sandbox/output" ||
 		fail 'validator did not identify the malformed touch autostart TryExec'
 	printf 'PASS: validator rejects a malformed touch autostart TryExec\n'
+}
+
+test_validator_rejects_missing_lightdm_greeter_policy()
+{
+	sandbox=$workdir/missing-lightdm-greeter-policy
+	make_packaged_asset_sandbox "$sandbox"
+	rm "$sandbox/repo/assets/90-rockpi-greeter-no-blank.conf"
+	if run_packaged_asset_validate "$sandbox" > "$sandbox/output" 2>&1; then
+		fail 'validator accepted a missing LightDM greeter policy'
+	fi
+	grep -Fq 'LightDM greeter policy source is missing' "$sandbox/output" ||
+		fail 'validator did not identify the missing LightDM greeter policy'
+	printf 'PASS: validator rejects a missing LightDM greeter policy\n'
+}
+
+test_validator_requires_canonical_lightdm_greeter_policy()
+{
+	for variant in wrong-command extra-group symlink wrong-mode byte-change; do
+		sandbox=$workdir/lightdm-greeter-policy-$variant
+		make_packaged_asset_sandbox "$sandbox"
+		policy=$sandbox/repo/assets/90-rockpi-greeter-no-blank.conf
+		case $variant in
+		wrong-command)
+			sed -i 's/ -s 0 -dpms$//' "$policy"
+			expected='LightDM greeter policy command is not exact'
+			;;
+		extra-group)
+			printf '%s\n' '[Other Seat]' 'xserver-command=X -core' >> "$policy"
+			expected='LightDM greeter policy must contain exactly one [Seat:*] group'
+			;;
+		symlink)
+			mv "$policy" "$policy.target"
+			ln -s 90-rockpi-greeter-no-blank.conf.target "$policy"
+			expected='LightDM greeter policy must be a non-symlink regular file'
+			;;
+		wrong-mode)
+			chmod 0600 "$policy"
+			expected='LightDM greeter policy mode is not exactly 644'
+			;;
+		byte-change)
+			printf '%s\n' '# local change' >> "$policy"
+			expected='LightDM greeter policy does not match canonical project artifact'
+			;;
+		esac
+		if run_packaged_asset_validate "$sandbox" > "$sandbox/output" 2>&1; then
+			fail "validator accepted LightDM greeter policy mutation: $variant"
+		fi
+		grep -Fq "$expected" "$sandbox/output" ||
+			fail "validator did not report LightDM policy mutation: $variant"
+	done
+	printf 'PASS: validator requires the canonical LightDM greeter policy\n'
 }
 
 test_validator_requires_exactly_one_desktop_entry_group()
@@ -913,6 +974,8 @@ test_validator_rejects_non_executable_touch_mapper
 test_validator_rejects_malformed_desktop_exec
 test_validator_rejects_invalid_touch_mapper_syntax
 test_validator_rejects_malformed_desktop_tryexec
+test_validator_rejects_missing_lightdm_greeter_policy
+test_validator_requires_canonical_lightdm_greeter_policy
 test_validator_requires_exactly_one_desktop_entry_group
 test_validator_rejects_every_noncanonical_touch_mapper
 test_old_upstream_panel_compatible_fails_validation

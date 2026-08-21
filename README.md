@@ -5,11 +5,11 @@ Display on a Radxa Rock Pi 4B+ running Armbian
 `6.18.43-current-rockchip64`. It installs a board-specific device-tree overlay
 and DKMS display stack while retaining HDMI as a recovery display.
 
-Touch Display 2 is not supported. Earlier 0.2.4 hardware work produced
+Touch Display 2 is not supported. Earlier 0.2.5 hardware work produced
 user-confirmed correct RGB desktop video and physically correct touch and
-identified the safe HDMI-on-VOPB, DSI-on-VOPL pairing. DKMS 0.2.5 packages that
+identified the safe HDMI-on-VOPB, DSI-on-VOPL pairing. DKMS 0.2.6 packages that
 route constraint and layout-neutral touch mapping, but its hardware acceptance
-is still pending. Do not describe 0.2.5 as production-hardware-validated until
+is still pending. Do not describe 0.2.6 as production-hardware-validated until
 a separately authorized reboot, HDMI hot-plug and layout checks, physical touch
 and log checks, and a later separately authorized shutdown/cold-start pass.
 
@@ -22,9 +22,9 @@ and log checks, and a later separately authorized shutdown/cold-start pass.
 - A DKMS package named `rockpi-rpi-touchscreen` and a user overlay named
   `rockpi-4b-plus-rpi-touchscreen`.
 
-DKMS `0.2.5` installs exactly three production modules in provider, panel, then touch order:
+DKMS `0.2.6` installs exactly three production modules in provider, panel, then touch order:
 `rockpi_rk3399_display_compat`, `panel_rockpi_rpi_touchscreen`, and `raspits_ft5426`.
-The exact migration baseline is DKMS `0.2.4` with the same three modules in that order.
+The exact migration baseline is DKMS `0.2.5` with the same three modules in that order.
 The provider owns the DSI0 PLL supplier and reversible VOP correction; the panel depends on that provider; the touch module owns touch input.
 More specifically, `rockpi_rk3399_display_compat` owns the disabled-DSI0 PLL
 supplier and reversible VOP correction; `panel_rockpi_rpi_touchscreen` owns the
@@ -89,21 +89,27 @@ sudo sh scripts/install.sh
 It validates the modules and merged device tree before registering DKMS,
 installs the DTBO in `/boot/overlay-user/`, backs up `/boot/armbianEnv.txt`,
 and appends one overlay token without removing unrelated user overlays.
-Release `0.2.5` treats `/usr/src/rockpi-rpi-touchscreen-0.2.5` as immutable: a
+Release `0.2.6` treats `/usr/src/rockpi-rpi-touchscreen-0.2.6` as immutable: a
 same-version content mismatch fails instead of silently replacing registered
 source. The installer checksum-compares the source, all three DKMS-built and
 installed modules, DTBO, and runtime assets. It accepts only the faithful exact
-three-module 0.2.4 baseline and retires that baseline only after 0.2.5, all
+three-module 0.2.5 baseline and retires that baseline only after 0.2.6, all
 three modules, the source, boot backup, single overlay token, DTBO, mapper, and
-autostart entry verify. A failed migration retains or restores the exact prior
-state and reports any recovery paths.
+autostart entry, and LightDM policy verify. A failed migration retains or
+restores the exact prior state and reports any recovery paths.
 
-Release 0.2.5 owns the executable X11 mapper at
+Release 0.2.6 owns the executable X11 mapper at
 `/usr/libexec/rockpi-rpi-touchscreen-map-touch` and the system XDG autostart
 entry at
-`/etc/xdg/autostart/rockpi-rpi-touchscreen-touch-map.desktop`. Pre-existing
-files at either path must match the packaged bytes and mode or installation
-fails closed; unrelated files are never overwritten. The installer does not reboot or shut down automatically. It does not unload live diagnostic helpers
+`/etc/xdg/autostart/rockpi-rpi-touchscreen-touch-map.desktop`. It also owns the
+mode-0644 LightDM drop-in at
+`/etc/lightdm/lightdm.conf.d/90-rockpi-greeter-no-blank.conf`, whose exact
+`xserver-command=X -core -s 0 -dpms` initial policy prevents the greeter from
+blanking the display after ten idle minutes. Logged-in desktop power settings
+remain user-configurable and may re-enable DPMS for that session. Pre-existing
+files at any of these paths must match the packaged bytes and mode or
+installation fails closed; unrelated files are never overwritten. The
+installer does not reboot or shut down automatically. It does not unload live diagnostic helpers
 and never changes `/etc/X11/xorg.conf.d/20-dfrobot-display.conf`.
 
 ## Display layout and X11 touch mapping
@@ -159,9 +165,9 @@ machine.
 
 Task 5 performs offline validation only; it does not install, reboot, change the
 live display layout, or touch boot state. After separate installation and fresh
-authorization for a reboot, the 0.2.5 overlay and all three production modules
+authorization for a reboot, the 0.2.6 overlay and all three production modules
 first bind on that new boot. Do not claim hardware support from offline
-validation or earlier 0.2.4 evidence alone.
+validation or earlier 0.2.5 evidence alone.
 
 Start the authorized boot with the Raspberry Pi display connected and HDMI
 disconnected. Check the current boot's modules, panel and touch probes, a DSI
@@ -196,7 +202,7 @@ printf '%s\n' 128 | sudo tee "$backlight/brightness"
 
 The overlay sets both `touchscreen-inverted-x` and `touchscreen-inverted-y`, so
 the production boot uses kernel touch orientation and must not apply a fixed
-userspace 180-degree correction. The 0.2.5 mapper may set a non-identity X
+userspace 180-degree correction. The 0.2.6 mapper may set a non-identity X
 Coordinate Transformation Matrix because `xinput map-to-output` derives
 scaling and translation from the current desktop geometry. Verify that touch
 targets DSI-1 and is physically oriented correctly; do not require a fixed
