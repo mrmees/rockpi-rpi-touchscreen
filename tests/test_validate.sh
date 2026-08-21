@@ -231,24 +231,52 @@ i2c@ff110000 {
 syscon@ff770000 {
 	phandle = <0x42>;
 };
-vop@ff900000 {
-	phandle = <0x43>;
-	endpoint@3 {
-		status = "disabled";
-		phandle = <0xb0>;
-		remote-endpoint = <${ROUTE_VOPB_REMOTE:-0xb1}>;
+	vop@ff900000 {
+		phandle = <0x43>;
+		port {
+			endpoint@2 {
+				reg = <2>;
+				phandle = <0xd0>;
+				remote-endpoint = <${HDMI_VOPB_REMOTE:-0xd2}>;
+			};
+			endpoint@3 {
+				status = "disabled";
+				phandle = <0xb0>;
+				remote-endpoint = <${ROUTE_VOPB_REMOTE:-0xb1}>;
+			};
+		};
 	};
-};
-vop@ff8f0000 {
-	phandle = <0x44>;
-	endpoint@3 {
-		phandle = <0x10>;
-		remote-endpoint = <0x20>;
+	vop@ff8f0000 {
+		phandle = <0x44>;
+		port {
+			endpoint@2 {
+				reg = <2>;
+				phandle = <0xd1>;
+				remote-endpoint = <${HDMI_VOPL_REMOTE:-0xd3}>;
+			};
+			endpoint@3 {
+				phandle = <0x10>;
+				remote-endpoint = <0x20>;
+			};
+		};
 	};
-};
-hdmi@ff940000 {
-	status = "okay";
-};
+	hdmi@ff940000 {
+		status = "okay";
+		ports {
+			port@0 {
+				endpoint@0 {
+					reg = <0>;
+					phandle = <0xd2>;
+					remote-endpoint = <${HDMI_IN_VOPB_REMOTE:-0xd0}>;
+				};
+				endpoint@1 {
+					reg = <1>;
+					phandle = <0xd3>;
+					remote-endpoint = <${HDMI_IN_VOPL_REMOTE:-0xd1}>;
+				};
+			};
+		};
+	};
 power-controller {
 	#power-domain-cells = <0x01>;
 	phandle = <0x45>;
@@ -263,19 +291,58 @@ $route_filter
 EOF_DTS
 	[ -z "${DTC_MERGED_DIAGNOSTIC:-}" ] || printf '%s\n' "$DTC_MERGED_DIAGNOSTIC" >&2
 	;;
-*)
-	cat > "$output" <<'EOF_DTS'
-__symbols__ {
-	mipi_dsi = "/dsi@ff960000";
+	*)
+		cat > "$output" <<'EOF_DTS'
+	vop@ff900000 {
+		port {
+			endpoint@2 {
+				reg = <2>;
+				phandle = <0xd0>;
+				remote-endpoint = <0xd2>;
+			};
+		};
+	};
+	vop@ff8f0000 {
+		port {
+			endpoint@2 {
+				reg = <2>;
+				phandle = <0xd1>;
+				remote-endpoint = <0xd3>;
+			};
+		};
+	};
+	hdmi@ff940000 {
+		status = "okay";
+		ports {
+			port@0 {
+				endpoint@0 {
+					reg = <0>;
+					phandle = <0xd2>;
+					remote-endpoint = <0xd0>;
+				};
+				endpoint@1 {
+					reg = <1>;
+					phandle = <0xd3>;
+					remote-endpoint = <0xd1>;
+				};
+			};
+		};
+	};
+	__symbols__ {
+		mipi_dsi = "/dsi@ff960000";
 	mipi_dsi1 = "/dsi@ff968000";
 	mipi1_in_vopl = "/dsi@ff968000/endpoint@1";
 	mipi1_in_vopb = "/dsi@ff968000/endpoint@0";
 	vopl_out_mipi1 = "/vop@ff8f0000/endpoint@3";
 	i2c1 = "/i2c@ff110000";
 	grf = "/syscon@ff770000";
-	vopb = "/vop@ff900000";
-	vopl = "/vop@ff8f0000";
-	power = "/power-controller";
+		vopb = "/vop@ff900000";
+		vopl = "/vop@ff8f0000";
+		vopb_out_hdmi = "/vop@ff900000/port/endpoint@2";
+		vopl_out_hdmi = "/vop@ff8f0000/port/endpoint@2";
+		hdmi_in_vopb = "/hdmi@ff940000/ports/port@0/endpoint@0";
+		hdmi_in_vopl = "/hdmi@ff940000/ports/port@0/endpoint@1";
+		power = "/power-controller";
 };
 EOF_DTS
 	[ -z "${DTC_BASE_DIAGNOSTIC:-}" ] || printf '%s\n' "$DTC_BASE_DIAGNOSTIC" >&2
@@ -680,6 +747,27 @@ test_route_filter_policy_is_strict()
 	printf 'PASS: route-filter policy rejects every mutation\n'
 }
 
+test_hdmi_route_policy_rejects_each_reciprocal_mutation()
+{
+	for mutation in \
+		HDMI_VOPB_REMOTE=0xff \
+		HDMI_IN_VOPB_REMOTE=0xff \
+		HDMI_VOPL_REMOTE=0xff \
+		HDMI_IN_VOPL_REMOTE=0xff; do
+		sandbox=$workdir/hdmi-route-${mutation%%=*}
+		make_validate_sandbox "$sandbox"
+		if run_validate_mutation "$sandbox" "$mutation" > "$sandbox/output" 2>&1; then
+			fail "validator accepted HDMI route mutation: $mutation"
+		fi
+		grep -Fq 'HDMI route' "$sandbox/output" ||
+			fail "validator did not diagnose HDMI route mutation: $mutation"
+		if grep -Fq 'PASS: offline validation' "$sandbox/output"; then
+			fail "HDMI route mutation reached offline validation PASS: $mutation"
+		fi
+	done
+	printf 'PASS: HDMI route policy rejects both directions of both VOP routes\n'
+}
+
 test_validator_rejects_graph_warning_suppressions()
 {
 	sandbox=$workdir/graph-warning-suppressions
@@ -789,6 +877,7 @@ test_validate_uses_kernel_build_for_clean_and_scoped_merged_tree_checks
 test_nested_status_cannot_satisfy_direct_parent_check
 test_provider_resources_and_touch_orientation_are_strict
 test_route_filter_policy_is_strict
+test_hdmi_route_policy_rejects_each_reciprocal_mutation
 test_validator_rejects_graph_warning_suppressions
 test_validator_atomically_replaces_read_only_dtbo
 test_validate_uses_the_kernel_recorded_compiler

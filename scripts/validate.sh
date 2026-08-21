@@ -6,7 +6,7 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 [ "${1:-}" = '--offline' ] || die "usage: $0 --offline"
 require_supported_kernel_release
-require_command awk cat chmod cp dirname dtc fdtoverlay grep head ln make mkdir modinfo mktemp mv rm sed sha256sum tail tr
+require_command awk cat chmod cp dirname dtc fdtoverlay grep head ln make mkdir modinfo mktemp mv rm sed sha256sum sort tail tr
 
 compatible_file=${COMPATIBLE_FILE:-/proc/device-tree/compatible}
 [ -r "$compatible_file" ] || die "cannot read board compatible string: $compatible_file"
@@ -178,6 +178,55 @@ property_cells()
 		awk 'NR == 1 { for (i = 1; i <= NF; i++) print $i; exit }'
 }
 
+endpoint_direct_properties()
+{
+	awk '
+		{
+			line = $0
+			if (depth == 1 && line ~ /^[[:space:]]*[A-Za-z0-9,#_-]+[[:space:]]*(=|;)/) {
+				sub(/^[[:space:]]*/, "", line)
+				sub(/[[:space:]]*$/, "", line)
+				print line
+			}
+			opens = gsub(/\{/, "{", line)
+			closes = gsub(/\}/, "}", line)
+			depth += opens - closes
+		}
+	' | LC_ALL=C sort
+}
+
+vop_hdmi_endpoint_from_file()
+{
+	endpoint_file=$1
+	endpoint_vop=$2
+	endpoint_vop_node=$(node_from_file "$endpoint_file" "$endpoint_vop") || return 1
+	endpoint_vop_port=$(printf '%s\n' "$endpoint_vop_node" | extract_named_node 'port') || return 1
+	printf '%s\n' "$endpoint_vop_port" | extract_named_node 'endpoint@2'
+}
+
+hdmi_input_endpoint_from_file()
+{
+	endpoint_file=$1
+	endpoint_name=$2
+	endpoint_hdmi_node=$(node_from_file "$endpoint_file" 'hdmi@ff940000') || return 1
+	endpoint_hdmi_ports=$(printf '%s\n' "$endpoint_hdmi_node" | extract_named_node 'ports') || return 1
+	endpoint_hdmi_input=$(printf '%s\n' "$endpoint_hdmi_ports" | extract_named_node 'port@0') || return 1
+	printf '%s\n' "$endpoint_hdmi_input" | extract_named_node "$endpoint_name"
+}
+
+require_reciprocal_hdmi_route()
+{
+	route_name=$1
+	route_vop_endpoint=$2
+	route_hdmi_endpoint=$3
+	route_vop_phandle=$(printf '%s\n' "$route_vop_endpoint" | property_phandle phandle)
+	route_hdmi_phandle=$(printf '%s\n' "$route_hdmi_endpoint" | property_phandle phandle)
+	require_equal "$(printf '%s\n' "$route_vop_endpoint" | property_phandle remote-endpoint)" \
+		"$route_hdmi_phandle" "$route_name HDMI route does not connect from VOP to HDMI"
+	require_equal "$(printf '%s\n' "$route_hdmi_endpoint" | property_phandle remote-endpoint)" \
+		"$route_vop_phandle" "$route_name HDMI route does not connect back from HDMI to VOP"
+}
+
 count_direct_port_children()
 {
 	awk '
@@ -282,9 +331,20 @@ printf 'PASS: all three module builds and metadata\n'
 dtb=$(active_dtb)
 [ -f "$dtb" ] || die "active DTB not found: $dtb"
 run_dtb_decompile base-dtb "$dtb" "$workdir/base.dts"
-for symbol in mipi_dsi mipi_dsi1 mipi1_in_vopl mipi1_in_vopb vopl_out_mipi1 i2c1 grf vopb vopl power; do
+for symbol in mipi_dsi mipi_dsi1 mipi1_in_vopl mipi1_in_vopb vopl_out_mipi1 \
+	vopb_out_hdmi vopl_out_hdmi hdmi_in_vopb hdmi_in_vopl i2c1 grf vopb vopl power; do
 	grep -Eq "^[[:space:]]*$symbol[[:space:]]*=" "$workdir/base.dts" || die "active DTB is missing symbol: $symbol"
 done
+base_vopb_hdmi=$(vop_hdmi_endpoint_from_file "$workdir/base.dts" 'vop@ff900000') ||
+	die 'active base DTB is missing the VOPB HDMI route endpoint'
+base_vopl_hdmi=$(vop_hdmi_endpoint_from_file "$workdir/base.dts" 'vop@ff8f0000') ||
+	die 'active base DTB is missing the VOPL HDMI route endpoint'
+base_hdmi_vopb=$(hdmi_input_endpoint_from_file "$workdir/base.dts" 'endpoint@0') ||
+	die 'active base DTB is missing the HDMI VOPB input endpoint'
+base_hdmi_vopl=$(hdmi_input_endpoint_from_file "$workdir/base.dts" 'endpoint@1') ||
+	die 'active base DTB is missing the HDMI VOPL input endpoint'
+require_reciprocal_hdmi_route 'active base VOPB' "$base_vopb_hdmi" "$base_hdmi_vopb"
+require_reciprocal_hdmi_route 'active base VOPL' "$base_vopl_hdmi" "$base_hdmi_vopl"
 printf 'PASS: active DTB symbols\n'
 
 build_dir=${BUILD_DIR:-$repo_root/build}
@@ -399,5 +459,27 @@ require_equal "$(printf '%s\n' "$panel_input" | property_phandle remote-endpoint
 printf 'PASS: DSI1 VOPB route is terminated; DSI1 graph prefers little VOP and connects to panel\n'
 
 require_direct_property "$hdmi" status '"okay"' 'merged tree does not preserve HDMI'
-printf 'PASS: HDMI unchanged\n'
+merged_vopb_hdmi=$(vop_hdmi_endpoint_from_file "$workdir/merged.dts" 'vop@ff900000') ||
+	die 'merged tree is missing the VOPB HDMI route endpoint'
+merged_vopl_hdmi=$(vop_hdmi_endpoint_from_file "$workdir/merged.dts" 'vop@ff8f0000') ||
+	die 'merged tree is missing the VOPL HDMI route endpoint'
+merged_hdmi_vopb=$(hdmi_input_endpoint_from_file "$workdir/merged.dts" 'endpoint@0') ||
+	die 'merged tree is missing the HDMI VOPB input endpoint'
+merged_hdmi_vopl=$(hdmi_input_endpoint_from_file "$workdir/merged.dts" 'endpoint@1') ||
+	die 'merged tree is missing the HDMI VOPL input endpoint'
+require_reciprocal_hdmi_route 'merged VOPB' "$merged_vopb_hdmi" "$merged_hdmi_vopb"
+require_reciprocal_hdmi_route 'merged VOPL' "$merged_vopl_hdmi" "$merged_hdmi_vopl"
+require_equal "$(printf '%s\n' "$merged_vopb_hdmi" | endpoint_direct_properties)" \
+	"$(printf '%s\n' "$base_vopb_hdmi" | endpoint_direct_properties)" \
+	'VOPB HDMI route endpoint properties changed from active base DTB'
+require_equal "$(printf '%s\n' "$merged_hdmi_vopb" | endpoint_direct_properties)" \
+	"$(printf '%s\n' "$base_hdmi_vopb" | endpoint_direct_properties)" \
+	'HDMI VOPB route input properties changed from active base DTB'
+require_equal "$(printf '%s\n' "$merged_vopl_hdmi" | endpoint_direct_properties)" \
+	"$(printf '%s\n' "$base_vopl_hdmi" | endpoint_direct_properties)" \
+	'VOPL HDMI route endpoint properties changed from active base DTB'
+require_equal "$(printf '%s\n' "$merged_hdmi_vopl" | endpoint_direct_properties)" \
+	"$(printf '%s\n' "$base_hdmi_vopl" | endpoint_direct_properties)" \
+	'HDMI VOPL route input properties changed from active base DTB'
+printf 'PASS: HDMI enabled with both reciprocal VOP routes unchanged from active base DTB\n'
 printf 'PASS: offline validation\n'
