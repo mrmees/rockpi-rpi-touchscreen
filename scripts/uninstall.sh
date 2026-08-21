@@ -138,6 +138,10 @@ dkms_state_restore_failed=0
 mapper_remove_attempted=0
 autostart_remove_attempted=0
 mapper_claim_held=0
+mapper_claim_recovery=
+autostart_claim_held=0
+autostart_claim_recovery=
+mapper_dependency_restore_failed=0
 dkms_state_root=${DKMS_STATE_DIR:-/var/lib/dkms}
 dkms_state_destination=$dkms_state_root/$PROJECT_NAME/$PROJECT_VERSION
 trap 'snapshot_status=$?; trap - EXIT HUP INT TERM; rm -rf "$transaction_directory"; exit "$snapshot_status"' \
@@ -272,10 +276,14 @@ restore_runtime_assets()
 	[ -f "$transaction_directory/runtime.snapshot-complete" ] || return 1
 	runtime_restore_failed=0
 	mapper_restored=1
-	if [ "$mapper_claim_held" -eq 1 ]; then
+	if [ "$mapper_dependency_restore_failed" -eq 1 ]; then
 		runtime_restore_failed=1
 		mapper_restored=0
-		rollback_note="$rollback_note touch mapper claim retained;"
+		rollback_note="$rollback_note touch mapper dependency restoration failed: $TOUCH_MAPPER_DESTINATION;"
+	elif [ "$mapper_claim_held" -eq 1 ]; then
+		runtime_restore_failed=1
+		mapper_restored=0
+		rollback_note="$rollback_note touch mapper claim retained at $mapper_claim_recovery;"
 	elif [ "$mapper_remove_attempted" -eq 1 ] &&
 		! restore_runtime_asset "$transaction_directory/runtime/mapper" "$TOUCH_MAPPER_DESTINATION"; then
 		runtime_restore_failed=1
@@ -287,9 +295,13 @@ restore_runtime_assets()
 			runtime_restore_failed=1
 			rollback_note="$rollback_note touch autostart retained because touch mapper restoration failed: $TOUCH_AUTOSTART_DESTINATION;"
 		elif ! restore_runtime_asset "$transaction_directory/runtime/autostart" "$TOUCH_AUTOSTART_DESTINATION"; then
-			runtime_restore_failed=1
-			rollback_note="$rollback_note touch autostart restoration failed: $TOUCH_AUTOSTART_DESTINATION;"
+		runtime_restore_failed=1
+		rollback_note="$rollback_note touch autostart restoration failed: $TOUCH_AUTOSTART_DESTINATION;"
 		fi
+	fi
+	if [ "$autostart_claim_held" -eq 1 ]; then
+		runtime_restore_failed=1
+		rollback_note="$rollback_note touch autostart claim retained at $autostart_claim_recovery;"
 	fi
 	[ "$runtime_restore_failed" -eq 0 ]
 }
@@ -486,7 +498,9 @@ rm -f "$overlay_destination"
 if [ "$autostart_state" = owned ]; then
 	if ! claim_runtime_asset autostart "$TOUCH_AUTOSTART_DESTINATION" \
 		"$transaction_directory/runtime/autostart" 644; then
-		rollback_note="$rollback_note touch autostart claim retained at $runtime_claim_recovery;"
+		autostart_claim_held=1
+		autostart_claim_recovery=$runtime_claim_recovery
+		rollback_note="$rollback_note touch autostart claim retained at $autostart_claim_recovery;"
 		exit 1
 	fi
 	case $runtime_claim_state in
@@ -499,11 +513,6 @@ if [ "$autostart_state" = owned ]; then
 	*) die "unknown touch autostart claim state: $runtime_claim_state" ;;
 	esac
 fi
-if [ "$autostart_state" = absent ] &&
-	{ [ -e "$TOUCH_AUTOSTART_DESTINATION" ] || [ -L "$TOUCH_AUTOSTART_DESTINATION" ]; }; then
-	printf 'RETAIN MODIFIED: %s\n' "$TOUCH_AUTOSTART_DESTINATION"
-	autostart_state=modified
-fi
 if [ "$mapper_state" = owned ]; then
 	if [ "$autostart_state" = modified ]; then
 		printf 'RETAIN DEPENDENCY: %s\n' "$TOUCH_MAPPER_DESTINATION"
@@ -511,11 +520,27 @@ if [ "$mapper_state" = owned ]; then
 		if ! claim_runtime_asset mapper "$TOUCH_MAPPER_DESTINATION" \
 			"$transaction_directory/runtime/mapper" 755; then
 			mapper_claim_held=1
-			rollback_note="$rollback_note touch mapper claim retained at $runtime_claim_recovery;"
+			mapper_claim_recovery=$runtime_claim_recovery
+			rollback_note="$rollback_note touch mapper claim retained at $mapper_claim_recovery;"
 			exit 1
 		fi
 		case $runtime_claim_state in
-		removed) mapper_remove_attempted=1 ;;
+		removed)
+			mapper_remove_attempted=1
+			if [ -e "$TOUCH_AUTOSTART_DESTINATION" ] || [ -L "$TOUCH_AUTOSTART_DESTINATION" ]; then
+				printf 'RETAIN MODIFIED: %s\n' "$TOUCH_AUTOSTART_DESTINATION"
+				if ! restore_runtime_asset "$transaction_directory/runtime/mapper" \
+					"$TOUCH_MAPPER_DESTINATION"; then
+					mapper_dependency_restore_failed=1
+					rollback_note="$rollback_note touch mapper dependency restoration failed: $TOUCH_MAPPER_DESTINATION;"
+				else
+					mapper_remove_attempted=0
+					printf 'RETAIN DEPENDENCY: %s\n' "$TOUCH_MAPPER_DESTINATION"
+					rollback_note="$rollback_note touch mapper retained because touch autostart appeared after mapper claim: $TOUCH_MAPPER_DESTINATION;"
+				fi
+				exit 1
+			fi
+			;;
 		absent|modified) ;;
 		*) die "unknown touch mapper claim state: $runtime_claim_state" ;;
 		esac
