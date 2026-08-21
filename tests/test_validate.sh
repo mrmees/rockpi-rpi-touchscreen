@@ -399,6 +399,7 @@ make_packaged_asset_sandbox()
 	cp "$repo_root/scripts/validate.sh" "$repo_root/scripts/common.sh" \
 		"$repo_root/scripts/dkms-make.sh" "$repo_root/scripts/map-touchscreen.sh" \
 		"$sandbox/repo/scripts/"
+	chmod 0755 "$sandbox/repo/scripts/map-touchscreen.sh"
 	cp "$repo_root/assets/rockpi-rpi-touchscreen-touch-map.desktop" "$sandbox/repo/assets/"
 	cp "$repo_root/overlays/rockpi-4b-plus-rpi-touchscreen.dts" "$sandbox/repo/overlays/"
 }
