@@ -28,6 +28,8 @@ raspits_ft5426
 /updates/dkms
 /updates/dkms'
 
+supported_kernel_release=6.18.43-current-rockchip64
+
 metadata_is_exact_three_module_package()
 {
 	config=$1
@@ -60,6 +62,28 @@ EOF
 	printf 'PASS: DKMS metadata rejects a sparse fourth module declaration\n'
 }
 
+test_dkms_metadata_has_one_exact_kernel_boundary()
+{
+	config=$repo_root/dkms.conf
+	[ "$(grep -Ec '^[[:space:]]*BUILD_EXCLUSIVE_KERNEL[[:space:]]*=' "$config")" -eq 1 ] ||
+		fail 'DKMS metadata must declare exactly one BUILD_EXCLUSIVE_KERNEL boundary'
+	boundary=$(bash -c '. "$1"; printf "%s\n" "${BUILD_EXCLUSIVE_KERNEL-}"' sh "$config")
+	[ "$boundary" = '^6[.]18[.]43-current-rockchip64$' ] ||
+		fail "DKMS kernel boundary is not the exact anchored supported release: $boundary"
+	printf '%s\n' "$supported_kernel_release" | grep -Eq "$boundary" ||
+		fail 'DKMS kernel boundary rejects the exact supported release'
+	for unsupported in \
+		6.18.42-current-rockchip64 \
+		6.18.43-current-rockchip64-extra \
+		x6.18.43-current-rockchip64 \
+		6x18x43-current-rockchip64; do
+		if printf '%s\n' "$unsupported" | grep -Eq "$boundary"; then
+			fail "DKMS kernel boundary accepts unsupported release: $unsupported"
+		fi
+	done
+	printf 'PASS: DKMS metadata has one exact anchored supported-kernel boundary\n'
+}
+
 test_makefile_owns_three_module_targets()
 {
 	probe=$workdir/module-targets.mk
@@ -81,7 +105,7 @@ src/raspits_ft5426.o'
 make_sandbox()
 {
 	sandbox=$1
-	mkdir -p "$sandbox/bin" "$sandbox/modules/target-kernel/build/include/generated"
+	mkdir -p "$sandbox/bin" "$sandbox/modules/6.18.43-current-rockchip64/build/include/generated"
 	cat > "$sandbox/bin/make" <<'EOF'
 #!/bin/sh
 set -eu
@@ -94,7 +118,7 @@ run_dkms_make()
 {
 	sandbox=$1
 	shift
-	command=$(kernelver=target-kernel bash -c '. "$1"; printf "%s" "${MAKE[0]}"' sh "$repo_root/dkms.conf")
+	command=$(kernelver=6.18.43-current-rockchip64 bash -c '. "$1"; printf "%s" "${MAKE[0]}"' sh "$repo_root/dkms.conf")
 	case $command in
 	*KERNELRELEASE*) fail 'DKMS make command must not embed KERNELRELEASE' ;;
 	esac
@@ -110,7 +134,7 @@ test_autonomous_dkms_make_uses_target_kernel_compiler()
 	sandbox=$workdir/matching
 	make_sandbox "$sandbox"
 	printf '%s\n' '#define LINUX_COMPILER "test-kernel-gcc (Debian 14.2.0-19) 14.2.0"' > \
-		"$sandbox/modules/target-kernel/build/include/generated/compile.h"
+		"$sandbox/modules/6.18.43-current-rockchip64/build/include/generated/compile.h"
 	cat > "$sandbox/bin/test-kernel-gcc" <<'EOF'
 #!/bin/sh
 printf '%s\n' 'test-kernel-gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0'
@@ -125,9 +149,9 @@ EOF
 	chmod +x "$sandbox/bin/test-kernel-gcc" "$sandbox/bin/test-kernel-gcc-14"
 
 	run_dkms_make "$sandbox"
-	grep -Eq '^CC= ARGS=KDIR=/lib/modules/target-kernel/build modules CC=.*/module-compiler/test-kernel-gcc$' \
-		"$sandbox/make.log" || fail 'autonomous DKMS make did not select the exact target-kernel compiler'
-	printf 'PASS: autonomous DKMS make selects the target-kernel compiler\n'
+	grep -Eq '^CC= ARGS=KDIR=/lib/modules/6.18.43-current-rockchip64/build modules CC=.*/module-compiler/test-kernel-gcc$' \
+		"$sandbox/make.log" || fail 'autonomous DKMS make did not select the exact 6.18.43-current-rockchip64 compiler'
+	printf 'PASS: autonomous DKMS make selects the 6.18.43-current-rockchip64 compiler\n'
 }
 
 test_autonomous_dkms_make_rejects_unmatched_compiler()
@@ -135,7 +159,7 @@ test_autonomous_dkms_make_rejects_unmatched_compiler()
 	sandbox=$workdir/unmatched
 	make_sandbox "$sandbox"
 	printf '%s\n' '#define LINUX_COMPILER "test-kernel-gcc (Debian 14.2.0-19) 14.2.0"' > \
-		"$sandbox/modules/target-kernel/build/include/generated/compile.h"
+		"$sandbox/modules/6.18.43-current-rockchip64/build/include/generated/compile.h"
 	cat > "$sandbox/bin/test-kernel-gcc" <<'EOF'
 #!/bin/sh
 printf '%s\n' 'test-kernel-gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0'
@@ -150,9 +174,34 @@ EOF
 	printf 'PASS: autonomous DKMS make rejects an unmatched compiler\n'
 }
 
+test_autonomous_dkms_make_rejects_unsupported_kernel_before_make()
+{
+	sandbox=$workdir/unsupported-kernel
+	make_sandbox "$sandbox"
+	unsupported_release=$supported_kernel_release-extra
+	mkdir -p "$sandbox/modules/$unsupported_release/build/include/generated"
+	if MODULES_DIR="$sandbox/modules" DKMS_MAKE_LOG="$sandbox/make.log" \
+		PATH="$sandbox/bin:/usr/bin:/bin" \
+		sh "$repo_root/scripts/dkms-make.sh" "$unsupported_release" make modules \
+		> "$sandbox/output" 2>&1; then
+		fail 'autonomous DKMS make accepted an unsupported kernel release'
+	fi
+	grep -Fq "unsupported kernel release: $unsupported_release (expected $supported_kernel_release)" \
+		"$sandbox/output" || fail 'autonomous DKMS make did not report the exact kernel boundary'
+	[ ! -e "$sandbox/make.log" ] || fail 'unsupported kernel release reached make'
+	printf 'PASS: autonomous DKMS make rejects unsupported kernels before make\n'
+}
+
+if [ -n "${TEST_FILTER:-}" ]; then
+	"$TEST_FILTER"
+	exit 0
+fi
+
 test_three_module_package_metadata
 test_sparse_fourth_module_metadata_is_rejected
+test_dkms_metadata_has_one_exact_kernel_boundary
 test_makefile_owns_three_module_targets
 test_autonomous_dkms_make_uses_target_kernel_compiler
 test_autonomous_dkms_make_rejects_unmatched_compiler
+test_autonomous_dkms_make_rejects_unsupported_kernel_before_make
 printf 'PASS: DKMS autonomous compiler selection\n'

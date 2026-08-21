@@ -2,6 +2,7 @@
 
 PROJECT_NAME=rockpi-rpi-touchscreen
 PROJECT_VERSION=0.2.5
+SUPPORTED_KERNEL_RELEASE=6.18.43-current-rockchip64
 PROJECT_SOURCE_DIR=${DKMS_TREE:-/usr/src}/${PROJECT_NAME}-${PROJECT_VERSION}
 MODULE_NAMES='rockpi_rk3399_display_compat panel_rockpi_rpi_touchscreen raspits_ft5426'
 OLD_MODULE_NAMES=$MODULE_NAMES
@@ -36,6 +37,12 @@ require_command()
 require_root()
 {
 	[ "$(id -u)" -eq 0 ] || die 'this command must be run as root'
+}
+
+require_supported_kernel_release()
+{
+	[ "$KERNEL_RELEASE" = "$SUPPORTED_KERNEL_RELEASE" ] ||
+		die "unsupported kernel release: $KERNEL_RELEASE (expected $SUPPORTED_KERNEL_RELEASE)"
 }
 
 dkms_status_has_version()

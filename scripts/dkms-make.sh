@@ -8,6 +8,12 @@ set -eu
 
 kernel_release=$1
 shift
+supported_kernel_release=6.18.43-current-rockchip64
+[ "$kernel_release" = "$supported_kernel_release" ] || {
+	printf 'ERROR: unsupported kernel release: %s (expected %s)\n' \
+		"$kernel_release" "$supported_kernel_release" >&2
+	exit 1
+}
 kernel_build=${MODULES_DIR:-/lib/modules}/$kernel_release/build
 compiler_config=$kernel_build/include/generated/autoconf.h
 compiler_header=$kernel_build/include/generated/compile.h

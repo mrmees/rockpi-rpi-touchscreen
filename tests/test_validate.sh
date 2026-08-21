@@ -19,7 +19,7 @@ fail()
 make_validate_sandbox()
 {
 	sandbox=$1
-	mkdir -p "$sandbox/bin" "$sandbox/boot/dtb" "$sandbox/modules/test-kernel/build" "$sandbox/build"
+	mkdir -p "$sandbox/bin" "$sandbox/boot/dtb" "$sandbox/modules/6.18.43-current-rockchip64/build" "$sandbox/build"
 	printf '%s\n' 'fdtfile=test.dtb' > "$sandbox/boot/armbianEnv.txt"
 	: > "$sandbox/boot/dtb/test.dtb"
 	printf 'radxa,rockpi4b-plus\000' > "$sandbox/compatible"
@@ -47,7 +47,7 @@ field=$2
 module=${3##*/}
 case "$field:$module" in
 license:raspits_ft5426.ko|license:panel_rockpi_rpi_touchscreen.ko|license:rockpi_rk3399_display_compat.ko) printf '%s\n' 'GPL v2' ;;
-vermagic:raspits_ft5426.ko|vermagic:panel_rockpi_rpi_touchscreen.ko|vermagic:rockpi_rk3399_display_compat.ko) printf '%s\n' 'test-kernel SMP mod_unload aarch64' ;;
+vermagic:raspits_ft5426.ko|vermagic:panel_rockpi_rpi_touchscreen.ko|vermagic:rockpi_rk3399_display_compat.ko) printf '%s\n' '6.18.43-current-rockchip64 SMP mod_unload aarch64' ;;
 alias:rockpi_rk3399_display_compat.ko) printf '%s\n' 'of:N*T*Crockpi,rk3399-dsi1-rpi-touchscreen-compat' ;;
 alias:raspits_ft5426.ko) printf '%s\n' 'of:N*T*Craspits_ft5426' ;;
 alias:panel_rockpi_rpi_touchscreen.ko) printf '%s\n' 'of:N*T*Crockpi,rpi-7inch-touchscreen-panel' ;;
@@ -289,11 +289,28 @@ run_validate()
 {
 	sandbox=$1
 	shift
-	BOOT_DIR="$sandbox/boot" MODULES_DIR="$sandbox/modules" KERNEL_RELEASE=test-kernel \
+	BOOT_DIR="$sandbox/boot" MODULES_DIR="$sandbox/modules" \
+		KERNEL_RELEASE=${VALIDATE_KERNEL_RELEASE:-6.18.43-current-rockchip64} \
 	COMPATIBLE_FILE="$sandbox/compatible" BUILD_DIR="$sandbox/build" \
 	MAKE_LOG="$sandbox/make.log" MAKE_CC_LOG="$sandbox/make-cc.log" PATH="$sandbox/bin:$PATH" \
 	REPO_ROOT="$repo_root" \
 	sh "$repo_root/scripts/validate.sh" --offline "$@"
+}
+
+test_validator_rejects_unsupported_kernel_before_build()
+{
+	sandbox=$workdir/unsupported-kernel
+	make_validate_sandbox "$sandbox"
+	supported=6.18.43-current-rockchip64
+	unsupported=$supported-extra
+	mkdir -p "$sandbox/modules/$unsupported/build"
+	if VALIDATE_KERNEL_RELEASE=$unsupported run_validate "$sandbox" > "$sandbox/output" 2>&1; then
+		fail 'validator accepted an unsupported kernel release'
+	fi
+	grep -Fq "unsupported kernel release: $unsupported (expected $supported)" "$sandbox/output" ||
+		fail 'validator did not report the exact supported-kernel boundary'
+	[ ! -e "$sandbox/make.log" ] || fail 'unsupported kernel release reached module build'
+	printf 'PASS: validator rejects unsupported kernels before build\n'
 }
 
 run_validate_mutation()
@@ -301,7 +318,7 @@ run_validate_mutation()
 	sandbox=$1
 	mutation=$2
 	env "$mutation" BOOT_DIR="$sandbox/boot" MODULES_DIR="$sandbox/modules" \
-		KERNEL_RELEASE=test-kernel COMPATIBLE_FILE="$sandbox/compatible" \
+		KERNEL_RELEASE=6.18.43-current-rockchip64 COMPATIBLE_FILE="$sandbox/compatible" \
 		BUILD_DIR="$sandbox/build" MAKE_LOG="$sandbox/make.log" \
 		MAKE_CC_LOG="$sandbox/make-cc.log" PATH="$sandbox/bin:$PATH" \
 		REPO_ROOT="$repo_root" sh "$repo_root/scripts/validate.sh" --offline
@@ -322,7 +339,7 @@ make_packaged_asset_sandbox()
 run_packaged_asset_validate()
 {
 	sandbox=$1
-	BOOT_DIR="$sandbox/boot" MODULES_DIR="$sandbox/modules" KERNEL_RELEASE=test-kernel \
+	BOOT_DIR="$sandbox/boot" MODULES_DIR="$sandbox/modules" KERNEL_RELEASE=6.18.43-current-rockchip64 \
 		COMPATIBLE_FILE="$sandbox/compatible" BUILD_DIR="$sandbox/build" \
 		MAKE_LOG="$sandbox/make.log" MAKE_CC_LOG="$sandbox/make-cc.log" \
 		PATH="$sandbox/bin:$PATH" REPO_ROOT="$sandbox/repo" \
@@ -611,7 +628,7 @@ test_validator_checks_distinct_module_aliases()
 set -eu
 	case "$2:${3##*/}" in
 	license:*|vermagic:*)
-		[ "$2" = license ] && printf '%s\n' 'GPL v2' || printf '%s\n' 'test-kernel SMP mod_unload aarch64'
+		[ "$2" = license ] && printf '%s\n' 'GPL v2' || printf '%s\n' '6.18.43-current-rockchip64 SMP mod_unload aarch64'
 		;;
 	alias:rockpi_rk3399_display_compat.ko) printf '%s\n' 'of:N*T*Crockpi,rk3399-dsi1-rpi-touchscreen-compat' ;;
 	alias:*) printf '%s\n' 'of:N*T*Craspits_ft5426' ;;
@@ -685,7 +702,7 @@ test_validate_uses_kernel_build_for_clean_and_scoped_merged_tree_checks()
 	if MERGED_VARIANT=dsi0-enabled run_validate "$sandbox"; then
 		fail 'enabled unused DSI0 was accepted by merged-tree validation'
 	fi
-	grep -Fqx -- "-C $repo_root KDIR=$sandbox/modules/test-kernel/build clean" "$sandbox/make.log" ||
+	grep -Fqx -- "-C $repo_root KDIR=$sandbox/modules/6.18.43-current-rockchip64/build clean" "$sandbox/make.log" ||
 		fail 'make clean did not receive the selected kernel build path'
 	printf 'PASS: scoped merged-tree checks and KDIR clean\n'
 }
@@ -721,7 +738,7 @@ test_provider_resources_and_touch_orientation_are_strict()
 		vopl) accepted=PROVIDER_VOPL=0x99 ;;
 		esac
 		if env "$accepted" BOOT_DIR="$sandbox/boot" MODULES_DIR="$sandbox/modules" \
-			KERNEL_RELEASE=test-kernel COMPATIBLE_FILE="$sandbox/compatible" \
+			KERNEL_RELEASE=6.18.43-current-rockchip64 COMPATIBLE_FILE="$sandbox/compatible" \
 			BUILD_DIR="$sandbox/build" MAKE_LOG="$sandbox/make.log" \
 			MAKE_CC_LOG="$sandbox/make-cc.log" PATH="$sandbox/bin:$PATH" \
 			REPO_ROOT="$repo_root" sh "$repo_root/scripts/validate.sh" --offline; then
@@ -737,7 +754,7 @@ test_provider_resources_and_touch_orientation_are_strict()
 		domain) accepted=PROVIDER_POWER_DOMAIN=0x99 ;;
 		esac
 		if env "$accepted" BOOT_DIR="$sandbox/boot" MODULES_DIR="$sandbox/modules" \
-			KERNEL_RELEASE=test-kernel COMPATIBLE_FILE="$sandbox/compatible" \
+			KERNEL_RELEASE=6.18.43-current-rockchip64 COMPATIBLE_FILE="$sandbox/compatible" \
 			BUILD_DIR="$sandbox/build" MAKE_LOG="$sandbox/make.log" \
 			MAKE_CC_LOG="$sandbox/make-cc.log" PATH="$sandbox/bin:$PATH" \
 			REPO_ROOT="$repo_root" sh "$repo_root/scripts/validate.sh" --offline; then
@@ -832,16 +849,16 @@ test_validate_uses_the_kernel_recorded_compiler()
 {
 	sandbox=$workdir/kernel-compiler
 	make_validate_sandbox "$sandbox"
-	mkdir -p "$sandbox/modules/test-kernel/build/include/generated"
-	printf '%s\n' '#define LINUX_COMPILER "test-kernel-gcc 1.0"' > \
-		"$sandbox/modules/test-kernel/build/include/generated/compile.h"
-	cat > "$sandbox/bin/test-kernel-gcc" <<'EOF'
+	mkdir -p "$sandbox/modules/6.18.43-current-rockchip64/build/include/generated"
+	printf '%s\n' '#define LINUX_COMPILER "6.18.43-current-rockchip64-gcc 1.0"' > \
+		"$sandbox/modules/6.18.43-current-rockchip64/build/include/generated/compile.h"
+	cat > "$sandbox/bin/6.18.43-current-rockchip64-gcc" <<'EOF'
 #!/bin/sh
-printf '%s\n' 'test-kernel-gcc 1.0'
+printf '%s\n' '6.18.43-current-rockchip64-gcc 1.0'
 EOF
-	chmod +x "$sandbox/bin/test-kernel-gcc"
+	chmod +x "$sandbox/bin/6.18.43-current-rockchip64-gcc"
 	run_validate "$sandbox"
-	grep -Eq -- "-C $repo_root KDIR=$sandbox/modules/test-kernel/build W=1 modules CC=.*/module-compiler/test-kernel-gcc$" "$sandbox/make.log" ||
+	grep -Eq -- "-C $repo_root KDIR=$sandbox/modules/6.18.43-current-rockchip64/build W=1 modules CC=.*/module-compiler/6.18.43-current-rockchip64-gcc$" "$sandbox/make.log" ||
 		fail 'module build did not use the kernel-recorded compiler'
 	printf 'PASS: kernel-recorded compiler is used\n'
 }
@@ -850,9 +867,9 @@ test_versioned_compiler_is_shimmed_to_the_kernel_recorded_name()
 {
 	sandbox=$workdir/versioned-compiler
 	make_validate_sandbox "$sandbox"
-	mkdir -p "$sandbox/modules/test-kernel/build/include/generated"
+	mkdir -p "$sandbox/modules/6.18.43-current-rockchip64/build/include/generated"
 	printf '%s\n' '#define LINUX_COMPILER "aarch64-linux-gnu-gcc (Debian 14.2.0-19) 14.2.0"' > \
-		"$sandbox/modules/test-kernel/build/include/generated/compile.h"
+		"$sandbox/modules/6.18.43-current-rockchip64/build/include/generated/compile.h"
 	cat > "$sandbox/bin/aarch64-linux-gnu-gcc" <<'EOF'
 #!/bin/sh
 printf '%s\n' 'aarch64-linux-gnu-gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0'
@@ -866,7 +883,7 @@ esac
 EOF
 	chmod +x "$sandbox/bin/aarch64-linux-gnu-gcc" "$sandbox/bin/aarch64-linux-gnu-gcc-14"
 	run_validate "$sandbox"
-	grep -Eq -- "-C $repo_root KDIR=$sandbox/modules/test-kernel/build W=1 modules CC=.*/module-compiler/aarch64-linux-gnu-gcc$" "$sandbox/make.log" ||
+	grep -Eq -- "-C $repo_root KDIR=$sandbox/modules/6.18.43-current-rockchip64/build W=1 modules CC=.*/module-compiler/aarch64-linux-gnu-gcc$" "$sandbox/make.log" ||
 		fail 'versioned compiler was not shimmed to the kernel-recorded name'
 	printf 'PASS: versioned compiler matches the kernel compiler banner\n'
 }
@@ -875,14 +892,14 @@ test_unmatched_kernel_compiler_is_rejected_before_module_build()
 {
 	sandbox=$workdir/unmatched-compiler
 	make_validate_sandbox "$sandbox"
-	mkdir -p "$sandbox/modules/test-kernel/build/include/generated"
-	printf '%s\n' '#define LINUX_COMPILER "test-kernel-gcc (Debian 14.2.0-19) 14.2.0"' > \
-		"$sandbox/modules/test-kernel/build/include/generated/compile.h"
-	cat > "$sandbox/bin/test-kernel-gcc" <<'EOF'
+	mkdir -p "$sandbox/modules/6.18.43-current-rockchip64/build/include/generated"
+	printf '%s\n' '#define LINUX_COMPILER "6.18.43-current-rockchip64-gcc (Debian 14.2.0-19) 14.2.0"' > \
+		"$sandbox/modules/6.18.43-current-rockchip64/build/include/generated/compile.h"
+	cat > "$sandbox/bin/6.18.43-current-rockchip64-gcc" <<'EOF'
 #!/bin/sh
-printf '%s\n' 'test-kernel-gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0'
+printf '%s\n' '6.18.43-current-rockchip64-gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0'
 EOF
-	chmod +x "$sandbox/bin/test-kernel-gcc"
+	chmod +x "$sandbox/bin/6.18.43-current-rockchip64-gcc"
 	if run_validate "$sandbox" > "$sandbox/output" 2>&1; then
 		fail 'validator accepted an unmatched compiler banner'
 	fi
@@ -896,6 +913,7 @@ if [ -n "${TEST_FILTER:-}" ]; then
 	exit 0
 fi
 
+test_validator_rejects_unsupported_kernel_before_build
 test_module_warning_fails_validation
 test_validator_rejects_missing_touch_mapper
 test_validator_rejects_non_executable_touch_mapper

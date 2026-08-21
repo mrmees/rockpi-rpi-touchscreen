@@ -4,6 +4,7 @@ set -eu
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$script_dir/common.sh"
 
+require_supported_kernel_release
 require_root
 require_command awk cat chmod cmp cp date depmod diff dirname dkms find grep head install mkdir mktemp modinfo mv rm sed sha256sum stat tail
 

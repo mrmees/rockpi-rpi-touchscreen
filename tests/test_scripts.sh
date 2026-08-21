@@ -33,7 +33,7 @@ make_sandbox()
 {
 	sandbox=$1
 	mkdir -p "$sandbox/boot/overlay-user" "$sandbox/usr-src" \
-		"$sandbox/modules/test-kernel/build" "$sandbox/bin" \
+		"$sandbox/modules/6.18.43-current-rockchip64/build" "$sandbox/bin" \
 		"$sandbox/etc/X11/xorg.conf.d" "$sandbox/usr-libexec" \
 		"$sandbox/etc/xdg/autostart"
 	cat > "$sandbox/boot/armbianEnv.txt" <<'EOF'
@@ -274,21 +274,21 @@ status)
 			[ -f "${DKMS_TREE:?}/rockpi-rpi-touchscreen-0.2.5/src/display_compat_main.c" ] || exit 35
 			[ -f "${BACKUP_PATH:?}" ] && [ -f "${BACKUP_PATH:?}.sha256" ] || exit 36
 			sha256sum -c "${BACKUP_PATH:?}.sha256" >/dev/null || exit 37
-			cmp "${DKMS_STATE_DIR:?}/rockpi-rpi-touchscreen/0.2.5/test-kernel/aarch64/module/rockpi_rk3399_display_compat.ko" \
-				"${MODULES_DIR:?}/test-kernel/updates/dkms/rockpi_rk3399_display_compat.ko" || exit 33
-			cmp "${DKMS_STATE_DIR:?}/rockpi-rpi-touchscreen/0.2.5/test-kernel/aarch64/module/panel_rockpi_rpi_touchscreen.ko" \
-				"${MODULES_DIR:?}/test-kernel/updates/dkms/panel_rockpi_rpi_touchscreen.ko" || exit 34
-			cmp "${DKMS_STATE_DIR:?}/rockpi-rpi-touchscreen/0.2.5/test-kernel/aarch64/module/raspits_ft5426.ko" \
-				"${MODULES_DIR:?}/test-kernel/updates/dkms/raspits_ft5426.ko" || exit 33
+			cmp "${DKMS_STATE_DIR:?}/rockpi-rpi-touchscreen/0.2.5/6.18.43-current-rockchip64/aarch64/module/rockpi_rk3399_display_compat.ko" \
+				"${MODULES_DIR:?}/6.18.43-current-rockchip64/updates/dkms/rockpi_rk3399_display_compat.ko" || exit 33
+			cmp "${DKMS_STATE_DIR:?}/rockpi-rpi-touchscreen/0.2.5/6.18.43-current-rockchip64/aarch64/module/panel_rockpi_rpi_touchscreen.ko" \
+				"${MODULES_DIR:?}/6.18.43-current-rockchip64/updates/dkms/panel_rockpi_rpi_touchscreen.ko" || exit 34
+			cmp "${DKMS_STATE_DIR:?}/rockpi-rpi-touchscreen/0.2.5/6.18.43-current-rockchip64/aarch64/module/raspits_ft5426.ko" \
+				"${MODULES_DIR:?}/6.18.43-current-rockchip64/updates/dkms/raspits_ft5426.ko" || exit 33
 			cmp "${DKMS_TREE:?}/rockpi-rpi-touchscreen-0.2.5/scripts/map-touchscreen.sh" \
 				"${LIBEXEC_DIR:?}/rockpi-rpi-touchscreen-map-touch" || exit 51
 			cmp "${DKMS_TREE:?}/rockpi-rpi-touchscreen-0.2.5/assets/rockpi-rpi-touchscreen-touch-map.desktop" \
 				"${XDG_AUTOSTART_DIR:?}/rockpi-rpi-touchscreen-touch-map.desktop" || exit 52
 			[ "$(stat -c '%a' "${LIBEXEC_DIR:?}/rockpi-rpi-touchscreen-map-touch")" = 755 ] || exit 53
 			[ "$(stat -c '%a' "${XDG_AUTOSTART_DIR:?}/rockpi-rpi-touchscreen-touch-map.desktop")" = 644 ] || exit 54
-			[ "$(cat "${DKMS_ACTIVE_STATE:?}")" = 'test-kernel|0.2.5' ] || exit 38
+			[ "$(cat "${DKMS_ACTIVE_STATE:?}")" = '6.18.43-current-rockchip64|0.2.5' ] || exit 38
 			if [ -f "${DKMS_INSTALLED_STATE:?}" ] &&
-				grep -Fxq '0.2.4|test-kernel|aarch64' "$DKMS_INSTALLED_STATE"; then
+				grep -Fxq '0.2.4|6.18.43-current-rockchip64|aarch64' "$DKMS_INSTALLED_STATE"; then
 				exit 39
 		fi
 		: > "${DKMS_NEW_ACTIVE_VERIFIED_MARKER:?}"
@@ -404,7 +404,7 @@ if [ -z "$field" ]; then
 fi
 	case $field in
 	license) printf '%s\n' 'GPL v2' ;;
-	vermagic) printf '%s\n' 'test-kernel SMP mod_unload aarch64' ;;
+	vermagic) printf '%s\n' '6.18.43-current-rockchip64 SMP mod_unload aarch64' ;;
 	alias)
 		module_base=${module##*/}
 		module_base=${module_base%.xz}
@@ -559,7 +559,7 @@ if [ "${CP_FAIL_PRIVATE_BOOT_RESTORE:-0}" -eq 1 ]; then
 fi
 if [ -n "${CP_FAIL_SNAPSHOT_MODULE:-}" ]; then
 	case $source_file:$destination_file in
-	*"/modules/test-kernel/"*"/$CP_FAIL_SNAPSHOT_MODULE.ko:"*"/.rockpi-rpi-touchscreen.transaction."*"/prior-modules/"*) exit 29 ;;
+	*"/modules/6.18.43-current-rockchip64/"*"/$CP_FAIL_SNAPSHOT_MODULE.ko:"*"/.rockpi-rpi-touchscreen.transaction."*"/prior-modules/"*) exit 29 ;;
 	esac
 fi
 /bin/cp "$@"
@@ -573,12 +573,12 @@ if [ "${DKMS_CORRUPT_UNINSTALL_STATE_RESTORE:-0}" -eq 1 ]; then
 fi
 if [ "$old_state_restore" -eq 1 ] && [ -n "${DKMS_CORRUPT_OLD_REINSTALL_MODULE:-}" ]; then
 	printf '%s\n' corrupt-old-state-restore > \
-		"$destination_file/test-kernel/aarch64/module/${DKMS_CORRUPT_OLD_REINSTALL_MODULE}.ko"
+		"$destination_file/6.18.43-current-rockchip64/aarch64/module/${DKMS_CORRUPT_OLD_REINSTALL_MODULE}.ko"
 fi
 if [ "$old_state_restore" -eq 1 ] &&
 	[ -n "${DKMS_CORRUPT_COMPRESSED_OLD_ROLLBACK_MODULE:-}" ]; then
 	printf '%s\n' corrupt-compressed-old-build > \
-		"$destination_file/test-kernel/aarch64/module/${DKMS_CORRUPT_COMPRESSED_OLD_ROLLBACK_MODULE}.ko.xz"
+		"$destination_file/6.18.43-current-rockchip64/aarch64/module/${DKMS_CORRUPT_COMPRESSED_OLD_ROLLBACK_MODULE}.ko.xz"
 fi
 EOF
 	chmod +x "$sandbox/bin/cp"
@@ -635,7 +635,7 @@ run_install()
 	protected_before=$(/usr/bin/sha256sum "$protected" | awk '{print $1}')
 	status=0
 	BOOT_DIR="$sandbox/boot" DKMS_TREE="$sandbox/usr-src" \
-	MODULES_DIR="$sandbox/modules" KERNEL_RELEASE=test-kernel \
+	MODULES_DIR="$sandbox/modules" KERNEL_RELEASE=${INSTALL_KERNEL_RELEASE:-6.18.43-current-rockchip64} \
 	LIBEXEC_DIR="$sandbox/usr-libexec" XDG_AUTOSTART_DIR="$sandbox/etc/xdg/autostart" \
 	BUILD_DIR="$sandbox/build" BACKUP_PATH="$sandbox/boot/armbianEnv.txt.rockpi-rpi-touchscreen.bak" \
 	VALIDATE_SCRIPT="$validator" VALIDATE_LOG="$sandbox/validate.log" \
@@ -657,15 +657,35 @@ run_install()
 	return "$status"
 }
 
+test_installer_rejects_unsupported_kernel_before_validation_or_mutation()
+{
+	sandbox=$workdir/unsupported-install-kernel
+	make_sandbox "$sandbox"
+	supported=6.18.43-current-rockchip64
+	unsupported=$supported-extra
+	before=$(cat "$sandbox/boot/armbianEnv.txt")
+	if INSTALL_KERNEL_RELEASE=$unsupported \
+		run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+		fail 'installer accepted an unsupported kernel release'
+	fi
+	grep -Fq "unsupported kernel release: $unsupported (expected $supported)" "$sandbox/output" ||
+		fail 'installer did not report the exact supported-kernel boundary'
+	[ ! -e "$sandbox/validate.log" ] || fail 'unsupported install kernel reached validation'
+	[ ! -s "$sandbox/dkms.log" ] || fail 'unsupported install kernel reached DKMS mutation'
+	assert_equal "$(cat "$sandbox/boot/armbianEnv.txt")" "$before" \
+		'unsupported install kernel changed boot configuration'
+	printf 'PASS: installer rejects unsupported kernels before validation or mutation\n'
+}
+
 assert_module_matches_build()
 {
 	sandbox=$1
 	version=$2
 	module=$3
-	built=$(find "$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/$version/test-kernel/aarch64/module" \
+	built=$(find "$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/$version/6.18.43-current-rockchip64/aarch64/module" \
 		-type f \( -name "$module.ko" -o -name "$module.ko.xz" -o -name "$module.ko.gz" \
 		-o -name "$module.ko.zst" \) -print | head -n 1)
-	installed=$(find "$sandbox/modules/test-kernel/updates/dkms" \
+	installed=$(find "$sandbox/modules/6.18.43-current-rockchip64/updates/dkms" \
 		-type f \( -name "$module.ko" -o -name "$module.ko.xz" -o -name "$module.ko.gz" \
 		-o -name "$module.ko.zst" \) -print | head -n 1)
 	[ -n "$built" ] && [ -f "$built" ] || fail "missing built module: $module"
@@ -762,14 +782,14 @@ refresh_dependency_indexes()
 {
 	sandbox=$1
 	DEPMOD_LOG="$sandbox/depmod.log" MODULES_DIR="$sandbox/modules" DEPMOD_INTERNAL=1 \
-		PATH="$sandbox/bin:$PATH" "$sandbox/bin/depmod" -a test-kernel
+		PATH="$sandbox/bin:$PATH" "$sandbox/bin/depmod" -a 6.18.43-current-rockchip64
 }
 
 indexed_module_path()
 {
 	sandbox=$1
 	module=$2
-	MODULES_DIR="$sandbox/modules" "$sandbox/bin/modinfo" -k test-kernel -n "$module"
+	MODULES_DIR="$sandbox/modules" "$sandbox/bin/modinfo" -k 6.18.43-current-rockchip64 -n "$module"
 }
 
 run_uninstall()
@@ -780,7 +800,7 @@ run_uninstall()
 	protected_before=$(/usr/bin/sha256sum "$protected" | awk '{print $1}')
 	status=0
 	BOOT_DIR="$sandbox/boot" DKMS_TREE="$sandbox/usr-src" \
-	MODULES_DIR="$sandbox/modules" KERNEL_RELEASE=test-kernel \
+	MODULES_DIR="$sandbox/modules" KERNEL_RELEASE=6.18.43-current-rockchip64 \
 	LIBEXEC_DIR="$sandbox/usr-libexec" XDG_AUTOSTART_DIR="$sandbox/etc/xdg/autostart" \
 	DKMS_LOG="$sandbox/dkms.log" \
 	DKMS_ADDED_STATE="$sandbox/dkms-added.state" DKMS_BUILT_STATE="$sandbox/dkms-built.state" \
@@ -1419,9 +1439,9 @@ test_installer_rejects_built_only_dkms_status()
 	grep -Fq 'DKMS did not report exact installed state' "$sandbox/output" ||
 		fail 'installer did not explain the exact installed-state requirement'
 	assert_file_absent "$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5"
-	assert_file_absent "$sandbox/modules/test-kernel/updates/dkms/rockpi_rk3399_display_compat.ko"
-	assert_file_absent "$sandbox/modules/test-kernel/updates/dkms/raspits_ft5426.ko"
-	assert_file_absent "$sandbox/modules/test-kernel/updates/dkms/panel_rockpi_rpi_touchscreen.ko"
+	assert_file_absent "$sandbox/modules/6.18.43-current-rockchip64/updates/dkms/rockpi_rk3399_display_compat.ko"
+	assert_file_absent "$sandbox/modules/6.18.43-current-rockchip64/updates/dkms/raspits_ft5426.ko"
+	assert_file_absent "$sandbox/modules/6.18.43-current-rockchip64/updates/dkms/panel_rockpi_rpi_touchscreen.ko"
 	printf 'PASS: installer rejects added or built DKMS status as installed\n'
 }
 
@@ -1467,7 +1487,7 @@ test_install_owns_verified_runtime_assets()
 	output=$(run_install "$sandbox" "$sandbox/validate-pass.sh")
 	assert_runtime_assets_match_source "$sandbox"
 	assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.5)" \
-		'rockpi-rpi-touchscreen/0.2.5, test-kernel, aarch64: installed' \
+		'rockpi-rpi-touchscreen/0.2.5, 6.18.43-current-rockchip64, aarch64: installed' \
 		'new DKMS release did not reach exact installed state'
 	assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.4)" '' \
 		'old DKMS lifecycle unexpectedly remained'
@@ -1849,9 +1869,9 @@ assert_failed_uninstall_restored()
 	[ -f "$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5/dkms.conf" ] ||
 		fail 'post-removal uninstall failure did not restore source'
 	assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.5)" \
-		'rockpi-rpi-touchscreen/0.2.5, test-kernel, aarch64: installed' \
+		'rockpi-rpi-touchscreen/0.2.5, 6.18.43-current-rockchip64, aarch64: installed' \
 		'post-removal uninstall failure did not restore exact DKMS lifecycle'
-	assert_equal "$(cat "$sandbox/dkms-active.state")" 'test-kernel|0.2.5' \
+	assert_equal "$(cat "$sandbox/dkms-active.state")" '6.18.43-current-rockchip64|0.2.5' \
 		'post-removal uninstall failure did not restore active version'
 	assert_module_matches_build "$sandbox" 0.2.5 rockpi_rk3399_display_compat
 	assert_module_matches_build "$sandbox" 0.2.5 panel_rockpi_rpi_touchscreen
@@ -2013,23 +2033,23 @@ EOF
 	printf '%s\n' 'old touch source' > "$old/src/raspits_ft5426.c"
 	printf '%s\n' 'old panel source' > "$old/src/panel_rockpi_rpi_touchscreen.c"
 	printf '%s\n' '0.2.4' > "$sandbox/dkms-added.state"
-	printf '%s\n' '0.2.4|test-kernel|aarch64' > "$sandbox/dkms-built.state"
-	printf '%s\n' '0.2.4|test-kernel|aarch64' > "$sandbox/dkms-installed.state"
-	printf '%s\n' 'test-kernel|0.2.4' > "$sandbox/dkms-active.state"
-	mkdir -p "$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.4/test-kernel/aarch64/module" \
-		"$sandbox/modules/test-kernel/updates/dkms"
+	printf '%s\n' '0.2.4|6.18.43-current-rockchip64|aarch64' > "$sandbox/dkms-built.state"
+	printf '%s\n' '0.2.4|6.18.43-current-rockchip64|aarch64' > "$sandbox/dkms-installed.state"
+	printf '%s\n' '6.18.43-current-rockchip64|0.2.4' > "$sandbox/dkms-active.state"
+	mkdir -p "$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.4/6.18.43-current-rockchip64/aarch64/module" \
+		"$sandbox/modules/6.18.43-current-rockchip64/updates/dkms"
 	printf '%s\n' 'old-provider-module' > \
-		"$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.4/test-kernel/aarch64/module/rockpi_rk3399_display_compat.ko"
+		"$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.4/6.18.43-current-rockchip64/aarch64/module/rockpi_rk3399_display_compat.ko"
 	printf '%s\n' 'old-panel-module' > \
-		"$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.4/test-kernel/aarch64/module/panel_rockpi_rpi_touchscreen.ko"
+		"$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.4/6.18.43-current-rockchip64/aarch64/module/panel_rockpi_rpi_touchscreen.ko"
 	printf '%s\n' 'old-touch-module' > \
-		"$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.4/test-kernel/aarch64/module/raspits_ft5426.ko"
-	cp "$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.4/test-kernel/aarch64/module/rockpi_rk3399_display_compat.ko" \
-		"$sandbox/modules/test-kernel/updates/dkms/rockpi_rk3399_display_compat.ko"
-	cp "$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.4/test-kernel/aarch64/module/panel_rockpi_rpi_touchscreen.ko" \
-		"$sandbox/modules/test-kernel/updates/dkms/panel_rockpi_rpi_touchscreen.ko"
-	cp "$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.4/test-kernel/aarch64/module/raspits_ft5426.ko" \
-		"$sandbox/modules/test-kernel/updates/dkms/raspits_ft5426.ko"
+		"$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.4/6.18.43-current-rockchip64/aarch64/module/raspits_ft5426.ko"
+	cp "$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.4/6.18.43-current-rockchip64/aarch64/module/rockpi_rk3399_display_compat.ko" \
+		"$sandbox/modules/6.18.43-current-rockchip64/updates/dkms/rockpi_rk3399_display_compat.ko"
+	cp "$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.4/6.18.43-current-rockchip64/aarch64/module/panel_rockpi_rpi_touchscreen.ko" \
+		"$sandbox/modules/6.18.43-current-rockchip64/updates/dkms/panel_rockpi_rpi_touchscreen.ko"
+	cp "$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.4/6.18.43-current-rockchip64/aarch64/module/raspits_ft5426.ko" \
+		"$sandbox/modules/6.18.43-current-rockchip64/updates/dkms/raspits_ft5426.ko"
 	printf '%s\n' 'prior-dtbo' > "$sandbox/boot/overlay-user/rockpi-4b-plus-rpi-touchscreen.dtbo"
 	refresh_dependency_indexes "$sandbox"
 }
@@ -2038,8 +2058,8 @@ compress_old_release_artifacts()
 {
 	sandbox=$1
 	for module in rockpi_rk3399_display_compat panel_rockpi_rpi_touchscreen raspits_ft5426; do
-		built=$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.4/test-kernel/aarch64/module/$module.ko
-		installed=$sandbox/modules/test-kernel/updates/dkms/$module.ko
+		built=$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.4/6.18.43-current-rockchip64/aarch64/module/$module.ko
+		installed=$sandbox/modules/6.18.43-current-rockchip64/updates/dkms/$module.ko
 		xz -c "$built" > "$built.xz"
 		gzip -c "$installed" > "$installed.gz"
 		rm -f "$built" "$installed"
@@ -2061,9 +2081,9 @@ capture_migration_baseline()
 {
 	sandbox=$1
 	MIGRATION_OLD_SOURCE_DIGEST=$(source_tree_digest "$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.4")
-	MIGRATION_PROVIDER_CHECKSUM=$(/usr/bin/sha256sum "$sandbox/modules/test-kernel/updates/dkms/rockpi_rk3399_display_compat.ko" | awk '{print $1}')
-	MIGRATION_PANEL_CHECKSUM=$(/usr/bin/sha256sum "$sandbox/modules/test-kernel/updates/dkms/panel_rockpi_rpi_touchscreen.ko" | awk '{print $1}')
-	MIGRATION_TOUCH_CHECKSUM=$(/usr/bin/sha256sum "$sandbox/modules/test-kernel/updates/dkms/raspits_ft5426.ko" | awk '{print $1}')
+	MIGRATION_PROVIDER_CHECKSUM=$(/usr/bin/sha256sum "$sandbox/modules/6.18.43-current-rockchip64/updates/dkms/rockpi_rk3399_display_compat.ko" | awk '{print $1}')
+	MIGRATION_PANEL_CHECKSUM=$(/usr/bin/sha256sum "$sandbox/modules/6.18.43-current-rockchip64/updates/dkms/panel_rockpi_rpi_touchscreen.ko" | awk '{print $1}')
+	MIGRATION_TOUCH_CHECKSUM=$(/usr/bin/sha256sum "$sandbox/modules/6.18.43-current-rockchip64/updates/dkms/raspits_ft5426.ko" | awk '{print $1}')
 	MIGRATION_BOOT_CHECKSUM=$(/usr/bin/sha256sum "$sandbox/boot/armbianEnv.txt" | awk '{print $1}')
 	MIGRATION_DTBO_CHECKSUM=$(/usr/bin/sha256sum "$sandbox/boot/overlay-user/rockpi-4b-plus-rpi-touchscreen.dtbo" | awk '{print $1}')
 }
@@ -2076,19 +2096,19 @@ assert_clean_failed_migration_restored()
 		fail 'ordinary failure did not complete a clean 0.2.4 rollback'
 	fi
 	assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.4)" \
-		'rockpi-rpi-touchscreen/0.2.4, test-kernel, aarch64: installed' \
+		'rockpi-rpi-touchscreen/0.2.4, 6.18.43-current-rockchip64, aarch64: installed' \
 		'failure did not restore exact old DKMS lifecycle'
 	assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.5)" '' \
 		'failure retained the new DKMS lifecycle'
-	assert_equal "$(cat "$sandbox/dkms-active.state")" 'test-kernel|0.2.4' \
+	assert_equal "$(cat "$sandbox/dkms-active.state")" '6.18.43-current-rockchip64|0.2.4' \
 		'failure did not reactivate the old target-kernel version'
 	assert_equal "$(source_tree_digest "$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.4")" \
 		"$MIGRATION_OLD_SOURCE_DIGEST" 'failure changed the old source tree'
-	assert_equal "$(/usr/bin/sha256sum "$sandbox/modules/test-kernel/updates/dkms/rockpi_rk3399_display_compat.ko" | awk '{print $1}')" \
+	assert_equal "$(/usr/bin/sha256sum "$sandbox/modules/6.18.43-current-rockchip64/updates/dkms/rockpi_rk3399_display_compat.ko" | awk '{print $1}')" \
 		"$MIGRATION_PROVIDER_CHECKSUM" 'failure changed old provider module bytes'
-	assert_equal "$(/usr/bin/sha256sum "$sandbox/modules/test-kernel/updates/dkms/panel_rockpi_rpi_touchscreen.ko" | awk '{print $1}')" \
+	assert_equal "$(/usr/bin/sha256sum "$sandbox/modules/6.18.43-current-rockchip64/updates/dkms/panel_rockpi_rpi_touchscreen.ko" | awk '{print $1}')" \
 		"$MIGRATION_PANEL_CHECKSUM" 'failure changed old panel module bytes'
-	assert_equal "$(/usr/bin/sha256sum "$sandbox/modules/test-kernel/updates/dkms/raspits_ft5426.ko" | awk '{print $1}')" \
+	assert_equal "$(/usr/bin/sha256sum "$sandbox/modules/6.18.43-current-rockchip64/updates/dkms/raspits_ft5426.ko" | awk '{print $1}')" \
 		"$MIGRATION_TOUCH_CHECKSUM" 'failure changed old touch module bytes'
 	assert_module_matches_build "$sandbox" 0.2.4 rockpi_rk3399_display_compat
 	assert_module_matches_build "$sandbox" 0.2.4 panel_rockpi_rpi_touchscreen
@@ -2113,7 +2133,7 @@ prepare_current_release_lifecycle()
 	make_sandbox "$sandbox"
 	run_install "$sandbox" "$sandbox/validate-pass.sh"
 	rm -f "$sandbox/dkms-installed.state" "$sandbox/dkms-active.state"
-	find "$sandbox/modules/test-kernel" -type f \
+	find "$sandbox/modules/6.18.43-current-rockchip64" -type f \
 		\( -name 'rockpi_rk3399_display_compat.ko*' \
 		-o -name 'panel_rockpi_rpi_touchscreen.ko*' \
 		-o -name 'raspits_ft5426.ko*' \) -delete
@@ -2200,9 +2220,9 @@ test_corrupt_compressed_old_preflight_fails_closed()
 	seed_old_release "$sandbox"
 	compress_old_release_artifacts "$sandbox"
 	printf '%s\n' corrupt-xz > \
-		"$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.4/test-kernel/aarch64/module/panel_rockpi_rpi_touchscreen.ko.xz"
+		"$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.4/6.18.43-current-rockchip64/aarch64/module/panel_rockpi_rpi_touchscreen.ko.xz"
 	printf '%s\n' corrupt-gzip > \
-		"$sandbox/modules/test-kernel/updates/dkms/panel_rockpi_rpi_touchscreen.ko.gz"
+		"$sandbox/modules/6.18.43-current-rockchip64/updates/dkms/panel_rockpi_rpi_touchscreen.ko.gz"
 	if run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
 		fail 'installer accepted two failed old compressed checksum operations as equal'
 	fi
@@ -2210,7 +2230,7 @@ test_corrupt_compressed_old_preflight_fails_closed()
 		"$sandbox/output" || fail 'installer did not report the corrupt compressed old build artifact'
 	assert_file_absent "$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5"
 	assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.4)" \
-		'rockpi-rpi-touchscreen/0.2.4, test-kernel, aarch64: installed' \
+		'rockpi-rpi-touchscreen/0.2.4, 6.18.43-current-rockchip64, aarch64: installed' \
 		'corrupt compressed preflight changed the old lifecycle'
 	printf 'PASS: corrupt compressed old preflight fails closed before mutation\n'
 }
@@ -2269,9 +2289,9 @@ test_zstd_only_new_artifacts_are_verified()
 	DKMS_BUILD_COMPRESSION=zst DKMS_INSTALL_COMPRESSION=same \
 		run_install "$sandbox" "$sandbox/validate-pass.sh"
 	for module in rockpi_rk3399_display_compat panel_rockpi_rpi_touchscreen raspits_ft5426; do
-		[ -f "$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.5/test-kernel/aarch64/module/$module.ko.zst" ] ||
+		[ -f "$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.5/6.18.43-current-rockchip64/aarch64/module/$module.ko.zst" ] ||
 			fail "missing zstd-only DKMS build artifact: $module"
-		[ -f "$sandbox/modules/test-kernel/updates/dkms/$module.ko.zst" ] ||
+		[ -f "$sandbox/modules/6.18.43-current-rockchip64/updates/dkms/$module.ko.zst" ] ||
 			fail "missing zstd-only installed artifact: $module"
 		PATH="$sandbox/bin:$PATH" ZSTD_LOG="$sandbox/zstd.log" \
 			assert_module_matches_build "$sandbox" 0.2.5 "$module"
@@ -2289,11 +2309,11 @@ test_migration_removes_old_release_only_after_success_and_ordered_verification()
 	DKMS_REQUIRE_NEW_STATE_BEFORE_OLD_REMOVE=1 run_install "$sandbox" "$sandbox/validate-pass.sh"
 	assert_file_absent "$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.4"
 	assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.5)" \
-		'rockpi-rpi-touchscreen/0.2.5, test-kernel, aarch64: installed' \
+		'rockpi-rpi-touchscreen/0.2.5, 6.18.43-current-rockchip64, aarch64: installed' \
 		'new DKMS version did not reach exact installed state'
 	assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.4)" '' \
 		'old DKMS lifecycle remained after successful migration'
-	assert_equal "$(cat "$sandbox/dkms-active.state")" 'test-kernel|0.2.5' \
+	assert_equal "$(cat "$sandbox/dkms-active.state")" '6.18.43-current-rockchip64|0.2.5' \
 		'new DKMS version is not the sole active target-kernel version'
 	[ -f "$sandbox/dkms-new-active-verified.marker" ] ||
 		fail 'migration did not prove old installed tuple was deactivated before removal'
@@ -2320,7 +2340,7 @@ test_old_release_retires_only_after_runtime_assets_verify()
 	[ -f "$sandbox/dkms-new-active-verified.marker" ] ||
 		fail 'old retirement did not verify runtime assets first'
 	assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.5)" \
-		'rockpi-rpi-touchscreen/0.2.5, test-kernel, aarch64: installed' \
+		'rockpi-rpi-touchscreen/0.2.5, 6.18.43-current-rockchip64, aarch64: installed' \
 		'new DKMS lifecycle was not exact after runtime verification'
 	assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.4)" '' \
 		'old DKMS lifecycle remained after runtime verification'
@@ -2374,9 +2394,9 @@ test_install_add_mutate_then_fail_restores_absent_baseline()
 		'mutate-then-fail DKMS add did not restore the absent registration baseline'
 	assert_file_absent "$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5"
 	assert_file_absent "$sandbox/boot/overlay-user/rockpi-4b-plus-rpi-touchscreen.dtbo"
-	assert_file_absent "$sandbox/modules/test-kernel/updates/dkms/rockpi_rk3399_display_compat.ko"
-	assert_file_absent "$sandbox/modules/test-kernel/updates/dkms/raspits_ft5426.ko"
-	assert_file_absent "$sandbox/modules/test-kernel/updates/dkms/panel_rockpi_rpi_touchscreen.ko"
+	assert_file_absent "$sandbox/modules/6.18.43-current-rockchip64/updates/dkms/rockpi_rk3399_display_compat.ko"
+	assert_file_absent "$sandbox/modules/6.18.43-current-rockchip64/updates/dkms/raspits_ft5426.ko"
+	assert_file_absent "$sandbox/modules/6.18.43-current-rockchip64/updates/dkms/panel_rockpi_rpi_touchscreen.ko"
 	assert_equal "$(sha256sum "$sandbox/boot/armbianEnv.txt" | awk '{print $1}')" "$config_before" \
 		'mutate-then-fail DKMS add changed boot configuration'
 	grep -Fqx 'remove -m rockpi-rpi-touchscreen -v 0.2.5 --all' "$sandbox/dkms.log" ||
@@ -2390,7 +2410,7 @@ test_invalid_old_installed_checksum_blocks_migration()
 	make_sandbox "$sandbox"
 	seed_old_release "$sandbox"
 	printf '%s\n' 'corrupt-old-touch-module' > \
-		"$sandbox/modules/test-kernel/updates/dkms/raspits_ft5426.ko"
+		"$sandbox/modules/6.18.43-current-rockchip64/updates/dkms/raspits_ft5426.ko"
 	if run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
 		fail 'installer migrated from an invalid old installed checksum'
 	fi
@@ -2398,7 +2418,7 @@ test_invalid_old_installed_checksum_blocks_migration()
 		fail 'installer did not explain the invalid old rollback baseline'
 	assert_file_absent "$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5"
 	assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.4)" \
-		'rockpi-rpi-touchscreen/0.2.4, test-kernel, aarch64: installed' \
+		'rockpi-rpi-touchscreen/0.2.4, 6.18.43-current-rockchip64, aarch64: installed' \
 		'invalid old checksum preflight changed old lifecycle state'
 	printf 'PASS: invalid old installed checksum blocks migration before mutation\n'
 }
@@ -2409,7 +2429,7 @@ test_invalid_old_provider_checksum_blocks_migration()
 	make_sandbox "$sandbox"
 	seed_old_release "$sandbox"
 	printf '%s\n' 'corrupt-old-provider-module' > \
-		"$sandbox/modules/test-kernel/updates/dkms/rockpi_rk3399_display_compat.ko"
+		"$sandbox/modules/6.18.43-current-rockchip64/updates/dkms/rockpi_rk3399_display_compat.ko"
 	if run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
 		fail 'installer migrated from an invalid old provider checksum'
 	fi
@@ -2417,7 +2437,7 @@ test_invalid_old_provider_checksum_blocks_migration()
 		"$sandbox/output" || fail 'installer did not explain the invalid old provider baseline'
 	assert_file_absent "$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5"
 	assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.4)" \
-		'rockpi-rpi-touchscreen/0.2.4, test-kernel, aarch64: installed' \
+		'rockpi-rpi-touchscreen/0.2.4, 6.18.43-current-rockchip64, aarch64: installed' \
 		'invalid old provider checksum preflight changed old lifecycle state'
 	printf 'PASS: invalid old provider checksum blocks migration before mutation\n'
 }
@@ -2428,7 +2448,7 @@ test_invalid_old_panel_checksum_blocks_migration()
 	make_sandbox "$sandbox"
 	seed_old_release "$sandbox"
 	printf '%s\n' 'corrupt-old-panel-module' > \
-		"$sandbox/modules/test-kernel/updates/dkms/panel_rockpi_rpi_touchscreen.ko"
+		"$sandbox/modules/6.18.43-current-rockchip64/updates/dkms/panel_rockpi_rpi_touchscreen.ko"
 	if run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
 		fail 'installer migrated from an invalid old panel checksum'
 	fi
@@ -2436,7 +2456,7 @@ test_invalid_old_panel_checksum_blocks_migration()
 		"$sandbox/output" || fail 'installer did not explain the invalid old panel baseline'
 	assert_file_absent "$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5"
 	assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.4)" \
-		'rockpi-rpi-touchscreen/0.2.4, test-kernel, aarch64: installed' \
+		'rockpi-rpi-touchscreen/0.2.4, 6.18.43-current-rockchip64, aarch64: installed' \
 		'invalid old panel checksum preflight changed old lifecycle state'
 	printf 'PASS: invalid old panel checksum blocks migration before mutation\n'
 }
@@ -2496,7 +2516,7 @@ test_third_module_install_failure_restores_every_old_module_path()
 	sandbox=$workdir/migration-third-module-extra-path
 	make_sandbox "$sandbox"
 	seed_old_release "$sandbox"
-	extra_old_module=$sandbox/modules/test-kernel/weak-updates/raspits_ft5426.ko.xz
+	extra_old_module=$sandbox/modules/6.18.43-current-rockchip64/weak-updates/raspits_ft5426.ko.xz
 	mkdir -p "$(dirname -- "$extra_old_module")"
 	printf '%s\n' 'old-compressed-touch-module' > "$extra_old_module"
 	extra_old_checksum=$(/usr/bin/sha256sum "$extra_old_module" | awk '{print $1}')
@@ -2506,7 +2526,7 @@ test_third_module_install_failure_restores_every_old_module_path()
 		fail 'installer accepted failure while installing the third module'
 	fi
 	assert_clean_failed_migration_restored "$sandbox" "$sandbox/output"
-	grep -Fqx 'install -m rockpi-rpi-touchscreen -v 0.2.4 -k test-kernel' "$sandbox/dkms.log" ||
+	grep -Fqx 'install -m rockpi-rpi-touchscreen -v 0.2.4 -k 6.18.43-current-rockchip64' "$sandbox/dkms.log" ||
 		fail 'rollback did not reinstall old target-kernel version through DKMS'
 	assert_equal "$(/usr/bin/sha256sum "$extra_old_module" | awk '{print $1}')" "$extra_old_checksum" \
 		'third-module failure did not restore every prior touch module path'
@@ -2528,7 +2548,7 @@ test_failed_new_registration_removal_retains_recovery_source()
 	[ -f "$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5/dkms.conf" ] ||
 		fail 'failed rollback removal stranded new registration without its source'
 	assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.4)" \
-		'rockpi-rpi-touchscreen/0.2.4, test-kernel, aarch64: installed' \
+		'rockpi-rpi-touchscreen/0.2.4, 6.18.43-current-rockchip64, aarch64: installed' \
 		'failed rollback removal lost exact old installed state'
 	[ -n "$(sandbox_dkms_status "$sandbox" 0.2.5)" ] || fail 'test did not retain failed new registration'
 	grep -Fq "new source retained at $sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5" "$output" ||
@@ -2595,7 +2615,7 @@ test_old_status_failure_retains_source_and_does_not_claim_success()
 	[ -f "$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.4/dkms.conf" ] ||
 		fail 'status failure removed old source'
 	assert_equal "$(DKMS_STATUS_FAIL_VERSION= sandbox_dkms_status "$sandbox" 0.2.4)" \
-		'rockpi-rpi-touchscreen/0.2.4, test-kernel, aarch64: installed' \
+		'rockpi-rpi-touchscreen/0.2.4, 6.18.43-current-rockchip64, aarch64: installed' \
 		'status failure changed old lifecycle state'
 	! grep -Fq 'PASS: installed' "$output" || fail 'status failure printed unconditional install success'
 	grep -Fq 'cannot verify old DKMS state; retained' "$output" ||
@@ -2627,8 +2647,8 @@ test_install_rollback_refreshes_dependency_indexes_after_path_suffix_restore()
 	sandbox=$workdir/install-depmod-path-restore
 	make_sandbox "$sandbox"
 	seed_old_release "$sandbox"
-	installed=$sandbox/modules/test-kernel/updates/dkms/raspits_ft5426.ko
-	restored=$sandbox/modules/test-kernel/weak-updates/raspits_ft5426.ko.xz
+	installed=$sandbox/modules/6.18.43-current-rockchip64/updates/dkms/raspits_ft5426.ko
+	restored=$sandbox/modules/6.18.43-current-rockchip64/weak-updates/raspits_ft5426.ko.xz
 	mkdir -p "$(dirname -- "$restored")"
 	xz -c "$installed" > "$restored"
 	rm -f "$installed"
@@ -2642,12 +2662,12 @@ test_install_rollback_refreshes_dependency_indexes_after_path_suffix_restore()
 	fi
 	assert_equal "$(indexed_module_path "$sandbox" raspits_ft5426)" "$restored" \
 		'install rollback dependency index does not resolve the restored compressed touch module'
-	grep -Fqx 'weak-updates/raspits_ft5426.ko.xz:' "$sandbox/modules/test-kernel/modules.dep" ||
+	grep -Fqx 'weak-updates/raspits_ft5426.ko.xz:' "$sandbox/modules/6.18.43-current-rockchip64/modules.dep" ||
 		fail 'install rollback modules.dep does not contain the exact restored suffix and path'
 	grep -Fqx 'alias fake:weak-updates/raspits_ft5426.ko.xz:' \
-		"$sandbox/modules/test-kernel/modules.alias" ||
+		"$sandbox/modules/6.18.43-current-rockchip64/modules.alias" ||
 		fail 'install rollback modules.alias was not regenerated for the restored touch path'
-	grep -Fqx 'internal=0 args=-a test-kernel' "$sandbox/depmod.log" ||
+	grep -Fqx 'internal=0 args=-a 6.18.43-current-rockchip64' "$sandbox/depmod.log" ||
 		fail 'install rollback did not invoke depmod -a for the target kernel'
 	printf 'PASS: install rollback refreshes dependency indexes after exact raw path restore\n'
 }
@@ -2656,8 +2676,8 @@ test_uninstall_rollback_refreshes_dependency_indexes_after_path_suffix_restore()
 {
 	sandbox=$workdir/uninstall-depmod-path-restore
 	prepare_uninstall_failure "$sandbox"
-	installed=$sandbox/modules/test-kernel/updates/dkms/rockpi_rk3399_display_compat.ko
-	restored=$sandbox/modules/test-kernel/weak-updates/rockpi_rk3399_display_compat.ko.gz
+	installed=$sandbox/modules/6.18.43-current-rockchip64/updates/dkms/rockpi_rk3399_display_compat.ko
+	restored=$sandbox/modules/6.18.43-current-rockchip64/weak-updates/rockpi_rk3399_display_compat.ko.gz
 	mkdir -p "$(dirname -- "$restored")"
 	gzip -c "$installed" > "$restored"
 	rm -f "$installed"
@@ -2671,12 +2691,12 @@ test_uninstall_rollback_refreshes_dependency_indexes_after_path_suffix_restore()
 	assert_equal "$(indexed_module_path "$sandbox" rockpi_rk3399_display_compat)" "$restored" \
 		'uninstall rollback dependency index does not resolve the restored compressed provider'
 	grep -Fqx 'weak-updates/rockpi_rk3399_display_compat.ko.gz:' \
-		"$sandbox/modules/test-kernel/modules.dep" ||
+		"$sandbox/modules/6.18.43-current-rockchip64/modules.dep" ||
 		fail 'uninstall rollback modules.dep does not contain the exact restored suffix and path'
 	grep -Fqx 'alias fake:weak-updates/rockpi_rk3399_display_compat.ko.gz:' \
-		"$sandbox/modules/test-kernel/modules.alias" ||
+		"$sandbox/modules/6.18.43-current-rockchip64/modules.alias" ||
 		fail 'uninstall rollback modules.alias was not regenerated for the restored provider path'
-	grep -Fqx 'internal=0 args=-a test-kernel' "$sandbox/depmod.log" ||
+	grep -Fqx 'internal=0 args=-a 6.18.43-current-rockchip64' "$sandbox/depmod.log" ||
 		fail 'uninstall rollback did not invoke depmod -a for the target kernel'
 	printf 'PASS: uninstall rollback refreshes dependency indexes after exact raw path restore\n'
 }
@@ -2704,7 +2724,7 @@ test_depmod_rollback_failures_retain_and_report_recovery()
 			recovery_pattern='.rockpi-rpi-touchscreen.uninstall.*'
 			;;
 		esac
-		grep -Fq 'dependency index refresh failed for test-kernel' "$sandbox/output" ||
+		grep -Fq 'dependency index refresh failed for 6.18.43-current-rockchip64' "$sandbox/output" ||
 			fail "$operation rollback did not report the failed target-kernel depmod refresh"
 		grep -Fq 'rollback also failed' "$sandbox/output" ||
 			fail "$operation rollback did not fail closed after depmod failed"
@@ -2778,7 +2798,7 @@ prepare_exact_uninstall_lifecycle()
 	installed) ;;
 	built)
 		rm -f "$sandbox/dkms-installed.state" "$sandbox/dkms-active.state"
-		find "$sandbox/modules/test-kernel" -type f \
+		find "$sandbox/modules/6.18.43-current-rockchip64" -type f \
 			\( -name 'rockpi_rk3399_display_compat.ko*' \
 			-o -name 'panel_rockpi_rpi_touchscreen.ko*' \
 			-o -name 'raspits_ft5426.ko*' \) -delete
@@ -2788,7 +2808,7 @@ prepare_exact_uninstall_lifecycle()
 		rm -f "$sandbox/dkms-built.state" "$sandbox/dkms-installed.state" \
 			"$sandbox/dkms-active.state"
 		rm -rf "$sandbox/var-lib-dkms/rockpi-rpi-touchscreen/0.2.5"
-		find "$sandbox/modules/test-kernel" -type f \
+		find "$sandbox/modules/6.18.43-current-rockchip64" -type f \
 			\( -name 'rockpi_rk3399_display_compat.ko*' \
 			-o -name 'panel_rockpi_rpi_touchscreen.ko*' \
 			-o -name 'raspits_ft5426.ko*' \) -delete
@@ -2851,6 +2871,7 @@ if [ -n "${TEST_FILTER:-}" ]; then
 fi
 
 test_install_is_idempotent_and_preserves_unrelated_boot_text
+test_installer_rejects_unsupported_kernel_before_validation_or_mutation
 test_install_handoff_requires_authorized_dsi_first_acceptance
 test_dkms_make_command_suppresses_automatic_kernelrelease
 test_uninstall_removes_only_project_token_and_dry_run_is_scoped
