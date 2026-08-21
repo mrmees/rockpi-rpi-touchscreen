@@ -8,6 +8,23 @@ require_supported_kernel_release
 require_root
 require_command awk cat chmod cmp cp date depmod diff dirname dkms find grep head install ln mkdir mktemp modinfo mv rm sed sha256sum stat tail
 
+if ! capture_protected_xorg_attestation; then
+	die "$protected_xorg_error"
+fi
+
+attest_pretransaction_exit()
+{
+	pretransaction_status=$?
+	trap - EXIT HUP INT TERM
+	if ! attest_protected_xorg_unchanged; then
+		printf 'ERROR: transaction stopped with status %s; protected Xorg attestation failed: %s\n' \
+			"$pretransaction_status" "$protected_xorg_error" >&2
+		exit 1
+	fi
+	exit "$pretransaction_status"
+}
+trap attest_pretransaction_exit EXIT HUP INT TERM
+
 module_content_checksum()
 {
 	module_file=$1
@@ -319,6 +336,7 @@ rollback()
 	trap - EXIT HUP INT TERM
 	rollback_failed=0
 	rollback_note=
+	protected_xorg_attestation_failed=0
 	new_source_retained=0
 	if [ "$completed" -ne 1 ]; then
 		if [ "$runtime_publication_ambiguous" -eq 1 ]; then
@@ -520,12 +538,31 @@ rollback()
 			rollback_note="$rollback_note transaction recovery cleanup failed: $recovery_directory;"
 		fi
 	fi
+	if ! attest_protected_xorg_unchanged; then
+		protected_xorg_attestation_failed=1
+	fi
+	if [ "$completed" -eq 1 ]; then
+		if [ "$protected_xorg_attestation_failed" -eq 1 ]; then
+			printf 'ERROR: installation committed, but protected Xorg attestation failed: %s\n' \
+				"$protected_xorg_error" >&2
+			exit 1
+		fi
+		exit "$transaction_status"
+	fi
 	if [ "$rollback_failed" -ne 0 ]; then
 		if [ -n "$recovery_directory" ] && [ -d "$recovery_directory" ]; then
 			rollback_note="$rollback_note recovery artifacts retained at $recovery_directory;"
 		fi
+		if [ "$protected_xorg_attestation_failed" -eq 1 ]; then
+			rollback_note="$rollback_note protected Xorg attestation failed: $protected_xorg_error;"
+		fi
 		printf 'ERROR: transaction failed with status %s; rollback also failed:%s\n' \
 			"$transaction_status" "$rollback_note" >&2
+		exit 1
+	fi
+	if [ "$protected_xorg_attestation_failed" -eq 1 ]; then
+		printf 'ERROR: transaction failed with status %s; rollback completed, but protected Xorg attestation failed: %s\n' \
+			"$transaction_status" "$protected_xorg_error" >&2
 		exit 1
 	fi
 	exit "$transaction_status"
@@ -815,6 +852,12 @@ if [ "$overlay_replaced" -eq 1 ]; then
 fi
 rm -rf "$recovery_directory"
 recovery_directory=
+if ! attest_protected_xorg_unchanged; then
+	trap - EXIT HUP INT TERM
+	printf 'ERROR: installation committed, but protected Xorg attestation failed: %s\n' \
+		"$protected_xorg_error" >&2
+	exit 1
+fi
 trap - EXIT HUP INT TERM
 
 printf 'PASS: installed %s/%s and verified all three modules, source, backup, boot token, and DTBO checksums\n' \

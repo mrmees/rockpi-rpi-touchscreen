@@ -22,16 +22,44 @@ case ${1:-} in
 esac
 
 require_root
+
+attest_pretransaction_exit()
+{
+	pretransaction_status=$?
+	trap - EXIT HUP INT TERM
+	if ! attest_protected_xorg_unchanged; then
+		printf 'ERROR: transaction stopped with status %s; protected Xorg attestation failed: %s\n' \
+			"$pretransaction_status" "$protected_xorg_error" >&2
+		exit 1
+	fi
+	exit "$pretransaction_status"
+}
+
 if [ -n "$offline_boot_root" ]; then
-	require_command awk chmod mktemp mv rm
+	require_command awk chmod mktemp mv rm sha256sum stat
+	if ! capture_protected_xorg_attestation; then
+		die "$protected_xorg_error"
+	fi
+	trap attest_pretransaction_exit EXIT HUP INT TERM
 	target_config=$offline_boot_root/boot/armbianEnv.txt
 	[ -f "$target_config" ] || die "target boot configuration not found: $target_config"
 	remove_overlay_token "$target_config" "$OVERLAY_TOKEN"
+	if ! attest_protected_xorg_unchanged; then
+		trap - EXIT HUP INT TERM
+		printf 'ERROR: offline boot rollback committed, but protected Xorg attestation failed: %s\n' \
+			"$protected_xorg_error" >&2
+		exit 1
+	fi
+	trap - EXIT HUP INT TERM
 	printf 'PASS: removed %s overlay token from %s\n' "$OVERLAY_TOKEN" "$target_config"
 	exit 0
 fi
 
-require_command awk chmod cmp cp depmod diff dkms find grep ln mkdir mktemp mv rm stat
+require_command awk chmod cmp cp depmod diff dkms find grep ln mkdir mktemp mv rm sha256sum stat
+if ! capture_protected_xorg_attestation; then
+	die "$protected_xorg_error"
+fi
+trap attest_pretransaction_exit EXIT HUP INT TERM
 overlay_destination=$OVERLAY_DIRECTORY/$OVERLAY_NAME.dtbo
 touch_mapper_source=$PROJECT_SOURCE_DIR/scripts/map-touchscreen.sh
 touch_autostart_source=$PROJECT_SOURCE_DIR/assets/rockpi-rpi-touchscreen-touch-map.desktop
@@ -66,7 +94,19 @@ if [ "$dry_run" -eq 1 ]; then
 	mapper_state=$(runtime_asset_state "$touch_mapper_source" "$TOUCH_MAPPER_DESTINATION" 755)
 	autostart_state=$(runtime_asset_state "$touch_autostart_source" "$TOUCH_AUTOSTART_DESTINATION" 644)
 	temporary_config=$(mktemp "${ARMBIAN_ENV}.XXXXXX") || die 'cannot create dry-run temporary configuration'
-	trap 'rm -f "$temporary_config"' HUP INT TERM EXIT
+	dry_run_exit()
+	{
+		dry_run_status=$?
+		trap - HUP INT TERM EXIT
+		rm -f "$temporary_config" >/dev/null 2>&1 || true
+		if ! attest_protected_xorg_unchanged; then
+			printf 'ERROR: dry-run stopped with status %s; protected Xorg attestation failed: %s\n' \
+				"$dry_run_status" "$protected_xorg_error" >&2
+			exit 1
+		fi
+		exit "$dry_run_status"
+	}
+	trap dry_run_exit HUP INT TERM EXIT
 	cp "$ARMBIAN_ENV" "$temporary_config"
 	remove_overlay_token "$temporary_config" "$OVERLAY_TOKEN"
 	printf 'REMOVE: %s\n' "$overlay_destination"
@@ -93,6 +133,11 @@ if [ "$dry_run" -eq 1 ]; then
 	grep -m 1 '^[[:space:]]*user_overlays[[:space:]]*=' "$temporary_config" || printf 'user_overlays=\n'
 	rm -f "$temporary_config"
 	trap - HUP INT TERM EXIT
+	if ! attest_protected_xorg_unchanged; then
+		printf 'ERROR: dry-run protected Xorg attestation failed: %s\n' \
+			"$protected_xorg_error" >&2
+		exit 1
+	fi
 	exit 0
 fi
 
@@ -150,8 +195,19 @@ autostart_claim_recovery=
 mapper_dependency_restore_failed=0
 dkms_state_root=${DKMS_STATE_DIR:-/var/lib/dkms}
 dkms_state_destination=$dkms_state_root/$PROJECT_NAME/$PROJECT_VERSION
-trap 'snapshot_status=$?; trap - EXIT HUP INT TERM; rm -rf "$transaction_directory"; exit "$snapshot_status"' \
-	EXIT HUP INT TERM
+snapshot_exit()
+{
+	snapshot_status=$?
+	trap - EXIT HUP INT TERM
+	rm -rf "$transaction_directory" >/dev/null 2>&1 || true
+	if ! attest_protected_xorg_unchanged; then
+		printf 'ERROR: transaction snapshot stopped with status %s; protected Xorg attestation failed: %s\n' \
+			"$snapshot_status" "$protected_xorg_error" >&2
+		exit 1
+	fi
+	exit "$snapshot_status"
+}
+trap snapshot_exit EXIT HUP INT TERM
 
 snapshot_module_paths()
 {
@@ -458,7 +514,14 @@ rollback_uninstall()
 {
 	transaction_status=$?
 	trap - EXIT HUP INT TERM
-	[ "$completed" -eq 0 ] || exit "$transaction_status"
+	if [ "$completed" -eq 1 ]; then
+		if ! attest_protected_xorg_unchanged; then
+			printf 'ERROR: uninstall committed, but protected Xorg attestation failed: %s\n' \
+				"$protected_xorg_error" >&2
+			exit 1
+		fi
+		exit "$transaction_status"
+	fi
 	if ! restore_source; then
 		rollback_failed=1
 		rollback_note="$rollback_note source restore failed;"
@@ -492,11 +555,21 @@ rollback_uninstall()
 			rollback_note="$rollback_note DKMS lifecycle restore failed;"
 		fi
 	fi
-	if [ "$rollback_failed" -eq 0 ]; then
-		rm -rf "$transaction_directory"
-	else
+	if [ "$rollback_failed" -eq 0 ] && ! rm -rf "$transaction_directory"; then
+		rollback_failed=1
+		rollback_note="$rollback_note transaction recovery cleanup failed;"
+	fi
+	if [ "$rollback_failed" -ne 0 ]; then
+		if ! attest_protected_xorg_unchanged; then
+			rollback_note="$rollback_note protected Xorg attestation failed: $protected_xorg_error;"
+		fi
 		printf 'ERROR: uninstall failed with status %s; rollback also failed:%s recovery retained at %s\n' \
 			"$transaction_status" "$rollback_note" "$transaction_directory" >&2
+		exit 1
+	fi
+	if ! attest_protected_xorg_unchanged; then
+		printf 'ERROR: uninstall failed with status %s; rollback completed, but protected Xorg attestation failed: %s\n' \
+			"$transaction_status" "$protected_xorg_error" >&2
 		exit 1
 	fi
 	exit "$transaction_status"
@@ -589,10 +662,23 @@ if [ "$source_present" -eq 1 ]; then
 	rm -rf "$PROJECT_SOURCE_DIR"
 fi
 completed=1
-trap - EXIT HUP INT TERM
 if ! rm -rf "$transaction_directory"; then
+	if ! attest_protected_xorg_unchanged; then
+		trap - EXIT HUP INT TERM
+		printf 'ERROR: uninstall committed, recovery cleanup failed at %s, and protected Xorg attestation failed: %s\n' \
+			"$transaction_directory" "$protected_xorg_error" >&2
+		exit 1
+	fi
+	trap - EXIT HUP INT TERM
 	printf 'ERROR: uninstall completed but recovery cleanup failed; recovery retained at %s\n' \
 		"$transaction_directory" >&2
 	exit 1
 fi
+if ! attest_protected_xorg_unchanged; then
+	trap - EXIT HUP INT TERM
+	printf 'ERROR: uninstall committed, but protected Xorg attestation failed: %s\n' \
+		"$protected_xorg_error" >&2
+	exit 1
+fi
+trap - EXIT HUP INT TERM
 printf 'PASS: removed %s/%s assets\n' "$PROJECT_NAME" "$PROJECT_VERSION"

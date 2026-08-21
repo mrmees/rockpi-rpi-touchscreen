@@ -19,6 +19,11 @@ LIBEXEC_DIRECTORY=${LIBEXEC_DIR:-/usr/libexec}
 XDG_AUTOSTART_DIRECTORY=${XDG_AUTOSTART_DIR:-/etc/xdg/autostart}
 TOUCH_MAPPER_DESTINATION=$LIBEXEC_DIRECTORY/rockpi-rpi-touchscreen-map-touch
 TOUCH_AUTOSTART_DESTINATION=$XDG_AUTOSTART_DIRECTORY/rockpi-rpi-touchscreen-touch-map.desktop
+PROTECTED_XORG_CONFIGURATION=${PROTECTED_XORG_PATH:-/etc/X11/xorg.conf.d/20-dfrobot-display.conf}
+protected_xorg_attestation_started=0
+protected_xorg_baseline_identity=
+protected_xorg_baseline_checksum=
+protected_xorg_error=
 
 die()
 {
@@ -43,6 +48,83 @@ require_supported_kernel_release()
 {
 	[ "$KERNEL_RELEASE" = "$SUPPORTED_KERNEL_RELEASE" ] ||
 		die "unsupported kernel release: $KERNEL_RELEASE (expected $SUPPORTED_KERNEL_RELEASE)"
+}
+
+capture_protected_xorg_attestation()
+{
+	protected_xorg_attestation_started=0
+	protected_xorg_baseline_identity=
+	protected_xorg_baseline_checksum=
+	protected_xorg_error=
+	if [ ! -f "$PROTECTED_XORG_CONFIGURATION" ] ||
+		[ -L "$PROTECTED_XORG_CONFIGURATION" ] ||
+		[ ! -r "$PROTECTED_XORG_CONFIGURATION" ]; then
+		protected_xorg_error="protected Xorg path must be a readable regular file: $PROTECTED_XORG_CONFIGURATION"
+		return 1
+	fi
+	if ! protected_identity_before=$(stat -c '%d:%i:%f:%a:%u:%g' -- \
+		"$PROTECTED_XORG_CONFIGURATION" 2>/dev/null); then
+		protected_xorg_error="cannot identify protected Xorg file: $PROTECTED_XORG_CONFIGURATION"
+		return 1
+	fi
+	if ! protected_checksum_record=$(sha256sum -- "$PROTECTED_XORG_CONFIGURATION" 2>/dev/null); then
+		protected_xorg_error="cannot hash protected Xorg file: $PROTECTED_XORG_CONFIGURATION"
+		return 1
+	fi
+	protected_checksum=${protected_checksum_record%% *}
+	if ! protected_identity_after=$(stat -c '%d:%i:%f:%a:%u:%g' -- \
+		"$PROTECTED_XORG_CONFIGURATION" 2>/dev/null) ||
+		[ "$protected_identity_before" != "$protected_identity_after" ] ||
+		[ ! -f "$PROTECTED_XORG_CONFIGURATION" ] ||
+		[ -L "$PROTECTED_XORG_CONFIGURATION" ] ||
+		[ ! -r "$PROTECTED_XORG_CONFIGURATION" ] ||
+		[ -z "$protected_checksum" ]; then
+		protected_xorg_error="protected Xorg path changed while capturing its baseline: $PROTECTED_XORG_CONFIGURATION"
+		return 1
+	fi
+	protected_xorg_baseline_identity=$protected_identity_after
+	protected_xorg_baseline_checksum=$protected_checksum
+	protected_xorg_attestation_started=1
+}
+
+attest_protected_xorg_unchanged()
+{
+	protected_xorg_error=
+	if [ "$protected_xorg_attestation_started" -ne 1 ]; then
+		protected_xorg_error="protected Xorg baseline is unavailable: $PROTECTED_XORG_CONFIGURATION"
+		return 1
+	fi
+	if [ ! -f "$PROTECTED_XORG_CONFIGURATION" ] ||
+		[ -L "$PROTECTED_XORG_CONFIGURATION" ] ||
+		[ ! -r "$PROTECTED_XORG_CONFIGURATION" ]; then
+		protected_xorg_error="protected Xorg path is no longer a readable regular file: $PROTECTED_XORG_CONFIGURATION"
+		return 1
+	fi
+	if ! protected_identity_before=$(stat -c '%d:%i:%f:%a:%u:%g' -- \
+		"$PROTECTED_XORG_CONFIGURATION" 2>/dev/null); then
+		protected_xorg_error="cannot identify protected Xorg file after transaction handling: $PROTECTED_XORG_CONFIGURATION"
+		return 1
+	fi
+	if ! protected_checksum_record=$(sha256sum -- "$PROTECTED_XORG_CONFIGURATION" 2>/dev/null); then
+		protected_xorg_error="cannot hash protected Xorg file after transaction handling: $PROTECTED_XORG_CONFIGURATION"
+		return 1
+	fi
+	protected_checksum=${protected_checksum_record%% *}
+	if ! protected_identity_after=$(stat -c '%d:%i:%f:%a:%u:%g' -- \
+		"$PROTECTED_XORG_CONFIGURATION" 2>/dev/null) ||
+		[ "$protected_identity_before" != "$protected_identity_after" ]; then
+		protected_xorg_error="protected Xorg path changed during final attestation: $PROTECTED_XORG_CONFIGURATION"
+		return 1
+	fi
+	if [ "$protected_identity_after" != "$protected_xorg_baseline_identity" ]; then
+		protected_xorg_error="protected Xorg object, type, mode, or ownership changed during transaction: $PROTECTED_XORG_CONFIGURATION"
+		return 1
+	fi
+	if [ "$protected_checksum" != "$protected_xorg_baseline_checksum" ]; then
+		protected_xorg_error="protected Xorg content changed during transaction: $PROTECTED_XORG_CONFIGURATION"
+		return 1
+	fi
+	return 0
 }
 
 dkms_status_has_version()

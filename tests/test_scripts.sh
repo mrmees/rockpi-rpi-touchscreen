@@ -690,7 +690,10 @@ run_install()
 	validator=$2
 	shift 2
 	protected=$sandbox/etc/X11/xorg.conf.d/20-dfrobot-display.conf
-	protected_before=$(/usr/bin/sha256sum "$protected" | awk '{print $1}')
+	protected_before=
+	if [ "${SKIP_WRAPPER_PROTECTED_CHECK:-0}" -ne 1 ]; then
+		protected_before=$(/usr/bin/sha256sum "$protected" | awk '{print $1}')
+	fi
 	status=0
 	BOOT_DIR="$sandbox/boot" DKMS_TREE="$sandbox/usr-src" \
 	MODULES_DIR="$sandbox/modules" KERNEL_RELEASE=${INSTALL_KERNEL_RELEASE:-6.18.43-current-rockchip64} \
@@ -707,11 +710,14 @@ run_install()
 		DKMS_MODULE_LOG="$sandbox/dkms-module.log" SHA256_LOG="$sandbox/sha256.log" \
 		ZSTD_LOG="$sandbox/zstd.log" DEPMOD_LOG="$sandbox/depmod.log" \
 		DKMS_STATE_DIR="$sandbox/var-lib-dkms" \
-		ARCH=aarch64 MV_LOG="$sandbox/mv.log" PATH="$sandbox/bin:$PATH" \
+		ARCH=aarch64 MV_LOG="$sandbox/mv.log" PROTECTED_XORG_PATH="$protected" \
+		PATH="$sandbox/bin:$PATH" \
 		sh "$repo_root/scripts/install.sh" "$@" || status=$?
-	protected_after=$(/usr/bin/sha256sum "$protected" | awk '{print $1}')
-	assert_equal "$protected_after" "$protected_before" \
-		'installer changed protected HDMI Xorg configuration'
+	if [ "${SKIP_WRAPPER_PROTECTED_CHECK:-0}" -ne 1 ]; then
+		protected_after=$(/usr/bin/sha256sum "$protected" | awk '{print $1}')
+		assert_equal "$protected_after" "$protected_before" \
+			'installer changed protected HDMI Xorg configuration'
+	fi
 	return "$status"
 }
 
@@ -855,7 +861,10 @@ run_uninstall()
 	sandbox=$1
 	shift
 	protected=$sandbox/etc/X11/xorg.conf.d/20-dfrobot-display.conf
-	protected_before=$(/usr/bin/sha256sum "$protected" | awk '{print $1}')
+	protected_before=
+	if [ "${SKIP_WRAPPER_PROTECTED_CHECK:-0}" -ne 1 ]; then
+		protected_before=$(/usr/bin/sha256sum "$protected" | awk '{print $1}')
+	fi
 	status=0
 	BOOT_DIR="$sandbox/boot" DKMS_TREE="$sandbox/usr-src" \
 	MODULES_DIR="$sandbox/modules" KERNEL_RELEASE=6.18.43-current-rockchip64 \
@@ -869,11 +878,14 @@ run_uninstall()
 		DKMS_MODULE_LOG="$sandbox/dkms-module.log" SHA256_LOG="$sandbox/sha256.log" \
 		DEPMOD_LOG="$sandbox/depmod.log" DKMS_STATE_DIR="$sandbox/var-lib-dkms" \
 		ARCH=aarch64 MV_LOG="$sandbox/mv.log" RM_LOG="$sandbox/rm.log" \
+		PROTECTED_XORG_PATH="$protected" \
 		OP_LOG="$sandbox/operations.log" PATH="$sandbox/bin:$PATH" \
 		sh "$repo_root/scripts/uninstall.sh" "$@" || status=$?
-	protected_after=$(/usr/bin/sha256sum "$protected" | awk '{print $1}')
-	assert_equal "$protected_after" "$protected_before" \
-		'uninstaller changed protected HDMI Xorg configuration'
+	if [ "${SKIP_WRAPPER_PROTECTED_CHECK:-0}" -ne 1 ]; then
+		protected_after=$(/usr/bin/sha256sum "$protected" | awk '{print $1}')
+		assert_equal "$protected_after" "$protected_before" \
+			'uninstaller changed protected HDMI Xorg configuration'
+	fi
 	return "$status"
 }
 
@@ -885,12 +897,177 @@ run_offline_boot_rollback()
 	protected_before=$(/usr/bin/sha256sum "$protected" | awk '{print $1}')
 	status=0
 	BOOT_DIR="$sandbox/host-boot" DKMS_TREE="$sandbox/host-usr-src" \
-		DKMS_LOG="$sandbox/dkms.log" ARCH=aarch64 MV_LOG="$sandbox/mv.log" PATH="$sandbox/bin:$PATH" \
+		DKMS_LOG="$sandbox/dkms.log" SHA256_LOG="$sandbox/sha256.log" \
+		ARCH=aarch64 MV_LOG="$sandbox/mv.log" PATH="$sandbox/bin:$PATH" \
+		PROTECTED_XORG_PATH="$protected" \
 		sh "$repo_root/scripts/uninstall.sh" --offline-boot-root "$target_root" || status=$?
 	protected_after=$(/usr/bin/sha256sum "$protected" | awk '{print $1}')
 	assert_equal "$protected_after" "$protected_before" \
 		'offline rollback changed protected HDMI Xorg configuration'
 	return "$status"
+}
+
+protected_xorg_hash_count()
+{
+	protected_path=$1
+	log_file=$2
+	[ -f "$log_file" ] || {
+		printf '0\n'
+		return
+	}
+	awk -v protected_path="$protected_path" '
+		index($0, protected_path) { count++ }
+		END { print count + 0 }
+	' "$log_file"
+}
+
+test_production_transactions_attest_protected_xorg_on_success()
+{
+	sandbox=$workdir/production-protected-success
+	make_sandbox "$sandbox"
+	protected=$sandbox/etc/X11/xorg.conf.d/20-dfrobot-display.conf
+	: > "$sandbox/sha256.log"
+	SKIP_WRAPPER_PROTECTED_CHECK=1 \
+		run_install "$sandbox" "$sandbox/validate-pass.sh"
+	[ "$(protected_xorg_hash_count "$protected" "$sandbox/sha256.log")" -ge 2 ] ||
+		fail 'production installer did not hash protected Xorg before and after mutation'
+	: > "$sandbox/sha256.log"
+	SKIP_WRAPPER_PROTECTED_CHECK=1 run_uninstall "$sandbox"
+	[ "$(protected_xorg_hash_count "$protected" "$sandbox/sha256.log")" -ge 2 ] ||
+		fail 'production uninstaller did not hash protected Xorg before and after mutation'
+	printf 'PASS: production transactions attest protected Xorg on success\n'
+}
+
+test_install_reports_committed_protected_xorg_mutation()
+{
+	sandbox=$workdir/install-protected-committed-mutation
+	make_sandbox "$sandbox"
+	protected=$sandbox/etc/X11/xorg.conf.d/20-dfrobot-display.conf
+	config=$sandbox/boot/armbianEnv.txt
+	if SKIP_WRAPPER_PROTECTED_CHECK=1 \
+		MV_CORRUPT_FILE_AFTER_TARGET="$protected" MV_CORRUPT_FILE_TRIGGER="$config" \
+		run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+		fail 'installer accepted a protected Xorg mutation after committing installation'
+	fi
+	grep -Fq 'installation committed, but protected Xorg attestation failed:' "$sandbox/output" ||
+		fail 'installer did not accurately report committed state after protected Xorg mutation'
+	assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.5)" \
+		'rockpi-rpi-touchscreen/0.2.5, 6.18.43-current-rockchip64, aarch64: installed' \
+		'protected Xorg attestation failure pretended the committed installation rolled back'
+	[ -d "$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5" ] ||
+		fail 'committed install was rolled back after protected Xorg attestation failure'
+	printf 'PASS: install reports committed outcome after protected Xorg mutation\n'
+}
+
+test_uninstall_reports_committed_protected_xorg_mutation()
+{
+	sandbox=$workdir/uninstall-protected-committed-mutation
+	make_sandbox "$sandbox"
+	run_install "$sandbox" "$sandbox/validate-pass.sh"
+	protected=$sandbox/etc/X11/xorg.conf.d/20-dfrobot-display.conf
+	config=$sandbox/boot/armbianEnv.txt
+	if SKIP_WRAPPER_PROTECTED_CHECK=1 \
+		MV_CORRUPT_FILE_AFTER_TARGET="$protected" MV_CORRUPT_FILE_TRIGGER="$config" \
+		run_uninstall "$sandbox" > "$sandbox/output" 2>&1; then
+		fail 'uninstaller accepted a protected Xorg mutation after committing uninstall'
+	fi
+	grep -Fq 'uninstall committed, but protected Xorg attestation failed:' "$sandbox/output" ||
+		fail 'uninstaller did not accurately report committed state after protected Xorg mutation'
+	assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.5)" '' \
+		'protected Xorg attestation failure pretended the committed uninstall rolled back'
+	[ ! -e "$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5" ] ||
+		fail 'committed uninstall restored source after protected Xorg attestation failure'
+
+	sandbox=$workdir/uninstall-protected-committed-type-change
+	make_sandbox "$sandbox"
+	run_install "$sandbox" "$sandbox/validate-pass.sh"
+	protected=$sandbox/etc/X11/xorg.conf.d/20-dfrobot-display.conf
+	config=$sandbox/boot/armbianEnv.txt
+	cp "$protected" "$protected.target"
+	if SKIP_WRAPPER_PROTECTED_CHECK=1 \
+		MV_REPLACE_SYMLINK_AFTER_TARGET="$protected" \
+		MV_REPLACE_SYMLINK_TRIGGER="$config" \
+		MV_REPLACE_SYMLINK_VALUE="$protected.target" \
+		run_uninstall "$sandbox" > "$sandbox/type-output" 2>&1; then
+		fail 'uninstaller accepted a protected Xorg type change after committing uninstall'
+	fi
+	grep -Fq 'uninstall committed, but protected Xorg attestation failed:' \
+		"$sandbox/type-output" ||
+		fail 'uninstaller did not report committed state after protected Xorg type change'
+	[ -L "$protected" ] || fail 'protected Xorg type-change injection did not take effect'
+	printf 'PASS: uninstall reports committed outcome after protected Xorg mutation\n'
+}
+
+test_protected_xorg_attestation_runs_after_install_rollback()
+{
+	sandbox=$workdir/install-protected-rollback-mutation
+	make_sandbox "$sandbox"
+	seed_old_release "$sandbox"
+	protected=$sandbox/etc/X11/xorg.conf.d/20-dfrobot-display.conf
+	config=$sandbox/boot/armbianEnv.txt
+	if SKIP_WRAPPER_PROTECTED_CHECK=1 DKMS_FAIL_OLD_REMOVE_AFTER_MUTATION=1 \
+		MV_CORRUPT_FILE_AFTER_TARGET="$protected" MV_CORRUPT_FILE_TRIGGER="$config" \
+		run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+		fail 'installer accepted an injected rollback with protected Xorg mutation'
+	fi
+	grep -Fq 'rollback completed, but protected Xorg attestation failed:' "$sandbox/output" ||
+		fail 'install rollback exit did not report failed protected Xorg attestation'
+	[ "$(protected_xorg_hash_count "$protected" "$sandbox/sha256.log")" -ge 2 ] ||
+		fail 'install rollback exit did not hash protected Xorg after mutation handling'
+	assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.4)" \
+		'rockpi-rpi-touchscreen/0.2.4, 6.18.43-current-rockchip64, aarch64: installed' \
+		'protected Xorg mutation prevented the ordinary install transaction rollback'
+	printf 'PASS: protected Xorg attestation runs after install rollback\n'
+}
+
+test_protected_xorg_preflight_rejects_missing_unreadable_and_wrong_type()
+{
+	for variant in missing unreadable symlink; do
+		sandbox=$workdir/install-protected-preflight-$variant
+		make_sandbox "$sandbox"
+		protected=$sandbox/etc/X11/xorg.conf.d/20-dfrobot-display.conf
+		case $variant in
+		missing) rm -f "$protected" ;;
+		unreadable) chmod 000 "$protected" ;;
+		symlink)
+			/bin/mv "$protected" "$protected.target"
+			/bin/ln -s "$protected.target" "$protected"
+			;;
+		esac
+		if SKIP_WRAPPER_PROTECTED_CHECK=1 \
+			run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+			fail "installer accepted $variant protected Xorg path"
+		fi
+		grep -Fq "protected Xorg path must be a readable regular file: $protected" \
+			"$sandbox/output" ||
+			fail "installer did not diagnose $variant protected Xorg path"
+		[ ! -e "$sandbox/validate.log" ] ||
+			fail "$variant protected Xorg path reached validation"
+		[ ! -s "$sandbox/dkms.log" ] ||
+			fail "$variant protected Xorg path reached DKMS mutation"
+	done
+
+	sandbox=$workdir/uninstall-protected-preflight-type
+	make_sandbox "$sandbox"
+	run_install "$sandbox" "$sandbox/validate-pass.sh"
+	protected=$sandbox/etc/X11/xorg.conf.d/20-dfrobot-display.conf
+	/bin/mv "$protected" "$protected.target"
+	/bin/ln -s "$protected.target" "$protected"
+	config=$sandbox/boot/armbianEnv.txt
+	config_before=$(cat "$config")
+	: > "$sandbox/dkms.log"
+	if SKIP_WRAPPER_PROTECTED_CHECK=1 run_uninstall "$sandbox" > "$sandbox/output" 2>&1; then
+		fail 'uninstaller accepted type-changed protected Xorg path'
+	fi
+	grep -Fq "protected Xorg path must be a readable regular file: $protected" "$sandbox/output" ||
+		fail 'uninstaller did not diagnose type-changed protected Xorg path'
+	[ ! -s "$sandbox/dkms.log" ] ||
+		fail 'type-changed protected Xorg path reached DKMS mutation during uninstall'
+	assert_equal "$(cat "$config")" "$config_before" \
+		'type-changed protected Xorg path reached uninstall boot mutation'
+	[ -d "$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5" ] ||
+		fail 'type-changed protected Xorg path reached source removal'
+	printf 'PASS: protected Xorg preflight rejects missing, unreadable, and wrong-type paths\n'
 }
 
 test_boot_configuration_uses_atomic_mv_for_update_and_rollback()
@@ -3127,6 +3304,11 @@ fi
 
 test_install_is_idempotent_and_preserves_unrelated_boot_text
 test_installer_rejects_unsupported_kernel_before_validation_or_mutation
+test_production_transactions_attest_protected_xorg_on_success
+test_install_reports_committed_protected_xorg_mutation
+test_uninstall_reports_committed_protected_xorg_mutation
+test_protected_xorg_attestation_runs_after_install_rollback
+test_protected_xorg_preflight_rejects_missing_unreadable_and_wrong_type
 test_install_handoff_requires_authorized_dsi_first_acceptance
 test_dkms_make_command_suppresses_automatic_kernelrelease
 test_uninstall_removes_only_project_token_and_dry_run_is_scoped
