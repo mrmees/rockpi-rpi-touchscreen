@@ -6,7 +6,7 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 require_supported_kernel_release
 require_root
-require_command awk cat chmod cmp cp date depmod diff dirname dkms find grep head install ln mkdir mktemp modinfo mv rm sed sha256sum stat tail
+require_command awk cat chmod cmp cp date depmod diff dirname dkms find grep head install ln mkdir mktemp modinfo mv rm rmdir sed sha256sum sort stat tail
 
 if ! capture_protected_xorg_attestation; then
 	die "$protected_xorg_error"
@@ -122,30 +122,18 @@ old_lifecycle_phase=$(dkms_lifecycle_phase "$old_status" "$old_version")
 [ "$old_lifecycle_phase" != unsupported ] ||
 	die "old DKMS lifecycle is not a single restorable target-kernel state: ${old_status:-absent}"
 old_source_owned=0
-if [ -f "$old_source/dkms.conf" ] &&
-	grep -Fq 'PACKAGE_NAME="rockpi-rpi-touchscreen"' "$old_source/dkms.conf" &&
-	grep -Fq "PACKAGE_VERSION=\"$old_version\"" "$old_source/dkms.conf"; then
-	old_source_owned=1
-fi
-old_source_faithful=0
-if [ "$old_source_owned" -eq 1 ] &&
-	grep -Fxq 'BUILT_MODULE_NAME[0]="rockpi_rk3399_display_compat"' "$old_source/dkms.conf" &&
-	grep -Fxq 'BUILT_MODULE_LOCATION[0]="."' "$old_source/dkms.conf" &&
-	grep -Fxq 'DEST_MODULE_LOCATION[0]="/updates/dkms"' "$old_source/dkms.conf" &&
-	grep -Fxq 'BUILT_MODULE_NAME[1]="panel_rockpi_rpi_touchscreen"' "$old_source/dkms.conf" &&
-	grep -Fxq 'BUILT_MODULE_LOCATION[1]="."' "$old_source/dkms.conf" &&
-	grep -Fxq 'DEST_MODULE_LOCATION[1]="/updates/dkms"' "$old_source/dkms.conf" &&
-	grep -Fxq 'BUILT_MODULE_NAME[2]="raspits_ft5426"' "$old_source/dkms.conf" &&
-	grep -Fxq 'BUILT_MODULE_LOCATION[2]="."' "$old_source/dkms.conf" &&
-	grep -Fxq 'DEST_MODULE_LOCATION[2]="/updates/dkms"' "$old_source/dkms.conf" &&
-	[ "$(grep -Ec '^[[:space:]]*BUILT_MODULE_NAME\[[0-9]+\][[:space:]]*=' "$old_source/dkms.conf")" -eq 3 ] &&
-	[ "$(grep -Ec '^[[:space:]]*BUILT_MODULE_LOCATION\[[0-9]+\][[:space:]]*=' "$old_source/dkms.conf")" -eq 3 ] &&
-	[ "$(grep -Ec '^[[:space:]]*DEST_MODULE_LOCATION\[[0-9]+\][[:space:]]*=' "$old_source/dkms.conf")" -eq 3 ]; then
-	old_source_faithful=1
+old_source_present=0
+if [ -e "$old_source" ] || [ -L "$old_source" ]; then
+	old_source_present=1
+	if source_tree_matches_release "$old_source" "$old_version"; then
+		old_source_owned=1
+	fi
 fi
 if [ "$old_registered" -eq 1 ]; then
-	[ "$old_source_faithful" -eq 1 ] ||
-		die "registered old DKMS source is not the faithful three-module $old_version release: $old_source"
+	[ "$old_source_owned" -eq 1 ] ||
+		die "registered old DKMS source does not match exact $old_version ownership: $old_source (${source_ownership_error:-path absent})"
+elif [ "$old_source_present" -eq 1 ] && [ "$old_source_owned" -eq 0 ]; then
+	printf 'RETAIN MODIFIED: %s (%s)\n' "$old_source" "$source_ownership_error"
 fi
 dkms_state_root=${DKMS_STATE_DIR:-/var/lib/dkms}
 if [ "$old_was_installed" -eq 1 ]; then
@@ -195,6 +183,8 @@ new_dkms_mutation_attempted=0
 dkms_install_attempted=0
 old_retirement_attempted=0
 old_source_snapshot_complete=0
+old_source_retirement_failed=0
+old_source_retirement_recovery=
 new_dkms_state_snapshot_complete=0
 old_dkms_state_snapshot_complete=0
 boot_snapshot_complete=0
@@ -343,6 +333,11 @@ rollback()
 			rollback_failed=1
 			rollback_note="$rollback_note$runtime_publication_note;"
 		fi
+		if [ "$old_source_retirement_failed" -eq 1 ] &&
+			[ "$old_source_retirement_recovery" != "$old_source" ]; then
+			rollback_failed=1
+			rollback_note="$rollback_note old source retirement recovery retained at $old_source_retirement_recovery;"
+		fi
 		boot_restore_failed=0
 		if [ "$boot_snapshot_complete" -eq 1 ] && [ "$boot_mutation_attempted" -eq 1 ]; then
 			private_boot_snapshot=$recovery_directory/current-armbianEnv.txt
@@ -429,11 +424,22 @@ rollback()
 		fi
 		if [ "$old_retirement_attempted" -eq 1 ] && [ "$old_source_owned" -eq 1 ] &&
 			[ "$old_source_snapshot_complete" -eq 1 ]; then
-			if ! rm -rf "$old_source" ||
-				! cp -a "$recovery_directory/old-source" "$old_source" ||
-				! diff -qr "$recovery_directory/old-source" "$old_source" >/dev/null; then
-				rollback_failed=1
-				rollback_note="$rollback_note old source restoration failed; snapshot retained at $recovery_directory/old-source;"
+			if [ -e "$old_source" ] || [ -L "$old_source" ]; then
+				if ! diff -qr "$recovery_directory/old-source" "$old_source" >/dev/null 2>&1; then
+					rollback_failed=1
+					rollback_note="$rollback_note modified old source retained at $old_source; exact snapshot retained at $recovery_directory/old-source;"
+				fi
+			else
+				old_source_restore_stage=$recovery_directory/old-source-restore
+				if [ -e "$old_source_restore_stage" ] || [ -L "$old_source_restore_stage" ] ||
+					! cp -a "$recovery_directory/old-source" "$old_source_restore_stage" ||
+					! diff -qr "$recovery_directory/old-source" "$old_source_restore_stage" >/dev/null ||
+					! mv -n -T "$old_source_restore_stage" "$old_source" ||
+					[ -e "$old_source_restore_stage" ] || [ -L "$old_source_restore_stage" ] ||
+					! diff -qr "$recovery_directory/old-source" "$old_source" >/dev/null; then
+					rollback_failed=1
+					rollback_note="$rollback_note old source restoration failed; snapshot retained at $recovery_directory/old-source;"
+				fi
 			fi
 		fi
 		if [ "$dkms_install_attempted" -eq 1 ] || [ "$old_retirement_attempted" -eq 1 ]; then
@@ -522,10 +528,13 @@ rollback()
 				done
 			fi
 		fi
-		if [ "$source_created" -eq 1 ] && [ "$new_source_retained" -eq 0 ] &&
-			! rm -rf "$PROJECT_SOURCE_DIR"; then
-			rollback_failed=1
-			rollback_note="$rollback_note new source removal failed: $PROJECT_SOURCE_DIR;"
+		if [ "$source_created" -eq 1 ] && [ "$new_source_retained" -eq 0 ]; then
+			if ! try_retire_owned_source_tree "$PROJECT_SOURCE_DIR" "$PROJECT_VERSION" \
+				"$recovery_directory/new-source-retirement"; then
+				rollback_failed=1
+				new_source_retained=1
+				rollback_note="$rollback_note new source retained at $source_retirement_recovery;"
+			fi
 		fi
 		if [ -n "$stage_directory" ] && [ -d "$stage_directory" ] &&
 			! rm -rf "$stage_directory"; then
@@ -627,6 +636,8 @@ source_digest()
 	)
 }
 expected_source_digest=$(source_digest "$stage_directory")
+source_tree_matches_release "$stage_directory" "$PROJECT_VERSION" ||
+	die "staged DKMS source does not match exact $PROJECT_VERSION ownership: $source_ownership_error"
 
 preflight_runtime_asset()
 {
@@ -675,11 +686,8 @@ publish_runtime_asset()
 }
 
 if [ -e "$PROJECT_SOURCE_DIR" ]; then
-	[ -d "$PROJECT_SOURCE_DIR" ] || die "DKMS source path is not a directory: $PROJECT_SOURCE_DIR"
-	[ -f "$PROJECT_SOURCE_DIR/dkms.conf" ] || die "DKMS source path is not owned by this project: $PROJECT_SOURCE_DIR"
-	if ! diff -qr "$stage_directory" "$PROJECT_SOURCE_DIR" >/dev/null; then
-		die "same-version DKMS source differs: $PROJECT_SOURCE_DIR (bump PROJECT_VERSION)"
-	fi
+	source_tree_matches_release "$PROJECT_SOURCE_DIR" "$PROJECT_VERSION" ||
+		die "same-version DKMS source differs from exact $PROJECT_VERSION ownership: $PROJECT_SOURCE_DIR ($source_ownership_error)"
 	rm -rf "$stage_directory"
 	stage_directory=
 else
@@ -687,6 +695,9 @@ else
 	stage_directory=
 	source_created=1
 fi
+[ "$source_created" -eq 0 ] ||
+	source_tree_matches_release "$PROJECT_SOURCE_DIR" "$PROJECT_VERSION" ||
+	die "installed DKMS source does not match exact $PROJECT_VERSION ownership: $source_ownership_error"
 [ "$(source_digest "$PROJECT_SOURCE_DIR")" = "$expected_source_digest" ] ||
 	die 'installed DKMS source checksum verification failed'
 
@@ -835,13 +846,21 @@ if [ "$old_registered" -eq 1 ]; then
 	[ -z "$retired_old_status" ] ||
 		die "old DKMS $old_version lifecycle remained after retirement: $retired_old_status"
 	if [ "$old_source_owned" -eq 1 ]; then
-		rm -rf "$old_source" || die "old DKMS source retirement failed: $old_source"
-		[ ! -e "$old_source" ] || die "old DKMS source remained after retirement: $old_source"
+		if ! try_retire_owned_source_tree "$old_source" "$old_version" \
+			"$recovery_directory/old-source-retirement"; then
+			old_source_retirement_failed=1
+			old_source_retirement_recovery=$source_retirement_recovery
+			die "old DKMS source retirement could not claim exact ownership; retained at $old_source_retirement_recovery"
+		fi
 	fi
 elif [ "$old_source_owned" -eq 1 ]; then
 	old_retirement_attempted=1
-	rm -rf "$old_source" || die "old DKMS source retirement failed: $old_source"
-	[ ! -e "$old_source" ] || die "old DKMS source remained after retirement: $old_source"
+	if ! try_retire_owned_source_tree "$old_source" "$old_version" \
+		"$recovery_directory/old-source-retirement"; then
+		old_source_retirement_failed=1
+		old_source_retirement_recovery=$source_retirement_recovery
+		die "old DKMS source retirement could not claim exact ownership; retained at $old_source_retirement_recovery"
+	fi
 fi
 completed=1
 committed_cleanup_failed=0

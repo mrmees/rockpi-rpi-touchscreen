@@ -55,7 +55,7 @@ if [ -n "$offline_boot_root" ]; then
 	exit 0
 fi
 
-require_command awk chmod cmp cp depmod diff dkms find grep ln mkdir mktemp mv rm sha256sum stat
+require_command awk cat chmod cmp cp depmod diff dkms find grep ln mkdir mktemp mv rm rmdir sha256sum sort stat
 if ! capture_protected_xorg_attestation; then
 	die "$protected_xorg_error"
 fi
@@ -143,12 +143,9 @@ fi
 
 [ -f "$ARMBIAN_ENV" ] || die "boot configuration not found: $ARMBIAN_ENV"
 source_present=0
-if [ -e "$PROJECT_SOURCE_DIR" ]; then
-	[ -d "$PROJECT_SOURCE_DIR" ] || die "DKMS source path is not a directory: $PROJECT_SOURCE_DIR"
-	[ -f "$PROJECT_SOURCE_DIR/dkms.conf" ] &&
-		grep -Fxq "PACKAGE_NAME=\"$PROJECT_NAME\"" "$PROJECT_SOURCE_DIR/dkms.conf" &&
-		grep -Fxq "PACKAGE_VERSION=\"$PROJECT_VERSION\"" "$PROJECT_SOURCE_DIR/dkms.conf" ||
-		die "source path is not owned by this project: $PROJECT_SOURCE_DIR"
+if [ -e "$PROJECT_SOURCE_DIR" ] || [ -L "$PROJECT_SOURCE_DIR" ]; then
+	source_tree_matches_release "$PROJECT_SOURCE_DIR" "$PROJECT_VERSION" ||
+		die "source path is not owned by this project; source path does not match exact $PROJECT_VERSION ownership: $PROJECT_SOURCE_DIR ($source_ownership_error)"
 	source_present=1
 fi
 
@@ -193,6 +190,8 @@ mapper_claim_recovery=
 autostart_claim_held=0
 autostart_claim_recovery=
 mapper_dependency_restore_failed=0
+source_retirement_failed=0
+source_retirement_recovery=
 dkms_state_root=${DKMS_STATE_DIR:-/var/lib/dkms}
 dkms_state_destination=$dkms_state_root/$PROJECT_NAME/$PROJECT_VERSION
 snapshot_exit()
@@ -466,9 +465,17 @@ restore_dkms_state_tree()
 restore_source()
 {
 	[ "$source_present" -eq 1 ] || return 0
-	mkdir -p "$PROJECT_SOURCE_DIR" || return 1
-	cp -a "$transaction_directory/source/." "$PROJECT_SOURCE_DIR/" || return 1
-	diff -qr "$transaction_directory/source" "$PROJECT_SOURCE_DIR" >/dev/null 2>&1
+	if [ -e "$PROJECT_SOURCE_DIR" ] || [ -L "$PROJECT_SOURCE_DIR" ]; then
+		diff -qr "$transaction_directory/source" "$PROJECT_SOURCE_DIR" >/dev/null 2>&1
+		return
+	fi
+	source_restore_stage=$transaction_directory/source-restore
+	[ ! -e "$source_restore_stage" ] && [ ! -L "$source_restore_stage" ] || return 1
+	cp -a "$transaction_directory/source" "$source_restore_stage" || return 1
+	diff -qr "$transaction_directory/source" "$source_restore_stage" >/dev/null 2>&1 || return 1
+	mv -n -T "$source_restore_stage" "$PROJECT_SOURCE_DIR" || return 1
+	[ ! -e "$source_restore_stage" ] && [ ! -L "$source_restore_stage" ] &&
+		diff -qr "$transaction_directory/source" "$PROJECT_SOURCE_DIR" >/dev/null 2>&1
 }
 
 restore_dkms()
@@ -521,6 +528,11 @@ rollback_uninstall()
 			exit 1
 		fi
 		exit "$transaction_status"
+	fi
+	if [ "$source_retirement_failed" -eq 1 ] &&
+		[ "$source_retirement_recovery" != "$PROJECT_SOURCE_DIR" ]; then
+		rollback_failed=1
+		rollback_note="$rollback_note source retirement recovery retained at $source_retirement_recovery;"
 	fi
 	if ! restore_source; then
 		rollback_failed=1
@@ -659,7 +671,12 @@ if [ "$mapper_state" = owned ]; then
 	fi
 fi
 if [ "$source_present" -eq 1 ]; then
-	rm -rf "$PROJECT_SOURCE_DIR"
+	if ! try_retire_owned_source_tree "$PROJECT_SOURCE_DIR" "$PROJECT_VERSION" \
+		"$transaction_directory/source-retirement"; then
+		source_retirement_failed=1
+		rollback_note="$rollback_note source retirement could not claim exact ownership; retained at $source_retirement_recovery;"
+		exit 1
+	fi
 fi
 completed=1
 if ! rm -rf "$transaction_directory"; then

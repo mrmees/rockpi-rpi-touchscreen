@@ -480,7 +480,7 @@ printf '%s\n' "$*" >> "${MV_LOG:?}"
 if [ -n "${MV_FAIL_ALWAYS_TARGET:-}" ] && [ "$last" = "$MV_FAIL_ALWAYS_TARGET" ]; then
 	exit 1
 fi
-if [ -n "${MV_FAIL_SOURCE:-}" ] && [ "$1" = "$MV_FAIL_SOURCE" ]; then
+if [ -n "${MV_FAIL_SOURCE:-}" ] && [ "$source" = "$MV_FAIL_SOURCE" ]; then
 	exit 1
 fi
 case ${MV_FAIL_ROLLBACK_PREFIX:-} in
@@ -497,6 +497,10 @@ fi
 if [ -n "${MV_CREATE_FILE_BEFORE_TARGET:-}" ] && [ "$last" = "$MV_CREATE_FILE_BEFORE_TARGET" ]; then
 	printf '%s\n' raced-runtime-asset > "$last"
 	chmod 0600 "$last"
+fi
+if [ -n "${MV_MUTATE_SOURCE_TREE:-}" ] && [ "$source" = "$MV_MUTATE_SOURCE_TREE" ]; then
+	printf '%s\n' raced-source-data > "$source/local-race"
+	chmod 0600 "$source/local-race"
 fi
 /bin/mv "$@"
 if [ -n "${MV_FAIL_AFTER_SOURCE:-}" ] && [ "$source" = "$MV_FAIL_AFTER_SOURCE" ] &&
@@ -649,6 +653,27 @@ for argument do
 done
 [ -z "${RM_LOG:-}" ] || printf '%s\n' "$*" >> "$RM_LOG"
 [ -z "${OP_LOG:-}" ] || printf 'rm %s\n' "$*" >> "$OP_LOG"
+case ${RM_FAIL_TRANSACTION_ROOT_PREFIX:-} in
+'') ;;
+*) case $last in
+   "${RM_FAIL_TRANSACTION_ROOT_PREFIX}"*)
+		remainder=${last#"${RM_FAIL_TRANSACTION_ROOT_PREFIX}"}
+		case $remainder in
+		*/*) ;;
+		*) exit 30 ;;
+		esac
+		;;
+   esac ;;
+esac
+if [ -n "${RM_FAIL_SOURCE_RETIREMENT_BASENAME:-}" ]; then
+	case $last in
+	*"source-retirement/source/${RM_FAIL_SOURCE_RETIREMENT_BASENAME}")
+		[ -z "${RM_CORRUPT_FILE_ON_FAILURE:-}" ] ||
+			printf '%s\n' corrupt-runtime-asset > "$RM_CORRUPT_FILE_ON_FAILURE"
+		exit 30
+		;;
+	esac
+fi
 if [ -n "${RM_FAIL_TARGET:-}" ] && [ "$last" = "$RM_FAIL_TARGET" ]; then
 	exit 30
 fi
@@ -1352,7 +1377,7 @@ test_uninstall_late_failure_restores_removed_runtime_assets()
 	autostart=$sandbox/etc/xdg/autostart/rockpi-rpi-touchscreen-touch-map.desktop
 	mapper_before=$(sha256sum "$mapper" | awk '{print $1}')
 	autostart_before=$(sha256sum "$autostart" | awk '{print $1}')
-	if RM_FAIL_TARGET="$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5" \
+	if MV_FAIL_SOURCE="$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5" \
 		run_uninstall "$sandbox" > "$sandbox/output" 2>&1; then
 		fail 'uninstall accepted a late source-removal failure'
 	fi
@@ -1363,8 +1388,8 @@ test_uninstall_late_failure_restores_removed_runtime_assets()
 		"$sandbox/operations.log")
 	mapper_remove_line=$(awk -v source="$mapper" '$1 == "mv" && $3 == source { print NR; exit }' \
 		"$sandbox/operations.log")
-	source_remove_line=$(awk -v target="$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5" \
-		'$1 == "rm" && $NF == target { print NR; exit }' "$sandbox/operations.log")
+	source_remove_line=$(awk -v source="$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5" \
+		'$1 == "mv" && $3 == source { print NR; exit }' "$sandbox/operations.log")
 	[ -n "$autostart_remove_line" ] && [ -n "$mapper_remove_line" ] && [ -n "$source_remove_line" ] ||
 		fail 'late failure was not injected after runtime asset claims'
 	[ "$autostart_remove_line" -lt "$mapper_remove_line" ] &&
@@ -1387,7 +1412,7 @@ test_uninstall_runtime_restore_failure_retains_recovery()
 	mapper=$sandbox/usr-libexec/rockpi-rpi-touchscreen-map-touch
 	autostart=$sandbox/etc/xdg/autostart/rockpi-rpi-touchscreen-touch-map.desktop
 	if LN_CREATE_FILE_BEFORE_TARGET="$autostart" \
-		RM_FAIL_TARGET="$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5" \
+		MV_FAIL_SOURCE="$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5" \
 		run_uninstall "$sandbox" > "$sandbox/output" 2>&1; then
 		fail 'uninstall accepted a failed runtime asset restoration'
 	fi
@@ -1675,7 +1700,7 @@ test_uninstall_runtime_restore_publication_never_overwrites_race()
 	mapper=$sandbox/usr-libexec/rockpi-rpi-touchscreen-map-touch
 	autostart=$sandbox/etc/xdg/autostart/rockpi-rpi-touchscreen-touch-map.desktop
 	if MV_CREATE_FILE_BEFORE_TARGET="$autostart" LN_CREATE_FILE_BEFORE_TARGET="$autostart" \
-		RM_FAIL_TARGET="$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5" \
+		MV_FAIL_SOURCE="$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5" \
 		run_uninstall "$sandbox" > "$sandbox/output" 2>&1; then
 		fail 'uninstall accepted a runtime restore publication race'
 	fi
@@ -1703,7 +1728,8 @@ test_uninstall_recovery_cleanup_failure_is_reported()
 	make_sandbox "$sandbox"
 	run_install "$sandbox" "$sandbox/validate-pass.sh"
 	recovery_prefix=$sandbox/usr-src/.rockpi-rpi-touchscreen.uninstall.
-	if RM_FAIL_PREFIX="$recovery_prefix" run_uninstall "$sandbox" > "$sandbox/output" 2>&1; then
+	if RM_FAIL_TRANSACTION_ROOT_PREFIX="$recovery_prefix" \
+		run_uninstall "$sandbox" > "$sandbox/output" 2>&1; then
 		fail 'uninstall accepted a failed recovery cleanup'
 	fi
 	grep -Fq 'uninstall completed but recovery cleanup failed' "$sandbox/output" ||
@@ -2473,7 +2499,7 @@ test_uninstall_source_failure_restores_transaction()
 	sandbox=$workdir/uninstall-source-failure
 	prepare_uninstall_failure "$sandbox"
 	source=$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5
-	if RM_FAIL_TARGET="$source" run_uninstall "$sandbox" > "$sandbox/output" 2>&1; then
+	if MV_FAIL_SOURCE="$source" run_uninstall "$sandbox" > "$sandbox/output" 2>&1; then
 		fail 'uninstall accepted source mutation failure'
 	fi
 	assert_failed_uninstall_restored "$sandbox" "$UNINSTALL_CONFIG_CHECKSUM" "$UNINSTALL_DTBO_CHECKSUM"
@@ -2527,6 +2553,7 @@ seed_old_release()
 	sandbox=$1
 	old=$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.4
 	mkdir -p "$old/src" "$old/scripts" "$old/LICENSES"
+	chmod 0755 "$old" "$old/src" "$old/scripts" "$old/LICENSES"
 	cat > "$old/dkms.conf" <<'EOF'
 PACKAGE_NAME="rockpi-rpi-touchscreen"
 PACKAGE_VERSION="0.2.4"
@@ -2543,14 +2570,83 @@ MAKE[0]="'sh' scripts/dkms-make.sh ${kernelver} make KDIR=/lib/modules/${kernelv
 CLEAN="make KDIR=/lib/modules/${kernelver}/build clean"
 AUTOINSTALL="yes"
 EOF
-	printf '%s\n' 'old Makefile' > "$old/Makefile"
-	printf '%s\n' 'old license' > "$old/LICENSE"
-	printf '%s\n' 'old GPL license' > "$old/LICENSES/GPL-2.0-only.txt"
-	printf '%s\n' 'old upstream record' > "$old/LICENSES/UPSTREAM.md"
-	printf '%s\n' 'old DKMS make helper' > "$old/scripts/dkms-make.sh"
-	printf '%s\n' 'old touch protocol' > "$old/src/ft5426_protocol.h"
-	printf '%s\n' 'old touch source' > "$old/src/raspits_ft5426.c"
-	printf '%s\n' 'old panel source' > "$old/src/panel_rockpi_rpi_touchscreen.c"
+	chmod 0644 "$old/dkms.conf"
+	/usr/bin/install -m 0644 "$repo_root/Makefile" "$repo_root/LICENSE" "$old/"
+	/usr/bin/install -m 0644 "$repo_root/LICENSES/GPL-2.0-only.txt" \
+		"$repo_root/LICENSES/UPSTREAM.md" "$old/LICENSES/"
+	/usr/bin/install -m 0644 "$repo_root/src/ft5426_protocol.h" \
+		"$repo_root/src/raspits_ft5426.c" \
+		"$repo_root/src/panel_rockpi_rpi_touchscreen.c" \
+		"$repo_root/src/display_compat.h" "$repo_root/src/display_compat_core.h" \
+		"$repo_root/src/display_compat_core.c" "$repo_root/src/display_compat_main.c" \
+		"$old/src/"
+	cat > "$old/scripts/dkms-make.sh" <<'EOF'
+#!/bin/sh
+set -eu
+
+[ "$#" -ge 2 ] || {
+	printf 'ERROR: usage: %s KERNEL_RELEASE COMMAND [ARG ...]\n' "$0" >&2
+	exit 1
+}
+
+kernel_release=$1
+shift
+kernel_build=${MODULES_DIR:-/lib/modules}/$kernel_release/build
+compiler_config=$kernel_build/include/generated/autoconf.h
+compiler_header=$kernel_build/include/generated/compile.h
+kernel_compiler_banner=
+
+if [ -r "$compiler_config" ]; then
+	kernel_compiler_banner=$(awk -F '"' '/^[[:space:]]*#define[[:space:]]+CONFIG_CC_VERSION_TEXT[[:space:]]+/ { print $2; exit }' "$compiler_config")
+fi
+if [ -z "$kernel_compiler_banner" ] && [ -r "$compiler_header" ]; then
+	kernel_compiler_banner=$(awk -F '"' '/^[[:space:]]*#define[[:space:]]+LINUX_COMPILER[[:space:]]+/ { sub(/, GNU ld .*/, "", $2); print $2; exit }' "$compiler_header")
+fi
+[ -n "$kernel_compiler_banner" ] || {
+	"$@"
+	exit $?
+}
+
+kernel_compiler_name=$(printf '%s\n' "$kernel_compiler_banner" | awk '{ print $1 }')
+kernel_compiler_major=$(printf '%s\n' "$kernel_compiler_banner" | awk '
+	{
+		for (i = NF; i > 0; i--)
+			if ($i ~ /^[0-9]+\.[0-9]+/) {
+				split($i, version, ".")
+				print version[1]
+				exit
+			}
+	}')
+compiler_candidate=${MODULE_CC:-$kernel_compiler_name}
+command -v "$compiler_candidate" >/dev/null 2>&1 || {
+	printf 'ERROR: kernel compiler is not available: %s\n' "$compiler_candidate" >&2
+	exit 1
+}
+compiler_candidate=$(command -v "$compiler_candidate")
+compiler_banner=$("$compiler_candidate" --version 2>/dev/null | sed -n '1p')
+if [ "$compiler_banner" != "$kernel_compiler_banner" ] && [ -z "${MODULE_CC:-}" ] &&
+	[ -n "$kernel_compiler_major" ] && command -v "$kernel_compiler_name-$kernel_compiler_major" >/dev/null 2>&1; then
+	compiler_candidate=$(command -v "$kernel_compiler_name-$kernel_compiler_major")
+fi
+
+workdir=$(mktemp -d)
+cleanup()
+{
+	rm -rf "$workdir"
+}
+trap cleanup EXIT HUP INT TERM
+compiler_directory=$workdir/module-compiler
+mkdir "$compiler_directory"
+ln -s "$compiler_candidate" "$compiler_directory/$kernel_compiler_name"
+compiler_banner=$("$compiler_directory/$kernel_compiler_name" --version 2>/dev/null | sed -n '1p')
+[ "$compiler_banner" = "$kernel_compiler_banner" ] || {
+	printf 'ERROR: no compiler matches the kernel banner: %s (set MODULE_CC to a matching compiler)\n' "$kernel_compiler_banner" >&2
+	exit 1
+}
+
+"$@" "CC=$compiler_directory/$kernel_compiler_name"
+EOF
+	chmod 0755 "$old/scripts/dkms-make.sh"
 	printf '%s\n' '0.2.4' > "$sandbox/dkms-added.state"
 	printf '%s\n' '0.2.4|6.18.43-current-rockchip64|aarch64' > "$sandbox/dkms-built.state"
 	printf '%s\n' '0.2.4|6.18.43-current-rockchip64|aarch64' > "$sandbox/dkms-installed.state"
@@ -2594,6 +2690,164 @@ source_tree_digest()
 			/usr/bin/sha256sum "$source_file"
 		done | /usr/bin/sha256sum | awk '{print $1}'
 	)
+}
+
+mutate_source_ownership_fixture()
+{
+	source=$1
+	variant=$2
+	case $variant in
+	extra)
+		printf '%s\n' local-extra > "$source/local-extra"
+		;;
+	modified)
+		printf '%s\n' local-modification >> "$source/src/display_compat_core.c"
+		;;
+	mode)
+		chmod 0600 "$source/Makefile"
+		;;
+	symlink)
+		rm -f "$source/src/display_compat.h"
+		ln -s /tmp/local-display-compat.h "$source/src/display_compat.h"
+		;;
+	*) fail "unknown source ownership mutation: $variant" ;;
+	esac
+}
+
+assert_source_ownership_mutation_survives()
+{
+	source=$1
+	variant=$2
+	case $variant in
+	extra)
+		grep -Fxq local-extra "$source/local-extra" ||
+			fail 'source ownership check lost an extra file'
+		;;
+	modified)
+		grep -Fxq local-modification "$source/src/display_compat_core.c" ||
+			fail 'source ownership check lost a modified file'
+		;;
+	mode)
+		assert_equal "$(stat -c '%a' "$source/Makefile")" 600 \
+			'source ownership check changed a local mode'
+		;;
+	symlink)
+		[ -L "$source/src/display_compat.h" ] ||
+			fail 'source ownership check changed a local symlink type'
+		assert_equal "$(readlink "$source/src/display_compat.h")" \
+			/tmp/local-display-compat.h 'source ownership check changed a local symlink target'
+		;;
+	esac
+}
+
+test_install_requires_exact_old_source_ownership()
+{
+	for variant in extra modified mode symlink; do
+		sandbox=$workdir/install-old-source-ownership-$variant
+		make_sandbox "$sandbox"
+		seed_old_release "$sandbox"
+		old=$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.4
+		mutate_source_ownership_fixture "$old" "$variant"
+		if run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+			fail "installer deleted $variant old source as project-owned"
+		fi
+		grep -Fq "registered old DKMS source does not match exact 0.2.4 ownership: $old" \
+			"$sandbox/output" ||
+			fail "installer did not diagnose $variant old source ownership"
+		assert_source_ownership_mutation_survives "$old" "$variant"
+		assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.4)" \
+			'rockpi-rpi-touchscreen/0.2.4, 6.18.43-current-rockchip64, aarch64: installed' \
+			"$variant old source ownership check changed old DKMS state"
+		assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.5)" '' \
+			"$variant old source ownership check reached new DKMS mutation"
+	done
+	printf 'PASS: install requires exact old source bytes, paths, modes, and types\n'
+}
+
+test_uninstall_requires_exact_current_source_ownership()
+{
+	for variant in extra modified mode symlink; do
+		sandbox=$workdir/uninstall-current-source-ownership-$variant
+		make_sandbox "$sandbox"
+		run_install "$sandbox" "$sandbox/validate-pass.sh"
+		current=$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5
+		mutate_source_ownership_fixture "$current" "$variant"
+		if run_uninstall "$sandbox" > "$sandbox/output" 2>&1; then
+			fail "uninstaller deleted $variant current source as project-owned"
+		fi
+		grep -Fq "source path does not match exact 0.2.5 ownership: $current" \
+			"$sandbox/output" ||
+			fail "uninstaller did not diagnose $variant current source ownership"
+		assert_source_ownership_mutation_survives "$current" "$variant"
+		assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.5)" \
+			'rockpi-rpi-touchscreen/0.2.5, 6.18.43-current-rockchip64, aarch64: installed' \
+			"$variant current source ownership check reached DKMS removal"
+	done
+	printf 'PASS: uninstall requires exact current source bytes, paths, modes, and types\n'
+}
+
+test_install_source_retirement_claim_preserves_race()
+{
+	sandbox=$workdir/install-old-source-retirement-race
+	make_sandbox "$sandbox"
+	seed_old_release "$sandbox"
+	old=$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.4
+	if MV_MUTATE_SOURCE_TREE="$old" \
+		run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+		fail 'installer accepted old source mutation at retirement claim boundary'
+	fi
+	grep -Fxq raced-source-data "$old/local-race" ||
+		fail 'old source retirement race lost local data'
+	grep -Fq 'old DKMS source retirement could not claim exact ownership; retained' \
+		"$sandbox/output" ||
+		fail 'old source retirement race did not report retained recovery'
+	assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.4)" \
+		'rockpi-rpi-touchscreen/0.2.4, 6.18.43-current-rockchip64, aarch64: installed' \
+		'old source retirement race did not restore old DKMS lifecycle'
+	assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.5)" '' \
+		'old source retirement race retained new DKMS lifecycle'
+	printf 'PASS: install retirement claim preserves raced old source data\n'
+}
+
+test_uninstall_source_retirement_claim_preserves_race()
+{
+	sandbox=$workdir/uninstall-current-source-retirement-race
+	make_sandbox "$sandbox"
+	run_install "$sandbox" "$sandbox/validate-pass.sh"
+	current=$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5
+	if MV_MUTATE_SOURCE_TREE="$current" run_uninstall "$sandbox" > "$sandbox/output" 2>&1; then
+		fail 'uninstaller accepted current source mutation at retirement claim boundary'
+	fi
+	grep -Fxq raced-source-data "$current/local-race" ||
+		fail 'current source retirement race lost local data'
+	grep -Fq 'source retirement could not claim exact ownership; retained' "$sandbox/output" ||
+		fail 'current source retirement race did not report retained recovery'
+	assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.5)" \
+		'rockpi-rpi-touchscreen/0.2.5, 6.18.43-current-rockchip64, aarch64: installed' \
+		'current source retirement race did not restore DKMS lifecycle'
+	printf 'PASS: uninstall retirement claim preserves raced current source data\n'
+}
+
+test_install_rollback_retains_modified_created_source()
+{
+	sandbox=$workdir/install-rollback-modified-created-source
+	make_sandbox "$sandbox"
+	seed_old_release "$sandbox"
+	current=$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5
+	modified=$current/src/display_compat_core.c
+	if RM_FAIL_SOURCE_RETIREMENT_BASENAME=Makefile \
+		RM_CORRUPT_FILE_ON_FAILURE="$modified" \
+		run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+		fail 'installer accepted late failure after created source was locally modified'
+	fi
+	grep -Fxq corrupt-runtime-asset "$modified" ||
+		fail 'install rollback deleted a local edit in transaction-created source'
+	grep -Fq "new source retained at $current" "$sandbox/output" ||
+		fail 'install rollback did not report retained modified source'
+	assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.4)" \
+		'rockpi-rpi-touchscreen/0.2.4, 6.18.43-current-rockchip64, aarch64: installed' \
+		'modified created-source rollback did not restore old DKMS lifecycle'
+	printf 'PASS: install rollback retains modified transaction-created source\n'
 }
 
 capture_migration_baseline()
@@ -2994,7 +3248,7 @@ EOF
 	if run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
 		fail 'installer accepted sparse extra-module metadata in the old release'
 	fi
-	grep -Fq 'registered old DKMS source is not the faithful three-module 0.2.4 release' "$sandbox/output" ||
+	grep -Fq 'registered old DKMS source does not match exact 0.2.4 ownership' "$sandbox/output" ||
 		fail 'installer did not explain the unfaithful old source metadata'
 	assert_clean_failed_migration_restored "$sandbox" "$sandbox/output"
 	printf 'PASS: sparse extra old-module metadata blocks migration before mutation\n'
@@ -3010,7 +3264,7 @@ test_missing_old_provider_metadata_blocks_migration()
 	if run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
 		fail 'installer accepted old metadata that omitted the provider'
 	fi
-	grep -Fq 'registered old DKMS source is not the faithful three-module 0.2.4 release' \
+	grep -Fq 'registered old DKMS source does not match exact 0.2.4 ownership' \
 		"$sandbox/output" || fail 'installer did not explain missing old provider metadata'
 	assert_clean_failed_migration_restored "$sandbox" "$sandbox/output"
 	printf 'PASS: missing old provider metadata blocks migration before mutation\n'
@@ -3456,6 +3710,11 @@ test_uninstall_source_failure_restores_transaction
 test_shared_uninstall_assertion_rejects_rollback_failure_output
 test_uninstall_accepts_unregistered_dkms
 test_uninstall_refuses_unowned_unregistered_source
+test_install_requires_exact_old_source_ownership
+test_uninstall_requires_exact_current_source_ownership
+test_install_source_retirement_claim_preserves_race
+test_uninstall_source_retirement_claim_preserves_race
+test_install_rollback_retains_modified_created_source
 test_preexisting_current_added_and_built_lifecycles_are_restored
 test_old_retirement_mutate_then_fail_restores_transaction
 test_compressed_only_old_and_new_artifacts_migrate_successfully
