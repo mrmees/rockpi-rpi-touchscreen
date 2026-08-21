@@ -369,6 +369,58 @@ test_validator_rejects_malformed_desktop_exec()
 	printf 'PASS: validator rejects a malformed touch autostart Exec\n'
 }
 
+test_validator_rejects_invalid_touch_mapper_syntax()
+{
+	sandbox=$workdir/invalid-touch-mapper-syntax
+	make_packaged_asset_sandbox "$sandbox"
+	printf '%s\n' 'if then' >> "$sandbox/repo/scripts/map-touchscreen.sh"
+	if run_packaged_asset_validate "$sandbox" > "$sandbox/output" 2>&1; then
+		fail 'validator accepted invalid touch mapper shell syntax'
+	fi
+	grep -Fq 'touch mapper source has invalid shell syntax' "$sandbox/output" ||
+		fail 'validator did not identify invalid touch mapper shell syntax'
+	printf 'PASS: validator rejects invalid touch mapper shell syntax\n'
+}
+
+test_validator_rejects_malformed_desktop_tryexec()
+{
+	sandbox=$workdir/malformed-desktop-tryexec
+	make_packaged_asset_sandbox "$sandbox"
+	sed -i 's#TryExec=/usr/libexec/rockpi-rpi-touchscreen-map-touch#TryExec=/usr/bin/false#' \
+		"$sandbox/repo/assets/rockpi-rpi-touchscreen-touch-map.desktop"
+	if run_packaged_asset_validate "$sandbox" > "$sandbox/output" 2>&1; then
+		fail 'validator accepted a malformed touch autostart TryExec'
+	fi
+	grep -Fq 'touch autostart TryExec is not exact' "$sandbox/output" ||
+		fail 'validator did not identify the malformed touch autostart TryExec'
+	printf 'PASS: validator rejects a malformed touch autostart TryExec\n'
+}
+
+test_validator_requires_exactly_one_desktop_entry_group()
+{
+	for variant in wrong-header extra-group; do
+		sandbox=$workdir/desktop-group-$variant
+		make_packaged_asset_sandbox "$sandbox"
+		case $variant in
+		wrong-header)
+			sed -i 's/^\[Desktop Entry\]$/[Wrong Group]/' \
+				"$sandbox/repo/assets/rockpi-rpi-touchscreen-touch-map.desktop"
+			;;
+		extra-group)
+			printf '%s\n' '[Other Group]' 'Name=Unexpected' >> \
+				"$sandbox/repo/assets/rockpi-rpi-touchscreen-touch-map.desktop"
+			;;
+		esac
+		if run_packaged_asset_validate "$sandbox" > "$sandbox/output" 2>&1; then
+			fail "validator accepted desktop group mutation: $variant"
+		fi
+		grep -Fq 'touch autostart must contain exactly one [Desktop Entry] group' \
+			"$sandbox/output" ||
+			fail "validator did not identify desktop group mutation: $variant"
+	done
+	printf 'PASS: validator requires exactly one Desktop Entry group\n'
+}
+
 test_validator_rejects_layout_mutating_touch_mapper()
 {
 	sandbox=$workdir/layout-mutating-touch-mapper
@@ -396,6 +448,54 @@ test_validator_rejects_non_current_path_xrandr()
 		"$sandbox/output" ||
 		fail 'validator did not identify the path-qualified non-current xrandr invocation'
 	printf 'PASS: validator rejects a path-qualified non-current xrandr invocation\n'
+}
+
+test_validator_rejects_xrandr_lexical_bypasses()
+{
+	for variant in quoted-path punctuation substitution quoted-substitution \
+		multiline-substitution continued-invocation leading-assignment; do
+		sandbox=$workdir/xrandr-bypass-$variant
+		make_packaged_asset_sandbox "$sandbox"
+		case $variant in
+		quoted-path) fixture='"/usr/bin/xrandr" --query' ;;
+		punctuation) fixture='xrandr;' ;;
+		substitution) fixture='result=$(xrandr --query)' ;;
+		quoted-substitution) fixture='result="$(xrandr --query)"' ;;
+		multiline-substitution) fixture='result=$(xrandr
+--query)' ;;
+		continued-invocation) fixture='xrandr \
+--query' ;;
+		leading-assignment) fixture='LC_ALL=C /usr/bin/xrandr --query' ;;
+		esac
+		printf '%s\n' "$fixture" >> "$sandbox/repo/scripts/map-touchscreen.sh"
+		if run_packaged_asset_validate "$sandbox" > "$sandbox/output" 2>&1; then
+			fail "validator accepted xrandr lexical bypass: $variant"
+		fi
+		grep -Fq 'touch mapper contains an xrandr invocation other than xrandr --current' \
+			"$sandbox/output" ||
+			fail "validator did not identify xrandr lexical bypass: $variant"
+	done
+	printf 'PASS: validator rejects quoted, punctuated, multiline, substituted, continued, and assignment-led xrandr bypasses\n'
+}
+
+test_validator_accepts_non_command_xrandr_text()
+{
+	for variant in comment argument quoted-argument assignment; do
+		sandbox=$workdir/xrandr-safe-text-$variant
+		make_packaged_asset_sandbox "$sandbox"
+		case $variant in
+		comment) fixture='# xrandr --query is documentation, not a command' ;;
+		argument) fixture="printf '%s\\n' xrandr --query" ;;
+		quoted-argument) fixture="printf '%s\\n' 'xrandr --query'" ;;
+		assignment) fixture="message='xrandr --query'" ;;
+		esac
+		printf '%s\n' "$fixture" >> "$sandbox/repo/scripts/map-touchscreen.sh"
+		if ! run_packaged_asset_validate "$sandbox" > "$sandbox/output" 2>&1; then
+			cat "$sandbox/output" >&2
+			fail "validator rejected non-command xrandr text: $variant"
+		fi
+	done
+	printf 'PASS: validator ignores xrandr in comments, arguments, and assignment values\n'
 }
 
 test_old_upstream_panel_compatible_fails_validation()
@@ -697,12 +797,22 @@ EOF
 	printf 'PASS: unmatched compiler banner fails validation\n'
 }
 
+if [ -n "${TEST_FILTER:-}" ]; then
+	"$TEST_FILTER"
+	exit 0
+fi
+
 test_module_warning_fails_validation
 test_validator_rejects_missing_touch_mapper
 test_validator_rejects_non_executable_touch_mapper
 test_validator_rejects_malformed_desktop_exec
+test_validator_rejects_invalid_touch_mapper_syntax
+test_validator_rejects_malformed_desktop_tryexec
+test_validator_requires_exactly_one_desktop_entry_group
 test_validator_rejects_layout_mutating_touch_mapper
 test_validator_rejects_non_current_path_xrandr
+test_validator_rejects_xrandr_lexical_bypasses
+test_validator_accepts_non_command_xrandr_text
 test_old_upstream_panel_compatible_fails_validation
 test_validator_checks_distinct_module_aliases
 test_validator_requires_display_compat_provider_module

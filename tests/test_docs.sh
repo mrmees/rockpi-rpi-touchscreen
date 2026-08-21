@@ -122,6 +122,8 @@ require_text docs/recovery.md 'Exact scoped offline rollback changes only `TARGE
 require_text docs/recovery.md 'RETAIN MODIFIED: /usr/libexec/rockpi-rpi-touchscreen-map-touch'
 require_text docs/recovery.md 'RETAIN MODIFIED: /etc/xdg/autostart/rockpi-rpi-touchscreen-touch-map.desktop'
 require_text docs/recovery.md 'Dry-run output is predictive and makes no changes.'
+require_text docs/recovery.md 'Dry-run applies the same autostart-to-mapper dependency decision as real uninstall.'
+require_text docs/recovery.md 'Matching runtime assets are snapshotted in mapper-then-autostart order before any removal claim.'
 require_text docs/recovery.md 'A modified or newly appeared'
 require_text docs/recovery.md '`RETAIN DEPENDENCY` so the entry is not stranded without its executable.'
 require_text LICENSES/UPSTREAM.md 'https://github.com/torvalds/linux/blob/7d0a66e4bb9081d75c82ec4957c50034cb0ea449/include/drm/drm_panel.h'

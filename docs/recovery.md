@@ -63,9 +63,15 @@ RETAIN MODIFIED: /usr/libexec/rockpi-rpi-touchscreen-map-touch
 RETAIN MODIFIED: /etc/xdg/autostart/rockpi-rpi-touchscreen-touch-map.desktop
 ```
 
-During a real uninstall, matching assets are snapshotted and claimed in
-dependency order: autostart first, then mapper. A modified or newly appeared
-autostart is retained, and its matching mapper is retained with
+Dry-run applies the same autostart-to-mapper dependency decision as real uninstall.
+If the autostart entry is modified while the mapper is owned, dry-run reports
+`RETAIN MODIFIED` for the autostart entry and `RETAIN DEPENDENCY` for the
+mapper instead of predicting mapper removal.
+
+Matching runtime assets are snapshotted in mapper-then-autostart order before any removal claim.
+During a real uninstall, removal claims occur in dependency order: autostart
+first, then mapper. A modified or newly appeared autostart is retained, and its
+matching mapper is retained with
 `RETAIN DEPENDENCY` so the entry is not stranded without its executable. A
 modified mapper may be retained while an otherwise owned autostart is removed.
 Every claim is revalidated so a concurrent local replacement is retained, not

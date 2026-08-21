@@ -71,13 +71,19 @@ if [ "$dry_run" -eq 1 ]; then
 	remove_overlay_token "$temporary_config" "$OVERLAY_TOKEN"
 	printf 'REMOVE: %s\n' "$overlay_destination"
 	printf 'REMOVE: %s\n' "$PROJECT_SOURCE_DIR"
-	case $mapper_state in
-	owned) printf 'REMOVE: %s\n' "$TOUCH_MAPPER_DESTINATION" ;;
-	modified) printf 'RETAIN MODIFIED: %s\n' "$TOUCH_MAPPER_DESTINATION" ;;
-	esac
 	case $autostart_state in
 	owned) printf 'REMOVE: %s\n' "$TOUCH_AUTOSTART_DESTINATION" ;;
 	modified) printf 'RETAIN MODIFIED: %s\n' "$TOUCH_AUTOSTART_DESTINATION" ;;
+	esac
+	case $mapper_state in
+	owned)
+		if [ "$autostart_state" = modified ]; then
+			printf 'RETAIN DEPENDENCY: %s\n' "$TOUCH_MAPPER_DESTINATION"
+		else
+			printf 'REMOVE: %s\n' "$TOUCH_MAPPER_DESTINATION"
+		fi
+		;;
+	modified) printf 'RETAIN MODIFIED: %s\n' "$TOUCH_MAPPER_DESTINATION" ;;
 	esac
 	printf 'CONFIG: %s\n' "$ARMBIAN_ENV"
 	for module_name in $MODULE_NAMES; do

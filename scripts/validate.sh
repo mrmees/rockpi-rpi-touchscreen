@@ -220,6 +220,13 @@ if ! sh -n "$touch_mapper"; then
 fi
 [ -f "$touch_autostart" ] || die 'touch autostart source is missing'
 
+first_autostart_line=$(sed -n '1p' "$touch_autostart")
+autostart_group_count=$(grep -Ec '^\[[^][]+\]$' "$touch_autostart" || true)
+desktop_group_count=$(grep -Fxc '[Desktop Entry]' "$touch_autostart" || true)
+[ "$first_autostart_line" = '[Desktop Entry]' ] &&
+	[ "$autostart_group_count" -eq 1 ] && [ "$desktop_group_count" -eq 1 ] ||
+	die 'touch autostart must contain exactly one [Desktop Entry] group'
+
 expected_exec='Exec=/usr/libexec/rockpi-rpi-touchscreen-map-touch --watch'
 exec_count=$(grep -c '^Exec=' "$touch_autostart" || true)
 exact_exec_count=$(grep -Fxc "$expected_exec" "$touch_autostart" || true)
@@ -238,15 +245,173 @@ for forbidden_token in --output --mode --pos --primary --off DISPLAY=: XAUTHORIT
 	fi
 done
 if ! awk '
-	{
-		for (field = 1; field <= NF; field++) {
-			command_name = $field
-			sub(/^.*\//, "", command_name)
-			if (command_name == "xrandr" &&
-			    (field == 1 || $(field - 1) != "require_command") &&
-			    $(field + 1) != "--current")
-				exit 1
+	function reject_xrandr() {
+		bad = 1
+		exit 1
+	}
+	function is_control_word(token) {
+		return token == "!" || token == "if" || token == "then" ||
+			token == "elif" || token == "else" || token == "while" ||
+			token == "until" || token == "do"
+	}
+	function finish_word(    token, command_name) {
+		if (!have_word)
+			return
+		token = word
+		word = ""
+		have_word = 0
+		if (need_xrandr_argument) {
+			if (token != "--current")
+				reject_xrandr()
+			need_xrandr_argument = 0
+			command_position = 0
+			return
 		}
+		if (!command_position)
+			return
+		if (token ~ /^[A-Za-z_][A-Za-z0-9_]*=/ || is_control_word(token))
+			return
+		command_name = token
+		sub(/^.*\//, "", command_name)
+		if (command_name == "xrandr")
+			need_xrandr_argument = 1
+		command_position = 0
+	}
+	function command_boundary() {
+		finish_word()
+		if (need_xrandr_argument)
+			reject_xrandr()
+		command_position = 1
+	}
+	BEGIN {
+		command_position = 1
+		single_quote_character = sprintf("%c", 39)
+	}
+	{
+		line = $0
+		position = 1
+		while (position <= length(line)) {
+			character = substr(line, position, 1)
+			next_character = substr(line, position + 1, 1)
+			if (single_quoted) {
+				if (character == single_quote_character)
+					single_quoted = 0
+				else
+					word = word character
+				have_word = 1
+				position++
+				continue
+			}
+			if (double_quoted) {
+				if (character == "\"") {
+					double_quoted = 0
+					position++
+					continue
+				}
+				if (character == "\\" && position == length(line)) {
+					continued_line = 1
+					position++
+					continue
+				}
+				if (character == "\\" && position < length(line)) {
+					word = word next_character
+					have_word = 1
+					position += 2
+					continue
+				}
+				if (character == "$" && next_character == "(") {
+					finish_word()
+					if (need_xrandr_argument)
+						reject_xrandr()
+					substitution_depth++
+					outer_command_position[substitution_depth] = command_position
+					resume_double_quote[substitution_depth] = 1
+					double_quoted = 0
+					command_position = 1
+					position += 2
+					continue
+				}
+				word = word character
+				have_word = 1
+				position++
+				continue
+			}
+			if (character == "#" && !have_word)
+				break
+			if (character ~ /[[:space:]]/) {
+				finish_word()
+				position++
+				continue
+			}
+			if (character == single_quote_character) {
+				single_quoted = 1
+				have_word = 1
+				position++
+				continue
+			}
+			if (character == "\"") {
+				double_quoted = 1
+				have_word = 1
+				position++
+				continue
+			}
+			if (character == "\\" && position == length(line)) {
+				continued_line = 1
+				position++
+				continue
+			}
+			if (character == "\\" && position < length(line)) {
+				word = word next_character
+				have_word = 1
+				position += 2
+				continue
+			}
+			if (character == "$" && next_character == "(") {
+				finish_word()
+				if (need_xrandr_argument)
+					reject_xrandr()
+				substitution_depth++
+				outer_command_position[substitution_depth] = command_position
+				resume_double_quote[substitution_depth] = 0
+				command_position = 1
+				position += 2
+				continue
+			}
+			if (character == ")" && substitution_depth > 0) {
+				finish_word()
+				if (need_xrandr_argument)
+					reject_xrandr()
+				command_position = outer_command_position[substitution_depth]
+				if (resume_double_quote[substitution_depth])
+					double_quoted = 1
+				delete outer_command_position[substitution_depth]
+				delete resume_double_quote[substitution_depth]
+				substitution_depth--
+				position++
+				continue
+			}
+			if (character == ";" || character == "|" || character == "&" ||
+			    character == "(" || character == ")" || character == "{" ||
+			    character == "}") {
+				command_boundary()
+				position++
+				continue
+			}
+			word = word character
+			have_word = 1
+			position++
+		}
+		if (continued_line)
+			continued_line = 0
+		else if (!single_quoted && !double_quoted)
+			command_boundary()
+		else
+			word = word "\n"
+	}
+	END {
+		if (bad || need_xrandr_argument || single_quoted || double_quoted ||
+		    substitution_depth != 0)
+			exit 1
 	}
 ' "$touch_mapper"; then
 	die 'touch mapper contains an xrandr invocation other than xrandr --current'

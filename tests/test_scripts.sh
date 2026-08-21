@@ -969,6 +969,48 @@ test_uninstall_dry_run_lists_runtime_assets()
 	printf 'PASS: uninstall dry run lists owned runtime assets without mutation\n'
 }
 
+test_uninstall_dry_run_retains_modified_autostart_dependency()
+{
+	sandbox=$workdir/uninstall-runtime-dry-run-autostart-dependency
+	make_sandbox "$sandbox"
+	run_install "$sandbox" "$sandbox/validate-pass.sh"
+	mapper=$sandbox/usr-libexec/rockpi-rpi-touchscreen-map-touch
+	autostart=$sandbox/etc/xdg/autostart/rockpi-rpi-touchscreen-touch-map.desktop
+	config=$sandbox/boot/armbianEnv.txt
+	dtbo=$sandbox/boot/overlay-user/rockpi-4b-plus-rpi-touchscreen.dtbo
+	source=$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.5
+	cp "$repo_root/assets/rockpi-rpi-touchscreen-touch-map.desktop" "$autostart"
+	chmod 0600 "$autostart"
+	mapper_before=$(sha256sum "$mapper" | awk '{print $1}')
+	autostart_before=$(sha256sum "$autostart" | awk '{print $1}')
+	config_before=$(sha256sum "$config" | awk '{print $1}')
+	dtbo_before=$(sha256sum "$dtbo" | awk '{print $1}')
+	source_before=$(source_tree_digest "$source")
+	dry_run=$(run_uninstall "$sandbox" --dry-run)
+	printf '%s\n' "$dry_run" | grep -Fqx "RETAIN MODIFIED: $autostart" ||
+		fail 'dry run did not report the modified autostart'
+	printf '%s\n' "$dry_run" | grep -Fqx "RETAIN DEPENDENCY: $mapper" ||
+		fail 'dry run did not retain the mapper dependency for modified autostart'
+	if printf '%s\n' "$dry_run" | grep -Fqx "REMOVE: $mapper"; then
+		fail 'dry run contradicted real uninstall by removing the mapper dependency'
+	fi
+	assert_equal "$(sha256sum "$mapper" | awk '{print $1}')" "$mapper_before" \
+		'dependency-aware dry run changed mapper bytes'
+	assert_equal "$(stat -c '%a' "$mapper")" '755' \
+		'dependency-aware dry run changed mapper mode'
+	assert_equal "$(sha256sum "$autostart" | awk '{print $1}')" "$autostart_before" \
+		'dependency-aware dry run changed autostart bytes'
+	assert_equal "$(stat -c '%a' "$autostart")" '600' \
+		'dependency-aware dry run changed autostart mode'
+	assert_equal "$(sha256sum "$config" | awk '{print $1}')" "$config_before" \
+		'dependency-aware dry run changed boot configuration'
+	assert_equal "$(sha256sum "$dtbo" | awk '{print $1}')" "$dtbo_before" \
+		'dependency-aware dry run changed DTBO bytes'
+	assert_equal "$(source_tree_digest "$source")" "$source_before" \
+		'dependency-aware dry run changed DKMS source'
+	printf 'PASS: dry run retains modified autostart and its mapper dependency without mutation\n'
+}
+
 test_uninstall_removes_matching_runtime_assets()
 {
 	sandbox=$workdir/uninstall-runtime-removal
@@ -2813,6 +2855,7 @@ test_install_handoff_requires_authorized_dsi_first_acceptance
 test_dkms_make_command_suppresses_automatic_kernelrelease
 test_uninstall_removes_only_project_token_and_dry_run_is_scoped
 test_uninstall_dry_run_lists_runtime_assets
+test_uninstall_dry_run_retains_modified_autostart_dependency
 test_uninstall_removes_matching_runtime_assets
 test_uninstall_retains_and_reports_modified_mapper
 test_uninstall_retains_and_reports_modified_autostart
