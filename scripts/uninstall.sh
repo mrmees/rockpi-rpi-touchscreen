@@ -335,18 +335,17 @@ claim_runtime_asset()
 	runtime_claim=$(mktemp "$runtime_directory/.${PROJECT_NAME}.uninstall.$runtime_asset_name.XXXXXX") ||
 		return 1
 	runtime_claim_recovery=$runtime_claim
+	runtime_placeholder_identity=$(object_identity "$runtime_claim" || true)
+	[ -n "$runtime_placeholder_identity" ] || return 1
 	if ! mv -f "$runtime_destination" "$runtime_claim"; then
-		if [ ! -e "$runtime_destination" ] && [ ! -L "$runtime_destination" ] &&
-			runtime_asset_matches "$runtime_source" "$runtime_claim" "$runtime_mode"; then
-			return 1
-		fi
-		if [ -e "$runtime_destination" ] || [ -L "$runtime_destination" ]; then
+		if unchanged_empty_placeholder "$runtime_claim" "$runtime_placeholder_identity" &&
+			{ [ -e "$runtime_destination" ] || [ -L "$runtime_destination" ]; }; then
 			runtime_claim_recovery=$runtime_destination
 			if ! runtime_asset_matches "$runtime_source" "$runtime_destination" "$runtime_mode"; then
 				printf 'RETAIN MODIFIED: %s\n' "$runtime_destination"
 			fi
+			rm -f "$runtime_claim" >/dev/null 2>&1 || true
 		fi
-		rm -f "$runtime_claim" >/dev/null 2>&1 || true
 		return 1
 	fi
 	if runtime_asset_matches "$runtime_source" "$runtime_claim" "$runtime_mode"; then

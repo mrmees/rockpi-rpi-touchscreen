@@ -413,6 +413,52 @@ run_packaged_asset_validate()
 		sh "$sandbox/repo/scripts/validate.sh" --offline
 }
 
+test_validator_requires_exact_canonical_touch_mapper_object()
+{
+	for variant in canonical symlink mode-777 mode-750 directory byte-change; do
+		sandbox=$workdir/canonical-touch-mapper-$variant
+		make_packaged_asset_sandbox "$sandbox"
+		mapper=$sandbox/repo/scripts/map-touchscreen.sh
+		case $variant in
+		canonical)
+			if ! run_packaged_asset_validate "$sandbox" > "$sandbox/output" 2>&1; then
+				cat "$sandbox/output" >&2
+				fail 'validator rejected the canonical mode-755 regular-file mapper'
+			fi
+			continue
+			;;
+		symlink)
+			mv "$mapper" "$mapper.target"
+			ln -s map-touchscreen.sh.target "$mapper"
+			expected='touch mapper source must be a non-symlink regular file'
+			;;
+		mode-777)
+			chmod 0777 "$mapper"
+			expected='touch mapper source mode is not exactly 755'
+			;;
+		mode-750)
+			chmod 0750 "$mapper"
+			expected='touch mapper source mode is not exactly 755'
+			;;
+		directory)
+			rm "$mapper"
+			mkdir "$mapper"
+			expected='touch mapper source must be a non-symlink regular file'
+			;;
+		byte-change)
+			printf '%s\n' '# one-byte-policy-fixture' >> "$mapper"
+			expected='touch mapper does not match canonical project artifact'
+			;;
+		esac
+		if run_packaged_asset_validate "$sandbox" > "$sandbox/output" 2>&1; then
+			fail "validator accepted canonical mapper object mutation: $variant"
+		fi
+		grep -Fq "$expected" "$sandbox/output" ||
+			fail "validator did not report the intended mapper boundary for $variant"
+	done
+	printf 'PASS: validator requires canonical mapper bytes, syntax, type, and exact mode 755\n'
+}
+
 test_validator_rejects_missing_touch_mapper()
 {
 	sandbox=$workdir/missing-touch-mapper
@@ -434,8 +480,8 @@ test_validator_rejects_non_executable_touch_mapper()
 	if run_packaged_asset_validate "$sandbox" > "$sandbox/output" 2>&1; then
 		fail 'validator accepted a non-executable touch mapper'
 	fi
-	grep -Fq 'touch mapper source is not executable' "$sandbox/output" ||
-		fail 'validator did not identify the non-executable touch mapper'
+	grep -Fq 'touch mapper source mode is not exactly 755' "$sandbox/output" ||
+		fail 'validator did not identify the non-755 touch mapper mode'
 	printf 'PASS: validator rejects a non-executable touch mapper\n'
 }
 
@@ -860,6 +906,7 @@ fi
 
 test_validator_rejects_unsupported_kernel_before_build
 test_module_warning_fails_validation
+test_validator_requires_exact_canonical_touch_mapper_object
 test_validator_rejects_missing_touch_mapper
 test_validator_rejects_non_executable_touch_mapper
 test_validator_rejects_malformed_desktop_exec

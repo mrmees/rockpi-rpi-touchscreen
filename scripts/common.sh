@@ -131,8 +131,8 @@ source_release_manifest()
 {
 	case $1 in
 	0.2.4)
-		# Exact source release at 7f4b23bfb09247f31f017866308e73d2b321f94a,
-		# the committed tree immediately before 0.2.5 packaging.
+		# Exact deployed source baseline at
+		# 70648baeca7914768a582af5d652f22f8200605a.
 		cat <<'EOF'
 d|755||LICENSES
 d|755||scripts
@@ -140,7 +140,7 @@ d|755||src
 f|644|edaef632cbb643e4e7a221717a6c441a4c1a7c918e6e4d56debc3d8739b233f6|LICENSE
 f|644|edaef632cbb643e4e7a221717a6c441a4c1a7c918e6e4d56debc3d8739b233f6|LICENSES/GPL-2.0-only.txt
 f|644|4aa0e8346d39b950e458d0297d0b945c8c4a1ba5cf446030e872b2e34594bb5a|LICENSES/UPSTREAM.md
-f|644|109f548f08c67f11415ac9d5e4a9217c95b1138e9153c41b6400653ba1ef9d55|Makefile
+f|644|4c7b3fe6fc79f60e58e083011a539b07059378cbdd61395741b1ff7679ed5847|Makefile
 f|644|b5d2b84ab77ac23ab242160c1f00d3e2a752858041c694d017d71bdfefe6c0be|dkms.conf
 f|755|6d936c60de7bc4044592981f5d81e01d2c3ed3d93d6bc6b72282bde5e4fd8abf|scripts/dkms-make.sh
 f|644|c804e9c522f2c4a2fe0022233c08dffbb2a9a0e29c950e9673bb299ff9ee8f7d|src/display_compat.h
@@ -365,6 +365,16 @@ object_identity()
 	stat -c '%d:%i:%f' -- "$1" 2>/dev/null
 }
 
+unchanged_empty_placeholder()
+{
+	placeholder_path=$1
+	placeholder_identity=$2
+	[ -n "$placeholder_identity" ] &&
+		[ -f "$placeholder_path" ] && [ ! -L "$placeholder_path" ] &&
+		[ ! -s "$placeholder_path" ] &&
+		[ "$(object_identity "$placeholder_path" || true)" = "$placeholder_identity" ]
+}
+
 try_publish_file_no_replace()
 {
 	publish_source=$1
@@ -372,6 +382,7 @@ try_publish_file_no_replace()
 	publish_mode=$3
 	publish_result=error
 	publish_recovery=
+	publish_identity=
 	publish_directory=$(dirname -- "$publish_destination")
 	mkdir -p "$publish_directory" || return 1
 	publish_temporary=$(mktemp "$publish_directory/.${PROJECT_NAME}.publish.XXXXXX") || return 1
@@ -396,6 +407,7 @@ try_publish_file_no_replace()
 			return 1
 		fi
 		publish_recovery=
+		publish_identity=$publish_destination_identity
 		publish_result=created
 		return 0
 	fi

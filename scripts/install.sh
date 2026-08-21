@@ -291,15 +291,14 @@ claim_created_runtime_asset()
 	created_claim=$(mktemp "$created_directory/.${PROJECT_NAME}.rollback.$created_asset_name.XXXXXX") ||
 		return 1
 	created_claim_recovery=$created_claim
+	created_placeholder_identity=$(object_identity "$created_claim" || true)
+	[ -n "$created_placeholder_identity" ] || return 1
 	if ! mv -f "$created_destination" "$created_claim"; then
-		if published_runtime_asset_matches "$created_source" "$created_claim" \
-			"$created_mode" "$created_identity"; then
-			return 1
-		fi
-		if [ -e "$created_destination" ] || [ -L "$created_destination" ]; then
+		if unchanged_empty_placeholder "$created_claim" "$created_placeholder_identity" &&
+			{ [ -e "$created_destination" ] || [ -L "$created_destination" ]; }; then
 			created_claim_recovery=$created_destination
+			rm -f "$created_claim" >/dev/null 2>&1 || true
 		fi
-		rm -f "$created_claim" >/dev/null 2>&1 || true
 		return 1
 	fi
 	if published_runtime_asset_matches "$created_source" "$created_claim" \
@@ -665,7 +664,7 @@ publish_runtime_asset()
 	publish_asset_mode=$4
 	if try_publish_file_no_replace "$publish_asset_source" "$publish_asset_destination" \
 		"$publish_asset_mode"; then
-		published_identity=$(object_identity "$publish_asset_destination" || true)
+		published_identity=$publish_identity
 		[ -n "$published_identity" ] ||
 			die "cannot record published runtime asset identity: $publish_asset_destination"
 		return 0

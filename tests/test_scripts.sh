@@ -525,7 +525,9 @@ if [ -n "${MV_CORRUPT_FILE_AFTER_TARGET:-}" ] &&
 	if [ -z "${MV_CORRUPT_FILE_AFTER_ONCE_MARKER:-}" ] ||
 		[ ! -e "$MV_CORRUPT_FILE_AFTER_ONCE_MARKER" ]; then
 		[ -z "${MV_CORRUPT_FILE_AFTER_ONCE_MARKER:-}" ] || : > "$MV_CORRUPT_FILE_AFTER_ONCE_MARKER"
-		printf '%s\n' corrupt-runtime-asset > "$MV_CORRUPT_FILE_AFTER_TARGET"
+		printf '%s\n' "${MV_CORRUPT_FILE_CONTENT:-corrupt-runtime-asset}" > "$MV_CORRUPT_FILE_AFTER_TARGET"
+		[ -z "${MV_CORRUPT_FILE_MODE:-}" ] ||
+			chmod "$MV_CORRUPT_FILE_MODE" "$MV_CORRUPT_FILE_AFTER_TARGET"
 	fi
 fi
 if [ -n "${MV_FAIL_AFTER_TARGET:-}" ] && [ "$last" = "$MV_FAIL_AFTER_TARGET" ] &&
@@ -689,7 +691,24 @@ case ${RM_FAIL_PREFIX_SECOND:-} in
    "${RM_FAIL_PREFIX_SECOND}"*) exit 30 ;;
    esac ;;
 esac
-exec /bin/rm "$@"
+/bin/rm "$@"
+rm_status=$?
+[ "$rm_status" -eq 0 ] || exit "$rm_status"
+if [ -n "${RM_REPLACE_PUBLICATION_TEMP_PREFIX:-}" ] &&
+	[ ! -e "${RM_REPLACE_PUBLICATION_MARKER:?}" ]; then
+	case $last in
+	"${RM_REPLACE_PUBLICATION_TEMP_PREFIX}"*)
+		replacement_temporary=${RM_REPLACE_PUBLICATION_DESTINATION:?}.replacement.$$
+		/bin/cp "${RM_REPLACE_PUBLICATION_SOURCE:?}" "$replacement_temporary"
+		/bin/chmod "${RM_REPLACE_PUBLICATION_MODE:?}" "$replacement_temporary"
+		/bin/mv -f "$replacement_temporary" "$RM_REPLACE_PUBLICATION_DESTINATION"
+		/usr/bin/stat -c '%d:%i:%f' "$RM_REPLACE_PUBLICATION_DESTINATION" > \
+			"${RM_REPLACE_PUBLICATION_IDENTITY_FILE:?}"
+		: > "$RM_REPLACE_PUBLICATION_MARKER"
+		;;
+	esac
+fi
+exit 0
 EOF
 	chmod +x "$sandbox/bin/rm"
 	cat > "$sandbox/bin/sha256sum" <<'EOF'
@@ -1559,6 +1578,41 @@ test_uninstall_rename_then_error_retains_named_claim()
 	printf 'PASS: rename-then-error retains and reports the exact held claim\n'
 }
 
+test_uninstall_failed_claim_move_retains_edited_recovery()
+{
+	sandbox=$workdir/uninstall-failed-edited-claim
+	make_sandbox "$sandbox"
+	run_install "$sandbox" "$sandbox/validate-pass.sh"
+	autostart=$sandbox/etc/xdg/autostart/rockpi-rpi-touchscreen-touch-map.desktop
+	config=$sandbox/boot/armbianEnv.txt
+	if MV_CORRUPT_FILE_AFTER_TARGET="$autostart" MV_CORRUPT_FILE_TRIGGER="$config" \
+		MV_CORRUPT_FILE_AFTER_ONCE_MARKER="$sandbox/autostart-locally-edited" \
+		MV_CORRUPT_FILE_CONTENT=local-byte-edit-before-failed-claim \
+		MV_CORRUPT_FILE_MODE=0600 \
+		MV_FAIL_AFTER_SOURCE="$autostart" \
+		MV_FAIL_AFTER_SOURCE_MARKER="$sandbox/autostart-claim-failed-after" \
+		run_uninstall "$sandbox" > "$sandbox/output" 2>&1; then
+		fail 'uninstaller accepted a failed claim after a local autostart edit'
+	fi
+	[ -f "$sandbox/autostart-locally-edited" ] &&
+		[ -f "$sandbox/autostart-claim-failed-after" ] ||
+		fail 'uninstall claim regression did not reach both edit and rename-then-error boundaries'
+	claim=$(find "$sandbox/etc/xdg/autostart" -maxdepth 1 -type f \
+		-name '.rockpi-rpi-touchscreen.uninstall.autostart.*' -print -quit)
+	[ -n "$claim" ] || fail 'failed uninstall claim move discarded the locally edited autostart recovery'
+	[ -f "$claim" ] && [ ! -L "$claim" ] ||
+		fail 'failed uninstall claim move changed the edited autostart regular-file type'
+	assert_equal "$(cat "$claim")" local-byte-edit-before-failed-claim \
+		'failed uninstall claim move changed the edited autostart bytes'
+	assert_equal "$(stat -c '%a' "$claim")" 600 \
+		'failed uninstall claim move changed the edited autostart mode'
+	grep -Fq "touch autostart claim retained at $claim" "$sandbox/output" ||
+		fail 'uninstall did not report the exact edited autostart recovery path'
+	grep -Fq 'rollback also failed' "$sandbox/output" ||
+		fail 'ambiguous uninstall claim did not retain transaction recovery'
+	printf 'PASS: failed uninstall claim move retains exact edited bytes, type, mode, and path\n'
+}
+
 test_uninstall_claim_cleanup_failure_reports_nonempty_recovery()
 {
 	sandbox=$workdir/uninstall-claim-cleanup-failure
@@ -2117,6 +2171,40 @@ test_runtime_publication_preserves_symlink_and_directory_collisions()
 	printf 'PASS: runtime publication preserves raced symlink and directory types\n'
 }
 
+test_publication_identity_is_propagated_from_verified_boundary()
+{
+	sandbox=$workdir/runtime-publication-identity-boundary
+	make_sandbox "$sandbox"
+	mapper=$sandbox/usr-libexec/rockpi-rpi-touchscreen-map-touch
+	config=$sandbox/boot/armbianEnv.txt
+	identity_file=$sandbox/replacement.identity
+	if RM_REPLACE_PUBLICATION_TEMP_PREFIX="$sandbox/usr-libexec/.rockpi-rpi-touchscreen.publish." \
+		RM_REPLACE_PUBLICATION_DESTINATION="$mapper" \
+		RM_REPLACE_PUBLICATION_SOURCE="$repo_root/scripts/map-touchscreen.sh" \
+		RM_REPLACE_PUBLICATION_MODE=0755 \
+		RM_REPLACE_PUBLICATION_IDENTITY_FILE="$identity_file" \
+		RM_REPLACE_PUBLICATION_MARKER="$sandbox/mapper-replaced-after-boundary" \
+		MV_FAIL_AFTER_TARGET="$config" MV_FAIL_AFTER_ONCE_MARKER="$sandbox/boot-failed-after" \
+		run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+		fail 'installer accepted a late failure after the publication identity race'
+	fi
+	[ -f "$sandbox/mapper-replaced-after-boundary" ] && [ -s "$identity_file" ] ||
+		fail 'publication identity regression did not replace the mapper after helper verification'
+	[ -f "$mapper" ] && [ ! -L "$mapper" ] ||
+		fail 'rollback deleted or changed the exact-byte replacement mapper type'
+	cmp "$repo_root/scripts/map-touchscreen.sh" "$mapper" ||
+		fail 'rollback changed the exact-byte replacement mapper'
+	assert_equal "$(stat -c '%a' "$mapper")" 755 \
+		'rollback changed the exact-byte replacement mapper mode'
+	assert_equal "$(stat -c '%d:%i:%f' "$mapper")" "$(cat "$identity_file")" \
+		'rollback did not preserve the replacement inode from after helper verification'
+	grep -Fqx "RETAIN MODIFIED: $mapper" "$sandbox/output" ||
+		fail 'rollback did not classify the replacement inode as locally owned'
+	grep -Fq "touch mapper retained at $mapper" "$sandbox/output" ||
+		fail 'rollback did not report the exact replacement mapper recovery path'
+	printf 'PASS: publication ownership propagates the helper-verified destination identity\n'
+}
+
 test_install_rollback_retains_post_publication_local_edit()
 {
 	sandbox=$workdir/runtime-post-publication-edit
@@ -2139,6 +2227,40 @@ test_install_rollback_retains_post_publication_local_edit()
 	grep -Fq 'rollback also failed' "$sandbox/output" ||
 		fail 'retained local mapper edit did not keep transaction recovery'
 	printf 'PASS: install rollback retains and reports a post-publication local edit\n'
+}
+
+test_install_failed_claim_move_retains_edited_recovery()
+{
+	sandbox=$workdir/install-failed-edited-claim
+	make_sandbox "$sandbox"
+	mapper=$sandbox/usr-libexec/rockpi-rpi-touchscreen-map-touch
+	config=$sandbox/boot/armbianEnv.txt
+	if MV_CORRUPT_FILE_AFTER_TARGET="$mapper" MV_CORRUPT_FILE_TRIGGER="$config" \
+		MV_CORRUPT_FILE_AFTER_ONCE_MARKER="$sandbox/mapper-locally-edited" \
+		MV_CORRUPT_FILE_CONTENT=local-byte-edit-before-failed-claim \
+		MV_CORRUPT_FILE_MODE=0700 \
+		MV_FAIL_AFTER_TARGET="$config" MV_FAIL_AFTER_ONCE_MARKER="$sandbox/boot-failed-after" \
+		MV_FAIL_AFTER_SOURCE="$mapper" \
+		MV_FAIL_AFTER_SOURCE_MARKER="$sandbox/mapper-claim-failed-after" \
+		run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+		fail 'installer accepted a failed rollback claim after a local mapper edit'
+	fi
+	[ -f "$sandbox/mapper-locally-edited" ] && [ -f "$sandbox/mapper-claim-failed-after" ] ||
+		fail 'install claim regression did not reach both edit and rename-then-error boundaries'
+	claim=$(find "$sandbox/usr-libexec" -maxdepth 1 -type f \
+		-name '.rockpi-rpi-touchscreen.rollback.mapper.*' -print -quit)
+	[ -n "$claim" ] || fail 'failed install claim move discarded the locally edited mapper recovery'
+	[ -f "$claim" ] && [ ! -L "$claim" ] ||
+		fail 'failed install claim move changed the edited mapper regular-file type'
+	assert_equal "$(cat "$claim")" local-byte-edit-before-failed-claim \
+		'failed install claim move changed the edited mapper bytes'
+	assert_equal "$(stat -c '%a' "$claim")" 700 \
+		'failed install claim move changed the edited mapper mode'
+	grep -Fq "recovery retained at $claim" "$sandbox/output" ||
+		fail 'install rollback did not report the exact edited mapper recovery path'
+	grep -Fq 'rollback also failed' "$sandbox/output" ||
+		fail 'ambiguous install claim did not retain transaction recovery'
+	printf 'PASS: failed install claim move retains exact edited bytes, type, mode, and path\n'
 }
 
 test_late_failure_removes_new_runtime_assets()
@@ -2571,7 +2693,45 @@ CLEAN="make KDIR=/lib/modules/${kernelver}/build clean"
 AUTOINSTALL="yes"
 EOF
 	chmod 0644 "$old/dkms.conf"
-	/usr/bin/install -m 0644 "$repo_root/Makefile" "$repo_root/LICENSE" "$old/"
+	/usr/bin/install -m 0644 "$repo_root/LICENSE" "$old/"
+	cat > "$old/Makefile" <<'EOF'
+ifneq ($(KERNELRELEASE),)
+obj-m += raspits_ft5426.o
+raspits_ft5426-y := src/raspits_ft5426.o
+obj-m += panel_rockpi_rpi_touchscreen.o
+panel_rockpi_rpi_touchscreen-y := src/panel_rockpi_rpi_touchscreen.o
+obj-m += rockpi_rk3399_display_compat.o
+rockpi_rk3399_display_compat-y := src/display_compat_main.o src/display_compat_core.o
+else
+KDIR ?= /lib/modules/$(shell uname -r)/build
+PWD := $(shell pwd)
+
+.PHONY: all modules clean test
+
+all: modules
+
+modules:
+	$(MAKE) -C $(KDIR) M=$(PWD) modules
+
+clean:
+	$(MAKE) -C $(KDIR) M=$(PWD) clean
+
+test:
+	cc -std=c11 -Wall -Wextra -Werror -I. tests/test_protocol.c -o /tmp/test_ft5426
+	/tmp/test_ft5426
+	cc -std=c11 -Wall -Wextra -Werror -I. tests/test_display_compat.c src/display_compat_core.c -o /tmp/test_display_compat
+	/tmp/test_display_compat
+	sh tests/test_driver_lifecycle.sh
+	sh tests/test_panel_lifecycle.sh
+	sh tests/test_display_compat_lifecycle.sh
+	sh tests/test_overlay.sh
+	sh tests/test_scripts.sh
+	sh tests/test_dkms.sh
+	sh tests/test_validate.sh
+	sh tests/test_docs.sh
+endif
+EOF
+	chmod 0644 "$old/Makefile"
 	/usr/bin/install -m 0644 "$repo_root/LICENSES/GPL-2.0-only.txt" \
 		"$repo_root/LICENSES/UPSTREAM.md" "$old/LICENSES/"
 	/usr/bin/install -m 0644 "$repo_root/src/ft5426_protocol.h" \
@@ -2700,6 +2860,9 @@ mutate_source_ownership_fixture()
 	extra)
 		printf '%s\n' local-extra > "$source/local-extra"
 		;;
+	byte)
+		printf '#' >> "$source/Makefile"
+		;;
 	modified)
 		printf '%s\n' local-modification >> "$source/src/display_compat_core.c"
 		;;
@@ -2723,6 +2886,10 @@ assert_source_ownership_mutation_survives()
 		grep -Fxq local-extra "$source/local-extra" ||
 			fail 'source ownership check lost an extra file'
 		;;
+	byte)
+		assert_equal "$(tail -c 1 "$source/Makefile")" '#' \
+			'source ownership check changed a one-byte Makefile edit'
+		;;
 	modified)
 		grep -Fxq local-modification "$source/src/display_compat_core.c" ||
 			fail 'source ownership check lost a modified file'
@@ -2740,9 +2907,31 @@ assert_source_ownership_mutation_survives()
 	esac
 }
 
+test_install_accepts_exact_deployed_old_source_baseline()
+{
+	sandbox=$workdir/install-deployed-old-source-baseline
+	make_sandbox "$sandbox"
+	seed_old_release "$sandbox"
+	old=$sandbox/usr-src/rockpi-rpi-touchscreen-0.2.4
+	assert_equal "$(/usr/bin/sha256sum "$old/Makefile" | awk '{print $1}')" \
+		4c7b3fe6fc79f60e58e083011a539b07059378cbdd61395741b1ff7679ed5847 \
+		'deployed 0.2.4 fixture Makefile bytes do not match commit 70648ba'
+	if ! run_install "$sandbox" "$sandbox/validate-pass.sh" > "$sandbox/output" 2>&1; then
+		cat "$sandbox/output" >&2
+		fail 'migration preflight rejected the exact deployed 0.2.4 source baseline'
+	fi
+	assert_file_absent "$old"
+	assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.4)" '' \
+		'exact deployed old source remained registered after migration'
+	assert_equal "$(sandbox_dkms_status "$sandbox" 0.2.5)" \
+		'rockpi-rpi-touchscreen/0.2.5, 6.18.43-current-rockchip64, aarch64: installed' \
+		'exact deployed old source did not migrate to installed 0.2.5'
+	printf 'PASS: migration accepts exact deployed 0.2.4 source baseline\n'
+}
+
 test_install_requires_exact_old_source_ownership()
 {
-	for variant in extra modified mode symlink; do
+	for variant in extra byte mode symlink; do
 		sandbox=$workdir/install-old-source-ownership-$variant
 		make_sandbox "$sandbox"
 		seed_old_release "$sandbox"
@@ -3665,6 +3854,7 @@ test_uninstall_claim_revalidates_modified_runtime_asset
 test_uninstall_pre_snapshot_byte_edit_is_retained
 test_uninstall_pre_snapshot_type_replacements_are_retained
 test_uninstall_rename_then_error_retains_named_claim
+test_uninstall_failed_claim_move_retains_edited_recovery
 test_uninstall_claim_cleanup_failure_reports_nonempty_recovery
 test_uninstall_claim_preserves_mapper_for_raced_autostart
 test_uninstall_autostart_claim_collision_retains_recovery
@@ -3689,7 +3879,9 @@ test_runtime_asset_install_failure_restores_absent_baseline
 test_second_runtime_asset_mutate_then_fail_restores_absent_baseline
 test_runtime_publication_collisions_preserve_exact_raced_objects
 test_runtime_publication_preserves_symlink_and_directory_collisions
+test_publication_identity_is_propagated_from_verified_boundary
 test_install_rollback_retains_post_publication_local_edit
+test_install_failed_claim_move_retains_edited_recovery
 test_late_failure_removes_new_runtime_assets
 test_runtime_asset_checksum_failure_retains_recovery
 test_autostart_rollback_failure_retains_mapper_dependency_and_recovery
@@ -3710,6 +3902,7 @@ test_uninstall_source_failure_restores_transaction
 test_shared_uninstall_assertion_rejects_rollback_failure_output
 test_uninstall_accepts_unregistered_dkms
 test_uninstall_refuses_unowned_unregistered_source
+test_install_accepts_exact_deployed_old_source_baseline
 test_install_requires_exact_old_source_ownership
 test_uninstall_requires_exact_current_source_ownership
 test_install_source_retirement_claim_preserves_race

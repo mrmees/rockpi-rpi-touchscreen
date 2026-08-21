@@ -6,7 +6,7 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 [ "${1:-}" = '--offline' ] || die "usage: $0 --offline"
 require_supported_kernel_release
-require_command awk cat chmod cp dirname dtc fdtoverlay grep head ln make mkdir modinfo mktemp mv rm sed sha256sum sort tail tr
+require_command awk cat chmod cp dirname dtc fdtoverlay grep head ln make mkdir modinfo mktemp mv rm sed sha256sum sort stat tail tr
 
 compatible_file=${COMPATIBLE_FILE:-/proc/device-tree/compatible}
 [ -r "$compatible_file" ] || die "cannot read board compatible string: $compatible_file"
@@ -263,8 +263,12 @@ repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 touch_mapper=$repo_root/scripts/map-touchscreen.sh
 touch_autostart=$repo_root/assets/rockpi-rpi-touchscreen-touch-map.desktop
 
-[ -f "$touch_mapper" ] || die 'touch mapper source is missing'
-[ -x "$touch_mapper" ] || die 'touch mapper source is not executable'
+[ -e "$touch_mapper" ] || [ -L "$touch_mapper" ] || die 'touch mapper source is missing'
+[ -f "$touch_mapper" ] && [ ! -L "$touch_mapper" ] ||
+	die 'touch mapper source must be a non-symlink regular file'
+touch_mapper_mode=$(stat -c '%a' -- "$touch_mapper") ||
+	die 'cannot determine touch mapper source mode'
+[ "$touch_mapper_mode" = 755 ] || die 'touch mapper source mode is not exactly 755'
 if ! sh -n "$touch_mapper"; then
 	die 'touch mapper source has invalid shell syntax'
 fi
