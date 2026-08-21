@@ -26,15 +26,19 @@ is fully seated and aligned.
 
 The device-tree overlay supplies the panel controller at I2C address `0x45`
 and the touch controller at `0x38`; no separate touch interrupt wire is used.
-Install DKMS `0.2.4` before the authorized production boot: it supplies
+Install DKMS `0.2.5` before the separately authorized production boot: it supplies exactly three modules in provider, panel, then touch order:
 `rockpi_rk3399_display_compat`, `panel_rockpi_rpi_touchscreen`, and
 `raspits_ft5426`. The overlay keeps DSI0 disabled as a DRM output while the
-compatibility provider uses it only as the DSI1 PLL supplier.
+compatibility provider uses it only as the DSI1 PLL supplier. Its reciprocal
+device-tree route filter constrains DSI to VOPL by graph identity while leaving
+HDMI available on VOPB; it does not choose a desktop layout.
 
-Do not unplug the temporary diagnostic setup, change its X transform, or reboot
+Do not change the current display layout, reboot, shut down, or power-cycle
 without fresh authorization. On the later production boot, use the README's
-identity-matrix touch check, persistent crash-log checks, and HDMI hot-plug
-sequence. Keep an SSH or serial recovery path available; the exact scoped SSH
-and offline rollback procedures are in [the recovery guide](recovery.md).
+physical X11 touch-to-DSI check, persistent crash-log checks, HDMI hot-plug, and
+normal desktop mirror/extend and placement checks. A separately authorized
+shutdown/cold-start must repeat acceptance later. Keep an SSH or serial
+recovery path available; the exact scoped SSH and offline rollback procedures
+are in [the recovery guide](recovery.md).
 
 After wiring, follow the [first-boot checks in the README](../README.md#first-authorized-production-boot-hardware-checkpoint).

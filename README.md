@@ -5,11 +5,13 @@ Display on a Radxa Rock Pi 4B+ running Armbian
 `6.18.43-current-rockchip64`. It installs a board-specific device-tree overlay
 and DKMS display stack while retaining HDMI as a recovery display.
 
-Touch Display 2 is not supported. The current live diagnostic session has
-user-confirmed correct RGB desktop video and physically correct touch, but that
-session still uses temporary helpers and a temporary 180-degree X transform.
-The production cold-start and reboot acceptance remains pending for DKMS 0.2.4;
-do not describe this release as production-hardware-validated yet.
+Touch Display 2 is not supported. Earlier 0.2.4 hardware work produced
+user-confirmed correct RGB desktop video and physically correct touch and
+identified the safe HDMI-on-VOPB, DSI-on-VOPL pairing. DKMS 0.2.5 packages that
+route constraint and layout-neutral touch mapping, but its hardware acceptance
+is still pending. Do not describe 0.2.5 as production-hardware-validated until
+a separately authorized reboot, HDMI hot-plug and layout checks, physical touch
+and log checks, and a later separately authorized shutdown/cold-start pass.
 
 ## What is installed
 
@@ -20,8 +22,9 @@ do not describe this release as production-hardware-validated yet.
 - A DKMS package named `rockpi-rpi-touchscreen` and a user overlay named
   `rockpi-4b-plus-rpi-touchscreen`.
 
-DKMS `0.2.4` installs all three production modules:
+DKMS `0.2.5` installs exactly three production modules in provider, panel, then touch order:
 `rockpi_rk3399_display_compat`, `panel_rockpi_rpi_touchscreen`, and `raspits_ft5426`.
+The exact migration baseline is DKMS `0.2.4` with the same three modules in that order.
 The provider owns the DSI0 PLL supplier and reversible VOP correction; the panel depends on that provider; the touch module owns touch input.
 More specifically, `rockpi_rk3399_display_compat` owns the disabled-DSI0 PLL
 supplier and reversible VOP correction; `panel_rockpi_rpi_touchscreen` owns the
@@ -38,11 +41,13 @@ ready. The touch probe defers on `-ENXIO` while panel power is unavailable and
 retries through the driver core instead of permanently losing touch input.
 
 DSI0 is disabled in the DRM graph but supplies the DSI1 PLL through the compatibility provider.
-It is not registered as a DRM output. The overlay prefers the little VOP for
-DSI1, but the provider reads the live GRF DSI1 route only after the CRTC is
-active, so it operates on exactly the GRF-selected active VOP. It applies a
-reversible `data01_swap` and blue/green plus red/blue correction, then restores
-only those fields during panel disable. The provider never uses `/dev/mem` and never reads or writes the inactive VOP.
+It is not registered as a DRM output. An unsafe reversed assignment was observed with a VOP timeout and hard lock; the hard-lock mechanism itself is not proven.
+DSI is constrained to VOPL by device-tree graph identity. The overlay
+terminates the unsupported DSI1/VOPB graph reciprocally at a disabled
+project-owned route filter, so the DSI encoder advertises only VOPL without
+depending on CRTC numbering. HDMI remains free to use VOPB. The provider reads
+the live GRF DSI1 route only after the CRTC is active, applies a reversible `data01_swap` and blue/green plus red/blue correction to that selected VOP, and
+restores only those fields during panel disable. The provider never uses `/dev/mem` and never reads or writes the inactive VOP.
 HDMI remains enabled, and the project-specific panel compatible prevents the
 generic Raspberry Pi panel module from owning this RK3399-only path.
 
@@ -84,13 +89,55 @@ sudo sh scripts/install.sh
 It validates the modules and merged device tree before registering DKMS,
 installs the DTBO in `/boot/overlay-user/`, backs up `/boot/armbianEnv.txt`,
 and appends one overlay token without removing unrelated user overlays.
-Release `0.2.4` treats `/usr/src/rockpi-rpi-touchscreen-0.2.4` as immutable: a
+Release `0.2.5` treats `/usr/src/rockpi-rpi-touchscreen-0.2.5` as immutable: a
 same-version content mismatch fails instead of silently replacing registered
 source. The installer checksum-compares the source, all three DKMS-built and
-installed modules, and DTBO. A `0.2.3` installation owned by this project is
-removed only after `0.2.4`, all three modules, the source, boot backup, single
-overlay token, and DTBO all verify. A failed migration retains or restores the
-old release and reports any recovery paths. The installer does not reboot or shut down automatically, does not unload the live diagnostic helpers, and never changes `/etc/X11/xorg.conf.d/20-dfrobot-display.conf`.
+installed modules, DTBO, and runtime assets. It accepts only the faithful exact
+three-module 0.2.4 baseline and retires that baseline only after 0.2.5, all
+three modules, the source, boot backup, single overlay token, DTBO, mapper, and
+autostart entry verify. A failed migration retains or restores the exact prior
+state and reports any recovery paths.
+
+Release 0.2.5 owns the executable X11 mapper at
+`/usr/libexec/rockpi-rpi-touchscreen-map-touch` and the system XDG autostart
+entry at
+`/etc/xdg/autostart/rockpi-rpi-touchscreen-touch-map.desktop`. Pre-existing
+files at either path must match the packaged bytes and mode or installation
+fails closed; unrelated files are never overwritten. The installer does not reboot or shut down automatically. It does not unload live diagnostic helpers
+and never changes `/etc/X11/xorg.conf.d/20-dfrobot-display.conf`.
+
+## Display layout and X11 touch mapping
+
+Mirror or extend mode, position, primary display, and output modes remain user-configurable through normal desktop display settings.
+The project installs no display-layout preset or layout command. It neither
+forces a primary output nor saves an `xrandr` arrangement.
+
+In an X11 session, the XDG entry automatically maps X11 touch to the active DSI output without changing the display layout. It runs the mapper in watch mode,
+inherits the session's `DISPLAY` and `XAUTHORITY`, and remaps only after relevant
+RandR layout events. Run one mapping attempt manually inside the graphical X11
+session with:
+
+```sh
+/usr/libexec/rockpi-rpi-touchscreen-map-touch --once
+```
+
+The mapper requires exactly one input named `Raspberry Pi 7-inch Touchscreen`
+and maps it to active output `DSI-1`. An inactive DSI output is a no-op; an
+ambiguous input-device name is an error. It changes only XInput's output
+mapping and never changes modes, position, primary state, CRTC assignment, or
+DPMS. Wayland compositor mapping is out of scope.
+
+To disable automatic mapping for one user, copy the system entry to the same
+name at `~/.config/autostart/rockpi-rpi-touchscreen-touch-map.desktop` and add
+the XDG override `Hidden=true`:
+
+```sh
+mkdir -p "$HOME/.config/autostart"
+cp /etc/xdg/autostart/rockpi-rpi-touchscreen-touch-map.desktop \
+  "$HOME/.config/autostart/rockpi-rpi-touchscreen-touch-map.desktop"
+printf '\nHidden=true\n' >> \
+  "$HOME/.config/autostart/rockpi-rpi-touchscreen-touch-map.desktop"
+```
 
 Preview removal with:
 
@@ -110,10 +157,11 @@ machine.
 
 ## First authorized production boot: hardware checkpoint
 
-Do not alter the currently live helpers or temporary X transform. After source
-review, installation, and fresh authorization for a reboot, the new overlay and
-all three production modules first bind on that new boot. Do not claim hardware
-support from offline validation or the earlier temporary-helper evidence alone.
+Task 5 performs offline validation only; it does not install, reboot, change the
+live display layout, or touch boot state. After separate installation and fresh
+authorization for a reboot, the 0.2.5 overlay and all three production modules
+first bind on that new boot. Do not claim hardware support from offline
+validation or earlier 0.2.4 evidence alone.
 
 Start the authorized boot with the Raspberry Pi display connected and HDMI
 disconnected. Check the current boot's modules, panel and touch probes, a DSI
@@ -147,24 +195,31 @@ printf '%s\n' 128 | sudo tee "$backlight/brightness"
 ```
 
 The overlay sets both `touchscreen-inverted-x` and `touchscreen-inverted-y`, so
-the production boot must use kernel touch orientation and no longer apply the
-temporary userspace 180-degree correction. Do not change the current live X
-session. On the production boot, verify the X Coordinate Transformation Matrix must be identity:
+the production boot uses kernel touch orientation and must not apply a fixed
+userspace 180-degree correction. The 0.2.5 mapper may set a non-identity X
+Coordinate Transformation Matrix because `xinput map-to-output` derives
+scaling and translation from the current desktop geometry. Verify that touch
+targets DSI-1 and is physically oriented correctly; do not require a fixed
+matrix:
 
 ```sh
 sudo -u lightdm env DISPLAY=:0 XAUTHORITY=/var/lib/lightdm/.Xauthority \
   xinput list-props 'Raspberry Pi 7-inch Touchscreen'
 ```
 
-The matrix must be `1 0 0 0 1 0 0 0 1`; a 180-degree matrix would invert the
-already inverted axes a second time. Confirm physically correct touch and RGB
-panels before proceeding.
+Confirm physically correct touch and RGB panels before proceeding. In an X11
+session, run `/usr/libexec/rockpi-rpi-touchscreen-map-touch --once` and confirm
+the same result before and after the layout changes below.
 
 Then follow this HDMI hot-plug sequence: keep HDMI disconnected until DSI-1 is
 800x480 with correct RGB and physical touch; attach HDMI; run `xrandr --current`
-again; confirm both connectors retain independent modes, correct RGB, and usable
-touch; finally recheck the protected HDMI checksum. HDMI hot-plug sequence
-success is required before describing dual-display support as accepted.
+again; confirm DSI advertises only its VOPL-backed CRTC and both connectors
+retain independent modes and correct RGB. Use normal desktop display settings
+to exercise mirror and extend, relative positions, primary selection, and
+supported modes without running a project layout command. After every change,
+confirm touch remains mapped to DSI-1; then recheck the protected HDMI
+checksum. HDMI hot-plug and layout success are required before describing
+dual-display support as accepted.
 
 ```sh
 sudo -u lightdm env DISPLAY=:0 XAUTHORITY=/var/lib/lightdm/.Xauthority xrandr --current
@@ -183,10 +238,10 @@ sudo tail -n 200 /var/log.hdd/kernel-live.log
 sudo tail -n 40 /var/log.hdd/crash-watch.log
 ```
 
-Production cold-start and reboot acceptance remains pending until video,
-brightness, identity-matrix touch, HDMI hot-plug, persistent logs, and an
-explicitly authorized shutdown/cold-start have all passed. This project never
-reboots or shuts down automatically.
+The production cold-start and reboot acceptance remains pending until video,
+brightness, physical DSI touch mapping, HDMI hot-plug and user-selected layouts,
+persistent logs, and an explicitly authorized later shutdown/cold-start have
+all passed. This project never reboots or shuts down automatically.
 No automatic reboot or shutdown occurs; obtain fresh authorization before any power action.
 
 ## Limitations

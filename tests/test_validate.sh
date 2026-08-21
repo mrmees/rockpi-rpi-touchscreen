@@ -307,6 +307,97 @@ run_validate_mutation()
 		REPO_ROOT="$repo_root" sh "$repo_root/scripts/validate.sh" --offline
 }
 
+make_packaged_asset_sandbox()
+{
+	sandbox=$1
+	make_validate_sandbox "$sandbox"
+	mkdir -p "$sandbox/repo/scripts" "$sandbox/repo/assets" "$sandbox/repo/overlays"
+	cp "$repo_root/scripts/validate.sh" "$repo_root/scripts/common.sh" \
+		"$repo_root/scripts/dkms-make.sh" "$repo_root/scripts/map-touchscreen.sh" \
+		"$sandbox/repo/scripts/"
+	cp "$repo_root/assets/rockpi-rpi-touchscreen-touch-map.desktop" "$sandbox/repo/assets/"
+	cp "$repo_root/overlays/rockpi-4b-plus-rpi-touchscreen.dts" "$sandbox/repo/overlays/"
+}
+
+run_packaged_asset_validate()
+{
+	sandbox=$1
+	BOOT_DIR="$sandbox/boot" MODULES_DIR="$sandbox/modules" KERNEL_RELEASE=test-kernel \
+		COMPATIBLE_FILE="$sandbox/compatible" BUILD_DIR="$sandbox/build" \
+		MAKE_LOG="$sandbox/make.log" MAKE_CC_LOG="$sandbox/make-cc.log" \
+		PATH="$sandbox/bin:$PATH" REPO_ROOT="$sandbox/repo" \
+		sh "$sandbox/repo/scripts/validate.sh" --offline
+}
+
+test_validator_rejects_missing_touch_mapper()
+{
+	sandbox=$workdir/missing-touch-mapper
+	make_packaged_asset_sandbox "$sandbox"
+	rm "$sandbox/repo/scripts/map-touchscreen.sh"
+	if run_packaged_asset_validate "$sandbox" > "$sandbox/output" 2>&1; then
+		fail 'validator accepted a missing touch mapper'
+	fi
+	grep -Fq 'touch mapper source is missing' "$sandbox/output" ||
+		fail 'validator did not identify the missing touch mapper'
+	printf 'PASS: validator rejects a missing touch mapper\n'
+}
+
+test_validator_rejects_non_executable_touch_mapper()
+{
+	sandbox=$workdir/non-executable-touch-mapper
+	make_packaged_asset_sandbox "$sandbox"
+	chmod 0644 "$sandbox/repo/scripts/map-touchscreen.sh"
+	if run_packaged_asset_validate "$sandbox" > "$sandbox/output" 2>&1; then
+		fail 'validator accepted a non-executable touch mapper'
+	fi
+	grep -Fq 'touch mapper source is not executable' "$sandbox/output" ||
+		fail 'validator did not identify the non-executable touch mapper'
+	printf 'PASS: validator rejects a non-executable touch mapper\n'
+}
+
+test_validator_rejects_malformed_desktop_exec()
+{
+	sandbox=$workdir/malformed-desktop-exec
+	make_packaged_asset_sandbox "$sandbox"
+	sed -i 's/ --watch$/ --once/' \
+		"$sandbox/repo/assets/rockpi-rpi-touchscreen-touch-map.desktop"
+	if run_packaged_asset_validate "$sandbox" > "$sandbox/output" 2>&1; then
+		fail 'validator accepted a malformed touch autostart Exec'
+	fi
+	grep -Fq 'touch autostart Exec is not exact' "$sandbox/output" ||
+		fail 'validator did not identify the malformed touch autostart Exec'
+	printf 'PASS: validator rejects a malformed touch autostart Exec\n'
+}
+
+test_validator_rejects_layout_mutating_touch_mapper()
+{
+	sandbox=$workdir/layout-mutating-touch-mapper
+	make_packaged_asset_sandbox "$sandbox"
+	printf '%s\n' 'xrandr --output DSI-1 --primary' >> \
+		"$sandbox/repo/scripts/map-touchscreen.sh"
+	if run_packaged_asset_validate "$sandbox" > "$sandbox/output" 2>&1; then
+		fail 'validator accepted a layout-mutating touch mapper'
+	fi
+	grep -Fq 'touch mapper contains a forbidden layout token' "$sandbox/output" ||
+		fail 'validator did not identify the layout-mutating touch mapper'
+	printf 'PASS: validator rejects a layout-mutating touch mapper\n'
+}
+
+test_validator_rejects_non_current_path_xrandr()
+{
+	sandbox=$workdir/non-current-path-xrandr
+	make_packaged_asset_sandbox "$sandbox"
+	printf '%s\n' '/usr/bin/xrandr --query' >> \
+		"$sandbox/repo/scripts/map-touchscreen.sh"
+	if run_packaged_asset_validate "$sandbox" > "$sandbox/output" 2>&1; then
+		fail 'validator accepted a path-qualified non-current xrandr invocation'
+	fi
+	grep -Fq 'touch mapper contains an xrandr invocation other than xrandr --current' \
+		"$sandbox/output" ||
+		fail 'validator did not identify the path-qualified non-current xrandr invocation'
+	printf 'PASS: validator rejects a path-qualified non-current xrandr invocation\n'
+}
+
 test_old_upstream_panel_compatible_fails_validation()
 {
 	sandbox=$workdir/upstream-panel-compatible
@@ -607,6 +698,11 @@ EOF
 }
 
 test_module_warning_fails_validation
+test_validator_rejects_missing_touch_mapper
+test_validator_rejects_non_executable_touch_mapper
+test_validator_rejects_malformed_desktop_exec
+test_validator_rejects_layout_mutating_touch_mapper
+test_validator_rejects_non_current_path_xrandr
 test_old_upstream_panel_compatible_fails_validation
 test_validator_checks_distinct_module_aliases
 test_validator_requires_display_compat_provider_module

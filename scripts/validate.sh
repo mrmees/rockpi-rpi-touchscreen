@@ -210,6 +210,49 @@ require_distinct()
 }
 
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+touch_mapper=$repo_root/scripts/map-touchscreen.sh
+touch_autostart=$repo_root/assets/rockpi-rpi-touchscreen-touch-map.desktop
+
+[ -f "$touch_mapper" ] || die 'touch mapper source is missing'
+[ -x "$touch_mapper" ] || die 'touch mapper source is not executable'
+if ! sh -n "$touch_mapper"; then
+	die 'touch mapper source has invalid shell syntax'
+fi
+[ -f "$touch_autostart" ] || die 'touch autostart source is missing'
+
+expected_exec='Exec=/usr/libexec/rockpi-rpi-touchscreen-map-touch --watch'
+exec_count=$(grep -c '^Exec=' "$touch_autostart" || true)
+exact_exec_count=$(grep -Fxc "$expected_exec" "$touch_autostart" || true)
+[ "$exec_count" -eq 1 ] && [ "$exact_exec_count" -eq 1 ] ||
+	die 'touch autostart Exec is not exact'
+
+expected_try_exec='TryExec=/usr/libexec/rockpi-rpi-touchscreen-map-touch'
+try_exec_count=$(grep -c '^TryExec=' "$touch_autostart" || true)
+exact_try_exec_count=$(grep -Fxc "$expected_try_exec" "$touch_autostart" || true)
+[ "$try_exec_count" -eq 1 ] && [ "$exact_try_exec_count" -eq 1 ] ||
+	die 'touch autostart TryExec is not exact'
+
+for forbidden_token in --output --mode --pos --primary --off DISPLAY=: XAUTHORITY=; do
+	if grep -Fq -- "$forbidden_token" "$touch_mapper"; then
+		die "touch mapper contains a forbidden layout token: $forbidden_token"
+	fi
+done
+if ! awk '
+	{
+		for (field = 1; field <= NF; field++) {
+			command_name = $field
+			sub(/^.*\//, "", command_name)
+			if (command_name == "xrandr" &&
+			    (field == 1 || $(field - 1) != "require_command") &&
+			    $(field + 1) != "--current")
+				exit 1
+		}
+	}
+' "$touch_mapper"; then
+	die 'touch mapper contains an xrandr invocation other than xrandr --current'
+fi
+printf 'PASS: packaged touch mapper and autostart boundaries\n'
+
 run_warning_free module-clean make -C "$repo_root" KDIR="$KERNEL_BUILD" clean
 run_warning_free module-build "$script_dir/dkms-make.sh" "$KERNEL_RELEASE" \
 	make -C "$repo_root" KDIR="$KERNEL_BUILD" W=1 modules
